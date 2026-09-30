@@ -5,11 +5,15 @@ key-down was actually forwarded."""
 
 import time
 import unittest
+import os
+import sys
 
-import protocol
+sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+
+from core import protocol
 import sender
 from fakes import FakeClipboard, FakeDesktop
-from return_edge import Rect
+from core.return_edge import Rect
 
 MONITORS = [Rect(0, 0, 1920, 1080)]
 

@@ -4,9 +4,13 @@ when a click counts as a double. No Quartz — everything here is arithmetic and
 table lookup, which is exactly the part that can be wrong without crashing."""
 
 import unittest
+import os
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 import input_injector_mac as injector
-from return_edge import Rect
+from core.return_edge import Rect
 
 
 class KeyPlanTests(unittest.TestCase):

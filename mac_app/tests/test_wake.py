@@ -2,6 +2,10 @@ import logging
 import threading
 import types
 import unittest
+import os
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 import config
 import wake
@@ -159,7 +163,7 @@ class WakingControllerTests(unittest.TestCase):
 
     def test_successful_connection_learns_and_reports_a_new_address(self):
         from test_bridge import FakeSocket, seed_receiver_reply
-        import protocol
+        from core import protocol
 
         sock = FakeSocket()
         seed_receiver_reply(sock, protocol.welcome_msg())
@@ -197,7 +201,7 @@ class ComingHomeThroughTheAppsControllerTests(unittest.TestCase):
 class FollowingAMovedPcThroughTheAppsControllerTests(unittest.TestCase):
     def test_the_app_controller_takes_the_new_address(self):
         from test_bridge import FakeSocket, seed_receiver_reply
-        import protocol
+        from core import protocol
 
         sock = FakeSocket()
         seed_receiver_reply(sock, protocol.welcome_msg())

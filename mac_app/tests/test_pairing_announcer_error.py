@@ -1,8 +1,12 @@
 import logging
 import socket
 import unittest
+import os
+import sys
 
-from pairing import Announcer, Discovery
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+
+from core.pairing import Announcer, Discovery
 
 
 def quiet_logger():

@@ -5,11 +5,16 @@
 #define VersionFile FileOpen(AddBackslash(SourcePath) + "..\VERSION")
 #define AppVersion Trim(FileRead(VersionFile))
 #expr FileClose(VersionFile)
+; A beta such as 1.5.0-beta.1 names itself in the shown version, but the file version resource
+; takes four integers, so it carries the release number.
+#define NumericVersion Copy(AppVersion, 1, Pos("-", AppVersion + "-") - 1)
 
 [Setup]
 AppId={{9A4E2B1F-4309-4E65-B86D-C7B9F4F64D01}
 AppName=Beamer
 AppVersion={#AppVersion}
+VersionInfoVersion={#NumericVersion}.0
+VersionInfoProductTextVersion={#AppVersion}
 AppPublisher=Kalkman Code
 DefaultDirName={localappdata}\Beamer
 DisableProgramGroupPage=yes

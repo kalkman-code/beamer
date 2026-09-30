@@ -23,9 +23,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import config as config_module
 import crossing
-import return_edge
+from core import return_edge
 import desktop_mac
-import effects
+from core import effects
 import effects_overlay
 import gestures
 import ignored_titles
@@ -41,9 +41,10 @@ from key_codes import KEY_NAME_TO_CODE
 import link_state
 import login_item
 import pages
-import updates
-import protocol
-import pairing
+from core import updates
+from core import protocol
+from core import pairing
+from core import settings_sync
 from settings_store import (
     SettingsError,
     SettingsStore,
@@ -54,6 +55,7 @@ import theme
 from wake import WakingController, lookup_mac
 import widgets
 from windows_input import WindowsInput
+from core.receiver import ServerState
 
 
 LOG_DIRECTORY = Path.home() / "Library" / "Logs" / "Beamer"
@@ -1029,6 +1031,9 @@ class ControlWindow(AppKit.NSObject):
         widgets.add(pane, self._commit())
 
         self.page_titles = []
+        # Same on both machines: each shared page's scope line, and the notes on this Mac's own rows.
+        self.scope_labels = {}
+        self.own_notes = []
         self.page_paddings = []
         self.pages = {}
         builders = {
@@ -1040,7 +1045,7 @@ class ControlWindow(AppKit.NSObject):
             "permissions": self._permissions_page,
         }
         for key, name, _symbol, purpose in pages.PAGES:
-            scroll, body = self._page(name, purpose, pages.SCOPE.get(key))
+            scroll, body = self._page(name, purpose, pages.SCOPE.get(key), key)
             host.addSubview_(scroll)
             widgets.pin(scroll, host)
             scroll.setHidden_(True)
@@ -1138,12 +1143,8 @@ class ControlWindow(AppKit.NSObject):
         self.token_field.setStringValue_(str(raw["auth_token"]))
         self.token_plain.setStringValue_(str(raw["auth_token"]))
         self._say_pairing("Choose a PC, then type the code it shows.")
-        self.key_recorder.set_value(raw["trigger_key"])
         self.ignored_entries = list(raw["ignored_inputs"])
         self._render_ignored()
-        self.style_select.value = raw["trigger_style"]
-        self.double_tap_ruler.value = raw["double_tap_ms"]
-        self.double_tap_numeral.set(str(raw["double_tap_ms"]))
         self.pointer_ruler.value = round(raw["pointer_speed"] * 100)
         self.scroll_ruler.value = round(raw["scroll_speed"] * 100)
         self.pointer_numeral.set(str(self.pointer_ruler.value))
@@ -1154,21 +1155,33 @@ class ControlWindow(AppKit.NSObject):
         self.updates_switch.value = raw["check_updates"]
         self.modifier_select.value = raw["key_map"] if isinstance(raw["key_map"], str) else "custom"
         crossing_raw = raw["crossing"]
+        self.edge_select.value = crossing_raw["edge"]
+        self.haptics_box.value = crossing_raw["haptics"]
+        self.glow_box.value = crossing_raw["glow"]
+        self.notch_style_select.value = crossing_raw["notch_style"]
+        self.notch_after_select.value = crossing_raw["notch_after_ms"]
+        self.tick_steps_select.value = crossing_raw["haptic_steps"]
+        self.hold_box.value = crossing_raw["hold_full_screen"]
+        self._load_shared(raw)
+
+    @objc.python_method
+    def _load_shared(self, raw):
+        """The controls Same on both machines keeps in step, and nothing else: settings arriving
+        from the PC must not reset a half-typed address or the pairing card."""
+        self.key_recorder.set_value(raw["trigger_key"])
+        self.style_select.value = raw["trigger_style"]
+        self.double_tap_ruler.value = raw["double_tap_ms"]
+        self.double_tap_numeral.set(str(raw["double_tap_ms"]))
+        crossing_raw = raw["crossing"]
         for name, tile in self.method_boxes.items():
             tile.value = name in crossing_raw["methods"]
         for name, tile in self.part_boxes.items():
             tile.value = name in crossing_raw["edge_parts"]
-        self.edge_select.value = crossing_raw["edge"]
         self.corner_select.value = crossing_raw["corner"]
         self.resistance_ruler.value = crossing_raw["resistance_px"]
-        self.haptics_box.value = crossing_raw["haptics"]
-        self.glow_box.value = crossing_raw["glow"]
         self.landing_box.value = crossing_raw["shortcut_arrival"]
         self.switch_style_select.value = crossing_raw["shortcut_arrival_style"]
         self.dragging_box.value = crossing_raw["block_while_dragging"]
-        self.notch_style_select.value = crossing_raw["notch_style"]
-        self.notch_after_select.value = crossing_raw["notch_after_ms"]
-        self.tick_steps_select.value = crossing_raw["haptic_steps"]
         self.glow_style_select.value = crossing_raw["glow_style"]
         self.length_select.value = crossing_raw.get("effect_length", "normal")
         self.glow_colour_select.value = crossing_raw["glow_colour"]
@@ -1379,6 +1392,13 @@ class ControlWindow(AppKit.NSObject):
         self._changed()
 
     @objc.python_method
+    def _hold_changed(self, value):
+        # The controller reads this at every crossing, so it must not wait out the debounce; the
+        # controller's config is the one the pending save builds on.
+        self.controller.cfg.crossing["hold_full_screen"] = value
+        self._changed()
+
+    @objc.python_method
     def _changed(self, *_ignored):
         """Every control outside the Connection page calls this. The settings are written and
         applied once the control has been still for a moment, so a ruler being dragged writes once
@@ -1410,7 +1430,7 @@ class ControlWindow(AppKit.NSObject):
         return widgets.hug(figure.view), figure
 
     @objc.python_method
-    def _page(self, title, purpose, scope=None):
+    def _page(self, title, purpose, scope=None, key=None):
         """One page: a vertical scroller holding the title, the sentence saying what the page is
         for, `scope` saying whose settings they are where that needs saying, then the modules the
         builder adds to the returned body. Returns (scroll, body)."""
@@ -1429,9 +1449,17 @@ class ControlWindow(AppKit.NSObject):
         padding = [
             body.topAnchor().constraintEqualToAnchor_constant_(page.topAnchor(), top),
             body.leadingAnchor().constraintEqualToAnchor_constant_(page.leadingAnchor(), leading),
-            page.bottomAnchor().constraintEqualToAnchor_constant_(body.bottomAnchor(), bottom),
+            page.bottomAnchor().constraintGreaterThanOrEqualToAnchor_constant_(body.bottomAnchor(), bottom),
             page.trailingAnchor().constraintEqualToAnchor_constant_(body.trailingAnchor(), trailing),
         ]
+        # The page ends where its body does, unless motion props it up with the floor while a
+        # module folds away, so the scroll offset eases down rather than snapping. Only the
+        # page is pulled short; pulling the body would stretch a module into the held space.
+        page.floor = page.heightAnchor().constraintGreaterThanOrEqualToConstant_(0.0)
+        page.floor.setActive_(True)
+        shrink = page.heightAnchor().constraintEqualToConstant_(0.0)
+        shrink.setPriority_(1)
+        shrink.setActive_(True)
         AppKit.NSLayoutConstraint.activateConstraints_(padding)
         self.page_paddings.append(padding)
         scroll.setDocumentView_(page)
@@ -1454,6 +1482,7 @@ class ControlWindow(AppKit.NSObject):
             scope_label = widgets.Label(scope, theme.TYPE["note"], ink="ink_3", wrap=True)
             scope_label.view.widthAnchor().constraintLessThanOrEqualToConstant_(theme.READING_WIDTH).setActive_(True)
             widgets.add(header, scope_label.view)
+            self.scope_labels[key] = scope_label
         widgets.add(body, header)
         body.setCustomSpacing_afterView_(32, header)
         return scroll, body
@@ -1466,6 +1495,7 @@ class ControlWindow(AppKit.NSObject):
         widgets.add(body, self._status_module().view)
         widgets.add(body, self._keyboard_module().view)
         widgets.add(body, self._directions_module().view)
+        widgets.add(body, self._same_module().view)
         widgets.add(body, self._paired_module().view)
         widgets.add(body, self._login_module().view)
         widgets.add(body, self._updates_module().view)
@@ -1499,6 +1529,106 @@ class ControlWindow(AppKit.NSObject):
         for switch, value in ((self.send_switch, cfg.send_to_windows), (self.receive_switch, cfg.allow_windows_to_drive)):
             if switch.value != bool(value):
                 switch.value = value
+
+    @objc.python_method
+    def _same_module(self):
+        module = widgets.Module(spacing=10)
+        module.add(widgets.eyebrow("Settings"))
+        self.same_switch = widgets.Switch("Same on both machines", on_change=self._set_same)
+        module.add(self.same_switch.view)
+        self.same_note = widgets.note()
+        module.add(self.same_note.view)
+        return module
+
+    @objc.python_method
+    def _own_note(self, text=pages.OWN_ROW):
+        """A note on a row this Mac keeps to itself, shown only while the pages are kept in step."""
+        note = widgets.note(text)
+        note.view.setHidden_(True)
+        self.own_notes.append(note)
+        return note.view
+
+    @objc.python_method
+    def _peer_too_old(self):
+        """Whether a link is up to a PC whose Beamer does not keep settings in step."""
+        links = [(self.controller.connected, getattr(self.controller, "peer_settings", None))]
+        if self.windows_input is not None:
+            links.append((self.windows_input.state == ServerState.CONNECTED, self.windows_input.server.peer_settings))
+        return any(up and known is False for up, known in links)
+
+    @objc.python_method
+    def _show_same(self):
+        cfg = self.controller.cfg
+        old = self._peer_too_old()
+        on = cfg.same_on_both and not old
+        if self.same_switch.value != on:
+            self.same_switch.value = on
+        self.same_switch.set_enabled(not old)
+        self.same_note.set(settings_sync.switch_note("PC", cfg.same_on_both, old), ink="amber" if old else "ink_2")
+        for key, label in self.scope_labels.items():
+            text = settings_sync.scope(key, "PC", on, pages.SCOPE.get(key))
+            if label.text != text:
+                label.set(text)
+        for note in self.own_notes:
+            if note.view.isHidden() == on:
+                motion.set_hidden(note.view, not on)
+
+    @objc.python_method
+    def _set_same(self, on):
+        """Turning it on carries this Mac's Crossing and Design across; off, each end keeps what it
+        has. Either way the PC follows, now if a link is up, else when one next comes up."""
+        raw = config_to_raw(self.controller.cfg)
+        raw["same_on_both"] = bool(on)
+        raw["same_set_at"] = settings_sync.next_stamp(raw["same_set_at"], time.time())
+        try:
+            cfg = self.settings_store.save(raw)
+        except SettingsError as exc:
+            self.logger.warning("Same on both machines not saved: %s", exc)
+            return
+        self.controller.apply_settings(cfg)
+        self._send_same()
+        self._show_same()
+
+    @objc.python_method
+    def same_state(self):
+        """This Mac's settings message, for a change here and for announcing on a new link. Called
+        from the links' threads as well, so it reads the settings once."""
+        cfg = self.controller.cfg
+        return settings_sync.message_data(cfg.same_on_both, cfg.same_set_at,
+                                          settings_sync.mac_values(config_to_raw(cfg)))
+
+    @objc.python_method
+    def _send_same(self):
+        data = self.same_state()
+        self.controller.send_settings(data)
+        if self.windows_input is not None:
+            self.windows_input.server.send_settings(data)
+
+    @objc.python_method
+    def apply_same(self, data):
+        """The PC's settings message, over either link, on the main thread. Its state stands only
+        when it is newer than this Mac's; then its values replace the shared ones here."""
+        cfg = self.controller.cfg
+        taken = settings_sync.arrived(data, cfg.same_set_at, KEY_NAME_TO_CODE)
+        if taken is None:
+            return
+        on, set_at, values = taken
+        raw = config_to_raw(cfg)
+        raw["same_on_both"] = on
+        raw["same_set_at"] = set_at
+        if on:
+            raw = settings_sync.apply_mac(raw, values)
+        try:
+            cfg = self.settings_store.save(raw)
+        except (SettingsError, TypeError, ValueError):
+            self.logger.exception("could not save the settings the PC sent")
+            return
+        self.controller.apply_settings(cfg)
+        if self.previews is not None:
+            self.previews.repaint()
+        self.logger.info("settings from the PC applied (same on both machines %s)", "on" if on else "off")
+        self._load_shared(config_to_raw(cfg))
+        self.refresh()
 
     @objc.python_method
     def _login_module(self):
@@ -1610,6 +1740,7 @@ class ControlWindow(AppKit.NSObject):
         above are what the page is for."""
         module = widgets.Module()
         module.add(widgets.eyebrow("Appearance"))
+        module.add(self._own_note())
         self.appearance_select = widgets.Segmented(
             [("system", "System"), ("light", "Light"), ("dark", "Dark")], on_change=self._appearance_chosen
         )
@@ -1731,6 +1862,13 @@ class ControlWindow(AppKit.NSObject):
         widgets.add(self.pause_row, self.crossing_state.view)
         module.add(self.pause_row)
         module.body.setCustomSpacing_afterView_(14, self.toggle_button.view)
+        self.hold_box = widgets.Switch("Hold the edges while an app is full screen", on_change=self._hold_changed)
+        module.add(self.hold_box.view)
+        module.add(self._own_note())
+        module.add(widgets.note(
+            "Off, your pointer can leave a full-screen game or video, and the PC's pointer can come home "
+            "through this Mac's edge. Useful if your keyboard has no key for the shortcut."
+        ).view)
         return module
 
     @objc.python_method
@@ -1771,6 +1909,7 @@ class ControlWindow(AppKit.NSObject):
             for way, title, detail in ways
         }
         module.add(widgets.grid([tile.view for tile in self.method_boxes.values()], 2))
+        module.add(self._own_note(pages.OWN_NOTCH))
         # The values are the side of this Mac the PC is on, which is also the edge that crosses.
         self.edge_select = widgets.Segmented(
             [("left", "Left"), ("right", "Right"), ("top", "Above"), ("bottom", "Below")], on_change=self._changed
@@ -1926,6 +2065,7 @@ class ControlWindow(AppKit.NSObject):
         module.add(widgets.eyebrow("On screen"))
         self.glow_box = widgets.Switch("Animate crossings on this Mac", on_change=self._changed)
         module.add(self.glow_box.view)
+        module.add(self._own_note())
         module.add(widgets.note(
             "Lights the edge, the corner or the notch as you push toward Windows. Switched off, crossing "
             "still works; you feel it rather than see it. Windows sets how its own edge looks."
@@ -1975,6 +2115,7 @@ class ControlWindow(AppKit.NSObject):
             [(600, "0.6 s"), (1200, "1.2 s"), (2000, "2 s"), (3000, "3 s")], on_change=self._changed
         )
         widgets.add(row, widgets.field_row("Keep animating", self.notch_after_select.view)[0])
+        widgets.add(row, self._own_note())
         self.notch_note = widgets.note()
         widgets.add(row, self.notch_note.view)
         return row
@@ -2111,6 +2252,7 @@ class ControlWindow(AppKit.NSObject):
     def _trackpad_module(self):
         module = widgets.Module()
         module.add(widgets.eyebrow("Trackpad"))
+        module.add(self._own_note())
         self.haptics_box = widgets.Switch("Tick as the push builds", on_change=self._changed)
         module.add(self.haptics_box.view)
         self.tick_steps_select = widgets.Segmented(
@@ -2471,8 +2613,13 @@ class ControlWindow(AppKit.NSObject):
                 "glow_colour": self.glow_colour_select.value,
                 "effect_length": self.length_select.value or "normal",
                 "block_while_dragging": self.dragging_box.value,
+                "hold_full_screen": self.hold_box.value,
                 "arrangement_set_at": self.controller.cfg.crossing.get("arrangement_set_at", 0),
             }
+            shared = self.controller.cfg.same_on_both and settings_sync.changed(
+                settings_sync.mac_values(config_to_raw(self.controller.cfg)), settings_sync.mac_values(raw))
+            if shared:
+                raw["same_set_at"] = settings_sync.next_stamp(self.controller.cfg.same_set_at, time.time())
             moved = raw["crossing"]["edge"] != self.controller.cfg.crossing.get("edge")
             if moved:
                 # The edge is half of a value Windows holds too, so a change
@@ -2495,6 +2642,8 @@ class ControlWindow(AppKit.NSObject):
             self.windows_input.send_arrangement(
                 cfg.crossing["edge"], cfg.crossing.get("arrangement_set_at", 0)
             )
+        if shared:
+            self._send_same()
         self._say("Saved. Changes apply as you make them.", "ink_2")
 
     @objc.python_method
@@ -2596,6 +2745,7 @@ class ControlWindow(AppKit.NSObject):
 
     @objc.python_method
     def _say_pairing(self, message, ink="ink_2"):
+        self._pair_ink = ink
         self.pair_status.set(message, ink=ink)
 
     @objc.python_method
@@ -2605,11 +2755,21 @@ class ControlWindow(AppKit.NSObject):
         discovery = self.discovery
         pcs = discovery.pcs() if discovery is not None else []
         chosen = self.chosen_pc["address"] if self.chosen_pc is not None else None
-        key = (chosen, tuple((pc["name"], pc["address"], pc["port"], pc["pair_id"] is not None) for pc in pcs))
+        key = (chosen, tuple(tuple(sorted(pc.items())) for pc in pcs))
         if key == self._pcs_key:
             return
         self._pcs_key = key
         self._pcs = pcs
+        # The chosen row is the PC's beacon at the moment of the click; a PC that starts,
+        # renews or stops its code after that must move the hint with it, not leave it stale.
+        current = next((pc for pc in pcs if pc["address"] == chosen), None)
+        if current is not None and current != self.chosen_pc:
+            showed = self.chosen_pc["pair_id"]
+            self.chosen_pc = current
+            # A refusal or a failed save stays up until the PC offers a fresh code.
+            fault = getattr(self, "_pair_ink", None) == "fault"
+            if current["pair_id"] != showed and not self._pairing and (current["pair_id"] or not fault):
+                self._say_choice()
         self._find_answered(pcs)
         for view in list(self.pc_list.arrangedSubviews()):
             self.pc_list.removeArrangedSubview_(view)
@@ -2654,12 +2814,16 @@ class ControlWindow(AppKit.NSObject):
         self.chosen_pc = self._pcs[index]
         self.code_boxes.clear()
         self.code_boxes.view.setAccessibilityLabel_(f"Code shown on {self.chosen_pc['name']}")
+        self._say_choice()
+        self._refresh_pcs()
+        self.code_boxes.focus(self.window)
+
+    @objc.python_method
+    def _say_choice(self):
         if self.chosen_pc["pair_id"] is None:
             self._say_pairing(f"{self.chosen_pc['name']} is not showing a code yet. Start pairing in Beamer on it first.")
         else:
             self._say_pairing("Six digits, as shown on the PC.")
-        self._refresh_pcs()
-        self.code_boxes.focus(self.window)
 
     def findPC_(self, _sender):
         host = (self.find_secret if self.controller.cfg.hide_addresses else self.find_field).stringValue().strip()
@@ -2818,6 +2982,7 @@ class ControlWindow(AppKit.NSObject):
     def refresh(self):
         controller = self.controller
         self._show_directions()
+        self._show_same()
         access = accessibility_granted()
         listening = input_monitoring_granted()
         self._permission(self.access_status, self.access_button, access)
@@ -2990,6 +3155,12 @@ class TrayApp(rumps.App):
             arrival_callback=self._driven_arrival,
         )
         self.control_window.windows_input = self.windows_input
+        # Same on both machines, over either link: applied on the main thread, and announced
+        # with the arrangement the moment either link comes up.
+        for link in (self.windows_input.server, controller):
+            link.announce = self._announce
+        self.windows_input.server.settings_callback = self._settings
+        controller.on_settings = self._settings
         self.windows_input.sync(controller.cfg)
         self.discovery = pairing.Discovery(logger=logger)
         self.control_window.discovery = self.discovery
@@ -3062,6 +3233,17 @@ class TrayApp(rumps.App):
     def open_log_folder(self, _sender):
         LOG_DIRECTORY.mkdir(parents=True, exist_ok=True, mode=0o700)
         AppKit.NSWorkspace.sharedWorkspace().openURL_(AppKit.NSURL.fileURLWithPath_(str(LOG_DIRECTORY)))
+
+    def _announce(self):
+        """What this Mac tells the PC on every new link: where the machines are, even never
+        changed (an unstamped arrangement from the Mac fills a PC that holds only what a hello
+        told it), and its settings state. On the link's own thread."""
+        crossing_cfg = self.controller.cfg.crossing
+        return [protocol.arrangement_msg(crossing_cfg["edge"], crossing_cfg.get("arrangement_set_at", 0)),
+                protocol.settings_msg(self.control_window.same_state())]
+
+    def _settings(self, data):
+        AppHelper.callAfter(self.control_window.apply_same, data)
 
     def _arrangement(self, mac_edge, set_at):
         """An arrangement from the PC, over either link, applied on the main

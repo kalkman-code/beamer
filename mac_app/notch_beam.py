@@ -29,7 +29,7 @@ import time
 import AppKit
 import Quartz
 
-import effects
+from core import effects
 import tokens
 from notch_island import (
     NOTCH_FALLBACK_HEIGHT,

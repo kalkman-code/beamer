@@ -9,7 +9,7 @@ import logging
 import sys
 from typing import List, Tuple
 
-from return_edge import Rect
+from core.return_edge import Rect
 
 _IS_WINDOWS = sys.platform == "win32"
 user32 = ctypes.WinDLL("user32", use_last_error=True) if _IS_WINDOWS else None

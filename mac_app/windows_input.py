@@ -19,9 +19,9 @@ import clipboard_mac
 import desktop_mac
 import input_injector_mac
 import no_unlock
-import receiver
-import return_edge
-from receiver import ReceiverServer, ServerState
+from core import receiver
+from core import return_edge
+from core.receiver import ReceiverServer, ServerState
 
 LOGGER = logging.getLogger("Beamer")
 

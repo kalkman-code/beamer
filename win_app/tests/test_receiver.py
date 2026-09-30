@@ -3,14 +3,18 @@ import threading
 import time
 import unittest
 from unittest import mock
+import os
+import sys
+
+sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 import input_injector
-import protocol
-import receiver
+from core import protocol
+from core import receiver
 from app_config import Config
-from receiver import ReceiverServer, ServerState, handle_message
+from core.receiver import ReceiverServer, ServerState, handle_message
 
-from return_edge import Rect
+from core.return_edge import Rect
 from fakes import FakeClipboard, FakeDesktop, FakeInjector, connected_socket_pair, wait_for_calls, wait_for_status
 
 

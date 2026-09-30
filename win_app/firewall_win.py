@@ -15,7 +15,7 @@ import subprocess
 import sys
 from typing import Iterable, Optional, Sequence
 
-import protocol
+from core import protocol
 
 LOGGER = logging.getLogger(__name__)
 

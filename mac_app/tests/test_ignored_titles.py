@@ -1,8 +1,12 @@
 """Display names for ignored_inputs entries, and the recorder's pure decision behind one."""
 
 import unittest
+import os
+import sys
 
-import ignored
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+
+from core import ignored
 import ignored_titles
 import media_keys
 

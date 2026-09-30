@@ -6,9 +6,13 @@ import tempfile
 import unittest
 from dataclasses import replace
 from pathlib import Path
+import os
+import sys
 
-import ignored
-import protocol
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+
+from core import ignored
+from core import protocol
 import settings_store
 from bridge import KVMController
 from tests.test_bridge import FakeClock, FakeQuartz, make_config, quiet_logger

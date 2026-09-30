@@ -13,7 +13,7 @@ on a machine without it.
 
 from typing import List, Tuple
 
-from return_edge import Rect
+from core.return_edge import Rect
 
 try:
     import Quartz

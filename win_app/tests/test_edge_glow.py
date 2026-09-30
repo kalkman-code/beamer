@@ -59,7 +59,7 @@ class DarkColoursTest(unittest.TestCase):
     def test_a_dark_pack_is_lifted_on_a_dark_appearance_only(self):
         from unittest import mock
 
-        import effects
+        from core import effects
 
         # Indigo ink, the darkest pack, though Ink is offered nowhere for now.
         def first(dark):

@@ -3,10 +3,14 @@ import struct
 import threading
 import time
 import unittest
+import os
+import sys
 
-import protocol
-import receiver
-from receiver import ReceiverServer, ServerState
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+
+from core import protocol
+from core import receiver
+from core.receiver import ReceiverServer, ServerState
 
 
 class HandshakeDeadlineTests(unittest.TestCase):

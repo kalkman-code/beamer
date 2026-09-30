@@ -3,6 +3,5 @@ pyobjc-framework-Quartz==12.2.2
 pyobjc-framework-ApplicationServices==12.2.2
 rumps==0.4.0
 py2app==0.28.10
-cryptography>=42
 PyNaCl>=1.6
 dmgbuild==1.6.7

@@ -6,6 +6,9 @@ import itertools
 import os
 import types
 import unittest
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 from crossing import CORNERS, EDGES, OPPOSITE, CrossingEngine
 from settings_store import config_to_raw

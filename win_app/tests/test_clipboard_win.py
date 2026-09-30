@@ -8,9 +8,12 @@ import struct
 import sys
 import unittest
 from unittest import mock
+import os
+
+sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 import clipboard_win
-import protocol
+from core import protocol
 from clipboard_win import BI_BITFIELDS, BI_RGB, CF_DIB, CF_UNICODETEXT, bgra_to_dib, dib_to_bgra
 
 

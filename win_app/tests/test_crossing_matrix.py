@@ -7,12 +7,16 @@ import logging
 import time
 import types
 import unittest
+import os
+import sys
 
-import return_edge
+sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+
+from core import return_edge
 import sender
 from app_config import Config, default_config
 from fakes import FakeClipboard, FakeDesktop
-from return_edge import CORNERS, EDGES, OPPOSITE, Rect
+from core.return_edge import CORNERS, EDGES, OPPOSITE, Rect
 
 MONITORS = [Rect(0, 0, 1920, 1080)]
 THIRDS = {"start": 0.17, "middle": 0.5, "end": 0.83}
@@ -273,14 +277,18 @@ class ArrangementHeldByBothTests(unittest.TestCase):
         self.assertEqual([who for who, _ in told], ["pc-to-mac", "mac-to-pc"])
         self.assertEqual(told[0][1][0], "bottom")
 
-    def test_the_macs_hello_replaces_an_edge_set_here_and_leaves_its_stamp_claiming_otherwise(self):
-        # Pinned known gap (G1 in the report): the hello should not win over a newer stamp.
-        # What a PC set up before pairing goes through: the choice made here is stamped, the Mac's
-        # first hello names its own way home, and that is what the PC then holds, under the stamp
-        # of the choice it replaced.
+    def test_the_macs_hello_leaves_an_edge_set_here(self):
+        # G1 in the report, fixed: a PC set up before pairing keeps the side chosen here, and the
+        # Mac's first hello only fills an edge the PC does not hold.
         page, saved = self.page("top", stamp=5000)
         self.learn(page, "left")
-        self.assertEqual((page._config.mac_return_edge, page._config.arrangement_set_at), ("left", 5000))
+        self.assertEqual((page._config.mac_return_edge, page._config.arrangement_set_at), ("top", 5000))
+
+    def test_the_macs_hello_leaves_an_edge_even_a_hello_filled(self):
+        # The Mac's announced arrangement, not its next hello, is what moves it after that.
+        page, saved = self.page("left", stamp=0)
+        self.learn(page, "bottom")
+        self.assertEqual(page._config.mac_return_edge, "left")
 
     def test_a_fresh_config_holds_no_edge_though_the_crossing_page_offers_right(self):
         # Pinned known gap (G3 in the report).

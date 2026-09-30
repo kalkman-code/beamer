@@ -1,8 +1,11 @@
 import sys
 import unittest
+import os
+
+sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 import input_injector
-import receiver
+from core import receiver
 
 
 class FakeInjector:

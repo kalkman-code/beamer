@@ -34,7 +34,7 @@ AppKit or Quartz -- `ns_event` only has to expose `.magnification`,
 
 import logging
 
-import protocol
+from core import protocol
 
 GESTURE_TYPE = 29
 MAGNIFY_TYPE = 30

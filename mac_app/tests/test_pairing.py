@@ -1,18 +1,18 @@
-import filecmp
 import logging
-import os
 import socket
 import threading
 import time
 import unittest
 from unittest import mock
+import os
+import sys
 
-import pairing
-from pairing import Announcer, Discovery, PairingHost
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+
+from core import pairing
+from core.pairing import Announcer, Discovery, PairingHost
 
 
-_TESTS_DIR = os.path.dirname(os.path.abspath(__file__))
-_REPO_ROOT = os.path.dirname(os.path.dirname(_TESTS_DIR))
 
 
 def quiet_logger():
@@ -37,13 +37,6 @@ def wait_until(predicate, timeout=5.0):
             return True
         time.sleep(0.02)
     return False
-
-
-class ParityTests(unittest.TestCase):
-    def test_both_copies_are_identical(self):
-        mac = os.path.join(_REPO_ROOT, "mac_app", "pairing.py")
-        win = os.path.join(_REPO_ROOT, "win_app", "pairing.py")
-        self.assertTrue(filecmp.cmp(mac, win, shallow=False), "mac_app/pairing.py and win_app/pairing.py differ")
 
 
 class LoopbackTests(unittest.TestCase):

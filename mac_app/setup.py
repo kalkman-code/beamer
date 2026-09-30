@@ -9,12 +9,15 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 
 VERSION = (Path(__file__).resolve().parent.parent / "VERSION").read_text().strip()
+# Launch Services accepts only three integers in CFBundleShortVersionString, so a beta such as
+# 1.5.0-beta.1 carries its release number there; the bundled VERSION file says beta to the user.
+PLIST_VERSION = VERSION.split("-")[0]
 BUILD = os.environ.get("BEAMER_BUILD", "1")
 
 
 setup(
     name="Beamer",
-    version=VERSION,
+    version=PLIST_VERSION,
     app=["kvm_bridge_app.py"],
     py_modules=[
         "bridge",
@@ -22,15 +25,8 @@ setup(
         "config",
         "crossing",
         "desktop_mac",
-        "effects",
         "effects_overlay",
-        "fx_ink",
-        "fx_instrument",
-        "fx_membrane",
-        "fx_sparks",
-        "fx_warp",
         "gestures",
-        "ignored",
         "input_injector_mac",
         "key_codes",
         "keyboard_layout",
@@ -41,15 +37,10 @@ setup(
         "pages",
         "previews",
         "no_unlock",
-        "pairing",
-        "protocol",
-        "receiver",
-        "return_edge",
         "settings_store",
         "theme",
         "tokens",
         "wake",
-        "wol",
         "widgets",
         "windows_input",
     ],
@@ -67,22 +58,23 @@ setup(
     options={
         "py2app": {
             "argv_emulation": False,
-            # cryptography ships a compiled _rust extension plus cffi; py2app's own recipe pulls
-            # both in, but naming the package keeps its data files and submodules in the bundle.
-            # PyNaCl (nacl) is the same shape: a compiled _sodium extension reached through cffi.
-            "packages": ["rumps", "cryptography", "cffi", "nacl"],
-            # effects.py imports its fx_* modules by name at first use, which py2app's import scan
-            # cannot see, so they are named here or the bundle ships without a single effect.
+            # PyNaCl (nacl) ships a compiled _sodium extension reached through cffi; naming both
+            # packages keeps their data files and submodules in the bundle.
+            "packages": ["rumps", "cffi", "nacl"],
+            # core/effects.py imports its fx_* modules by name at first use, which py2app's import
+            # scan cannot see, so they are named here or the bundle ships without a single effect.
+            # The rest of core/ is found by the scan, through the repo root put on sys.path above;
+            # naming the package whole would ship its tests too.
             "includes": [
                 "objc", "AppKit", "ApplicationServices", "Quartz",
-                "fx_ink", "fx_instrument", "fx_membrane", "fx_sparks", "fx_warp",
+                "core.fx_ink", "core.fx_instrument", "core.fx_membrane", "core.fx_sparks", "core.fx_warp",
             ],
             "iconfile": "../Beamer.icns",
             "plist": {
                 "CFBundleDisplayName": "Beamer",
                 "CFBundleIdentifier": "uk.co.kalkman.beamer",
                 "CFBundleName": "Beamer",
-                "CFBundleShortVersionString": VERSION,
+                "CFBundleShortVersionString": PLIST_VERSION,
                 "CFBundleVersion": BUILD,
                 "LSMinimumSystemVersion": "13.0",
                 "LSUIElement": False,

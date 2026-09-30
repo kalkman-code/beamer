@@ -1,6 +1,10 @@
 import unittest
+import os
+import sys
 
-import protocol
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+
+from core import protocol
 from gestures import (
     DOCK_PHASE_ENDED,
     DOCK_SWIPE_HID_TYPE,

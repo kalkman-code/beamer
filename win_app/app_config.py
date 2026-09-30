@@ -7,10 +7,10 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 import capture_win
-import effects
-import ignored
-import protocol
-import return_edge
+from core import effects
+from core import ignored
+from core import protocol
+from core import return_edge
 import tokens
 
 
@@ -78,6 +78,10 @@ class Config:
     check_updates: bool = True
     # Every address the window shows is hidden.
     hide_addresses: bool = False
+    # Same on both machines: the Crossing and Design pages kept in step with the Mac's, and the unix
+    # seconds of the last change to that or to a shared value; see settings_sync.
+    same_on_both: bool = False
+    same_set_at: int = 0
     # How the Mac's pointer and scroll feel on this PC; see receiver.InputScale.
     pointer_speed: float = 1.0
     scroll_speed: float = 1.0
@@ -98,6 +102,8 @@ class Config:
     modifier_style: str = "semantic"
     # A push against the edge with a button held is a drag, not a crossing, as on the Mac.
     block_while_dragging: bool = True
+    # A full-screen app in front holds this PC's edges. This PC's own choice, never shared.
+    hold_full_screen: bool = True
     # The Mac's address is learned, never typed: it is the peer address the
     # Mac's own link arrives from.
     mac_host: str = ""
@@ -120,6 +126,11 @@ class Config:
     # The window's own palette: follow Windows, or keep one. tokens.APPEARANCES is the home of
     # these three values.
     appearance: str = "system"
+
+
+def _stamp(value) -> int:
+    """A saved unix-seconds stamp, or 0 for anything that is not one."""
+    return int(value) if not isinstance(value, bool) and isinstance(value, (int, float)) and value > 0 else 0
 
 
 def migrated_port(value) -> int:
@@ -173,6 +184,8 @@ def validate_config(config: Config) -> None:
         raise ConfigError(f"modifier_style must be one of: {', '.join(MODIFIER_STYLES)}")
     if not isinstance(config.block_while_dragging, bool):
         raise ConfigError("block_while_dragging must be true or false")
+    if not isinstance(config.hold_full_screen, bool):
+        raise ConfigError("hold_full_screen must be true or false")
     if not isinstance(config.mac_hardware_address, str):
         raise ConfigError("mac_hardware_address must be text")
     if not isinstance(config.crossing_methods, list) or any(
@@ -198,6 +211,8 @@ def validate_config(config: Config) -> None:
         raise ConfigError("check_updates must be true or false")
     if not isinstance(config.hide_addresses, bool):
         raise ConfigError("hide_addresses must be true or false")
+    if not isinstance(config.same_on_both, bool):
+        raise ConfigError("same_on_both must be true or false")
     for name in ("pointer_speed", "scroll_speed"):
         value = getattr(config, name)
         if isinstance(value, bool) or not isinstance(value, (int, float)) or not 0.25 <= value <= 4.0:
@@ -264,6 +279,8 @@ def config_from_dict(raw: dict) -> Config:
             allow_mac_to_drive=raw.get("allow_mac_to_drive", True),
             check_updates=raw.get("check_updates", True),
             hide_addresses=raw.get("hide_addresses", False),
+            same_on_both=raw.get("same_on_both", False),
+            same_set_at=_stamp(raw.get("same_set_at", 0)),
             pointer_speed=raw.get("pointer_speed", 1.0),
             scroll_speed=raw.get("scroll_speed", 1.0),
             reverse_scroll=raw.get("reverse_scroll", False),
@@ -277,6 +294,7 @@ def config_from_dict(raw: dict) -> Config:
             double_tap_ms=int(raw.get("double_tap_ms", 300)),
             modifier_style=raw.get("modifier_style", "semantic"),
             block_while_dragging=raw.get("block_while_dragging", True),
+            hold_full_screen=raw.get("hold_full_screen", True),
             mac_hardware_address=raw.get("mac_hardware_address", "") or "",
             mac_host=raw.get("mac_host", "") or "",
             mac_return_edge=raw.get("mac_return_edge", "") or "",
@@ -329,6 +347,8 @@ def config_to_dict(config: Config) -> dict:
         "allow_mac_to_drive": config.allow_mac_to_drive,
         "check_updates": config.check_updates,
         "hide_addresses": config.hide_addresses,
+        "same_on_both": config.same_on_both,
+        "same_set_at": int(config.same_set_at),
         "pointer_speed": config.pointer_speed,
         "scroll_speed": config.scroll_speed,
         "reverse_scroll": config.reverse_scroll,
@@ -342,6 +362,7 @@ def config_to_dict(config: Config) -> dict:
         "double_tap_ms": int(config.double_tap_ms),
         "modifier_style": config.modifier_style,
         "block_while_dragging": config.block_while_dragging,
+        "hold_full_screen": config.hold_full_screen,
         "mac_hardware_address": config.mac_hardware_address,
         "mac_host": config.mac_host,
         "mac_return_edge": config.mac_return_edge,

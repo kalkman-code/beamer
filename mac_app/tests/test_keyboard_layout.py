@@ -6,11 +6,14 @@ layouts; the last class reads them from the system to prove that."""
 import ctypes
 import sys
 import unittest
+import os
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 import config
 import keyboard_layout
 import input_injector_mac as injector
-import protocol
+from core import protocol
 from bridge import QuartzEventTranslator
 from tests.test_bridge import FakeQuartz
 

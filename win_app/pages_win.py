@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import re
 
-import effects
+from core import effects
 
 # (key, name, what the page is for), in sidebar order, which is setup order; Ctrl+1 is the first.
 PAGES = (
@@ -36,6 +36,8 @@ SCOPE = {
     "design": "For this PC's screen only; your Mac keeps its own.",
     "keyboard": "For this PC's keyboard only; your Mac keeps its own.",
 }
+# With Same on both machines on, under each row of the shared pages that stays this PC's own.
+OWN_ROW = "This PC only."
 # The window's footer; the first sentence goes on Connection, whose changes wait for its button.
 FOOTER_APPLY = "Changes apply as you make them."
 FOOTER_TRAY = "Closing this window keeps Beamer running in the tray."

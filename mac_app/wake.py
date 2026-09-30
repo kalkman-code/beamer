@@ -7,7 +7,7 @@ from __future__ import annotations
 import threading
 
 from bridge import AUTH_FAILED_STATUS, KVMController
-from wol import WAKE_WINDOW_SECONDS, lookup_mac, mac_from_arp_output, magic_packet, parse_mac, send_magic_packet
+from core.wol import WAKE_WINDOW_SECONDS, lookup_mac, mac_from_arp_output, magic_packet, parse_mac, send_magic_packet
 
 __all__ = [
     "NOT_WOKEN_STATUS", "WAKE_WINDOW_SECONDS", "WAKING_STATUS", "WakingController",

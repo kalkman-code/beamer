@@ -6,9 +6,13 @@ from `_on_hook_key`'s body."""
 
 import time
 import unittest
+import os
+import sys
+
+sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 import capture_win
-import protocol
+from core import protocol
 import sender
 from capture_win import Trigger
 from fakes import FakeDesktop

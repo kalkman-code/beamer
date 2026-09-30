@@ -2,7 +2,7 @@
 out of the AppKit recorder in widgets.py so both are testable without it.
 """
 
-import ignored
+from core import ignored
 import media_keys
 from bridge import NX_DEVICE_MODIFIER_BITS, WIRE_OTHER_BUTTONS
 import keyboard_layout

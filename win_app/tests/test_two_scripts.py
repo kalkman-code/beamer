@@ -7,10 +7,14 @@ letter is from another script than the one typed there."""
 
 import time
 import unittest
+import os
+import sys
+
+sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 import capture_win
-import protocol
-import receiver
+from core import protocol
+from core import receiver
 import sender
 from fakes import FakeClipboard, FakeDesktop
 from input_injector import KEYEVENTF_KEYUP, KEYEVENTF_UNICODE, plan_key_inputs

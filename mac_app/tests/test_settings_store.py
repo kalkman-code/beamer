@@ -4,9 +4,12 @@ import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 import config as config_module
-import protocol
+from core import protocol
 import settings_store
 from settings_store import SettingsError, SettingsStore, config_to_raw
 
@@ -46,6 +49,19 @@ class SettingsStoreTests(unittest.TestCase):
             self.assertFalse(loaded.send_to_windows)
             self.assertTrue(loaded.allow_windows_to_drive)
             self.assertFalse(store.load().send_to_windows)
+
+    def test_the_full_screen_hold_defaults_on_and_round_trips(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = SettingsStore(Path(directory) / "config.json")
+            loaded = store.save(self.valid_raw())
+            self.assertTrue(loaded.crossing["hold_full_screen"])
+            raw = config_to_raw(loaded)
+            raw["crossing"]["hold_full_screen"] = False
+            store.save(raw)
+            self.assertFalse(store.load().crossing["hold_full_screen"])
+            raw["crossing"]["hold_full_screen"] = "no"
+            with self.assertRaises(SettingsError):
+                store.save(raw)
 
     def test_appearance_defaults_to_system_and_each_choice_round_trips(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -208,7 +224,7 @@ class SettingsStoreTests(unittest.TestCase):
                     self.assertIn(field, str(caught.exception))
 
     def test_every_crossing_effect_and_colour_pack_round_trips(self):
-        import effects
+        from core import effects
 
         pairs = [(style, "signal") for style in effects.EFFECT_IDS]
         pairs += [(style, colour) for style in ("glow", "beam") for colour in effects.PACK_IDS]

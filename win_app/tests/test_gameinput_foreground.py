@@ -10,6 +10,10 @@ import ctypes
 import subprocess
 import unittest
 from unittest import mock
+import os
+import sys
+
+sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 import desktop_win
 import input_injector

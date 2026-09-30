@@ -1,9 +1,12 @@
 import os
 import unittest
 from types import SimpleNamespace
+import sys
+
+sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 import app_config
-import effects
+from core import effects
 import pages_win
 
 try:
@@ -377,6 +380,8 @@ class CrossingPageTest(unittest.TestCase):
         page.sender = SimpleNamespace(update_config=lambda config: None)
         page.mac_host_readout = widgets.label("", "readout")
         page.edge_choice = SimpleNamespace(set_value=lambda value: None)
+        # A hello fills only an edge the PC does not hold yet (G1).
+        page._config.mac_return_edge = ""
         real = kvm_bridge_win.sender.is_this_machine
         kvm_bridge_win.sender.is_this_machine = lambda host: False
         try:

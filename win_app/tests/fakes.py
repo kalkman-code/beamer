@@ -9,8 +9,12 @@ platform, including this Mac, without touching a real desktop.
 import socket
 import time
 from typing import List, Optional, Tuple
+import os
+import sys
 
-import protocol
+sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+
+from core import protocol
 
 
 class FakeInjector:

@@ -20,7 +20,7 @@ import Quartz
 import objc
 
 import crossing
-import effects
+from core import effects
 import effects_overlay
 import motion
 import notch_beam

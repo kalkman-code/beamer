@@ -395,9 +395,10 @@ A local Mac build is signed with the release's Developer ID identity when the lo
 reach it, so privacy grants carry between local builds and releases, and ad-hoc otherwise (over
 SSH), under the hardened runtime either way. It is not notarised.
 
-Files shared by both apps (`receiver.py`, `return_edge.py`, `pairing.py`, `ignored.py`, `tokens.py`
-and others) are byte-identical copies, because each app bundles only what sits under it; a test
-fails if a pair drifts. `Beamer.svg` is the master of the mark, and `Beamer.ico`, `Beamer.png` and
+What both apps run the same way (`protocol.py`, `pairing.py`, `receiver.py`, `return_edge.py`, the
+crossing effects and others) lives once in `core/`, which both apps import and both packagers
+bundle; `core/tests` runs inside each app's suite. `tokens.py` is still copied into `win_app`, and a
+test fails if the two drift. `Beamer.svg` is the master of the mark, and `Beamer.ico`, `Beamer.png` and
 `Beamer.icns` are rendered from it.
 
 </details>

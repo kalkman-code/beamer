@@ -5,10 +5,10 @@ from dataclasses import replace
 from pathlib import Path
 
 import config as config_module
-import effects
-import ignored
-import protocol
-import return_edge
+from core import effects
+from core import ignored
+from core import protocol
+from core import return_edge
 
 from crossing import CORNERS, EDGES, GLOW_COLOURS, GLOW_STYLES, HAPTIC_FEELS, HAPTIC_STEPS, METHODS, NOTCH_STYLES
 from key_codes import KEY_NAME_TO_CODE
@@ -40,6 +40,8 @@ def editable_default_config():
         allow_windows_to_drive=True,
         check_updates=True,
         hide_addresses=False,
+        same_on_both=False,
+        same_set_at=0,
         pointer_speed=1.0,
         scroll_speed=1.0,
         reverse_scroll=False,
@@ -69,6 +71,8 @@ def config_to_raw(cfg):
         "allow_windows_to_drive": cfg.allow_windows_to_drive,
         "check_updates": cfg.check_updates,
         "hide_addresses": cfg.hide_addresses,
+        "same_on_both": cfg.same_on_both,
+        "same_set_at": cfg.same_set_at,
         "pointer_speed": cfg.pointer_speed,
         "scroll_speed": cfg.scroll_speed,
         "reverse_scroll": cfg.reverse_scroll,
@@ -194,7 +198,7 @@ class SettingsStore:
         for name, allowed in choices:
             if crossing[name] not in allowed:
                 raise SettingsError(f"crossing.{name} must be one of: {', '.join(allowed)}")
-        for name in ("haptics", "glow", "block_while_dragging", "shortcut_arrival"):
+        for name in ("haptics", "glow", "block_while_dragging", "shortcut_arrival", "hold_full_screen"):
             if not isinstance(crossing[name], bool):
                 raise SettingsError(f"crossing.{name} must be true or false")
         for name in ("pointer_speed", "scroll_speed"):

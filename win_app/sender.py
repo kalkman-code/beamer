@@ -29,10 +29,10 @@ import threading
 import time
 from typing import Callable, Optional
 
-import ignored
-import protocol
-import return_edge
-import wol
+from core import ignored
+from core import protocol
+from core import return_edge
+from core import wol
 
 LOGGER = logging.getLogger(__name__)
 
@@ -119,7 +119,7 @@ def is_this_machine(host: str, local_addresses=None, address_towards=None) -> bo
         return False
     if address.is_loopback or address.is_unspecified:
         return True
-    import pairing
+    from core import pairing
 
     if local_addresses is None:
         local_addresses = pairing._local_ipv4_addresses()
@@ -165,6 +165,12 @@ class MacSender:
         self._redirect_callback = redirect_callback
         self._pressure_callback = pressure_callback
         self._arrangement_callback = arrangement_callback
+        # Same on both machines, as the receiver's: `settings_callback(data)` for each settings
+        # message from the Mac, `announce()` for what to send the moment the link is up,
+        # `peer_settings` whether the Mac's welcome said it keeps settings in step.
+        self.settings_callback: Optional[Callable[[dict], None]] = None
+        self.announce: Callable[[], list] = lambda: []
+        self.peer_settings: Optional[bool] = None
         # `arrival_callback(edge, x, y)`, as the shared receiver's: the pointer came home through the
         # Mac's return edge and was placed at desktop pixel (x, y) on `edge` of this PC, or, with
         # edge None, input came home by a switch and the pointer is at (x, y) where it was left.
@@ -220,7 +226,7 @@ class MacSender:
         # Both hold the edges and leave the shortcut working, as on the Mac: Pause crossing,
         # which a restart forgets, and the name of a full-screen app in front, set by the app.
         self.crossing_paused = False
-        self.full_screen_app = None
+        self._full_screen_app = None
         # The buttons of this PC's own mouse that are down, so a push with one held is a drag.
         self._buttons_held = set()
         # (title, message) for a notification, and the Mac's hardware address when the ARP table
@@ -267,6 +273,18 @@ class MacSender:
         if not trips or self._clock() - measured_at > ROUND_TRIP_MAX_AGE_SECONDS:
             return None
         return int(round(trips[len(trips) // 2] * 1000))
+
+    @property
+    def full_screen_app(self):
+        """The full-screen app holding the edges, or None: also None while this PC's own setting
+        has the hold off, read here so every reader of the hold agrees and a change applies at once."""
+        if self._setting("hold_full_screen", True):
+            return self._full_screen_app
+        return None
+
+    @full_screen_app.setter
+    def full_screen_app(self, name) -> None:
+        self._full_screen_app = name
 
     @property
     def edges_held(self) -> bool:
@@ -691,6 +709,7 @@ class MacSender:
                 raise protocol.ProtocolError("welcome message missing data")
             if data.get("error") or data.get("version") != protocol.PROTOCOL_VERSION:
                 raise HandshakeError(OLD_RECEIVER_STATUS)
+            self.peer_settings = protocol.keeps_settings(data)
             sock.settimeout(SOCKET_IO_TIMEOUT_SECONDS)
         except HandshakeError as exc:
             self._close(sock)
@@ -722,6 +741,13 @@ class MacSender:
         self._set_status(f"Connected to the Mac at {host}")
         LOGGER.info("connected to the Mac at %s:%s", host, port)
         self._learn_mac_address(host)
+        try:
+            announcements = list(self.announce())
+        except Exception:
+            LOGGER.exception("announce failed")
+            announcements = []
+        for announcement in announcements:
+            self._send_raw(announcement)
         return True
 
     def _learn_mac_address(self, host) -> None:
@@ -831,6 +857,10 @@ class MacSender:
         """Tell the Mac where the machines are, when the change was made here."""
         return self._send_raw(protocol.arrangement_msg(mac_edge, set_at))
 
+    def send_settings(self, data: dict) -> bool:
+        """Tell the Mac this PC's settings state."""
+        return self._send_raw(protocol.settings_msg(data))
+
     def _send_local_clipboard(self) -> None:
         try:
             text, image = self._clipboard_module().changed_contents()
@@ -923,6 +953,14 @@ class MacSender:
                     self._arrangement_callback(*read)
                 except Exception:
                     LOGGER.exception("Arrangement callback failed")
+            return
+        if message_type == protocol.MSG_SETTINGS:
+            data = message.get("data")
+            if isinstance(data, dict) and self.settings_callback is not None:
+                try:
+                    self.settings_callback(data)
+                except Exception:
+                    LOGGER.exception("Settings callback failed")
             return
 
     def _record_ack(self, message) -> None:

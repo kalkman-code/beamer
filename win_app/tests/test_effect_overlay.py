@@ -6,9 +6,12 @@ import os
 import unittest
 from dataclasses import replace
 from types import SimpleNamespace
+import sys
 
-import effects
-from return_edge import Rect
+sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+
+from core import effects
+from core.return_edge import Rect
 
 try:
     from PySide6.QtCore import QPointF, QRect, Qt

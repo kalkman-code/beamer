@@ -9,13 +9,17 @@ responder, and it must fail the tag rather than type what was recorded."""
 import socket
 import time
 import unittest
+import os
+import sys
 
-import protocol
-import receiver
+sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+
+from core import protocol
+from core import receiver
 import sender
 from app_config import Config
 from fakes import FakeClipboard, FakeDesktop, FakeInjector, wait_for_calls
-from return_edge import Rect
+from core.return_edge import Rect
 from test_sender import NoUnlock, free_port, make_config, wait_for
 
 MONITORS = [Rect(0, 0, 1920, 1080)]

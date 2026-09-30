@@ -5,11 +5,12 @@ source_dir = Path(SPECPATH)
 
 analysis = Analysis(
     [str(source_dir / "kvm_bridge_win.py")],
-    pathex=[str(source_dir)],
+    # The repo root, for core/, which both apps share.
+    pathex=[str(source_dir), str(source_dir.parent)],
     binaries=[],
     datas=[(str(source_dir / "Beamer.ico"), "."), (str(source_dir / "assets"), "assets"), (str(source_dir.parent / "VERSION"), ".")],
-    # effects.py imports its fx_* modules by name, which PyInstaller's analysis cannot see.
-    hiddenimports=["cryptography", "nacl", "_cffi_backend"] + sorted(path.stem for path in source_dir.glob("fx_*.py")),
+    # core/effects.py imports its fx_* modules by name, which PyInstaller's analysis cannot see.
+    hiddenimports=["nacl", "_cffi_backend"] + sorted(f"core.{path.stem}" for path in (source_dir.parent / "core").glob("fx_*.py")),
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],

@@ -6,11 +6,15 @@ handle_message use, so this suite runs on the Mac.
 """
 
 import unittest
+import os
+import sys
 
-import protocol
-import receiver
+sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+
+from core import protocol
+from core import receiver
 import unlock_win
-from receiver import ReceiverServer, ServerState
+from core.receiver import ReceiverServer, ServerState
 
 
 class FakeKernel32:

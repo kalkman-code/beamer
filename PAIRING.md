@@ -1,8 +1,8 @@
 # Pairing
 
 How two machines running Beamer agree a token from the six-digit code, exactly enough to write
-a second implementation. The code is `mac_app/pairing.py` (and its byte-identical copy in
-`win_app`); `mac_app/tests/pairing_vectors.json` holds test vectors for every step. What
+a second implementation. The code is `core/pairing.py`, which both apps
+import; `core/tests/pairing_vectors.json` holds test vectors for every step. What
 pairing protects and what it does not is in [SECURITY.md](SECURITY.md).
 
 Pairing is CPace, a password-authenticated key exchange, with the code as the password:

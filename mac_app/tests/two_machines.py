@@ -5,8 +5,8 @@ real MacSender, driven through its hook entry points. Each machine also runs the
 ReceiverServer that the other one's link connects to, as it does in the apps. Only the platform
 edges are faked: the pointer, the injector, the clipboard and the display geometry.
 
-win_app's modules are put on the path after this app's, so the names both apps share resolve to the
-byte-identical copies and the PC's own (`sender`, `app_config`) resolve to the PC's.
+win_app's modules are put on the path after this app's, so the PC's own (`sender`, `app_config`)
+resolve to the PC's; what both share comes from core.
 """
 
 import os
@@ -20,9 +20,11 @@ for _path in (_WIN, os.path.join(_WIN, "tests")):
     if _path not in sys.path:
         sys.path.append(_path)
 
-import protocol
-import receiver
-from return_edge import Rect
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+
+from core import protocol
+from core import receiver
+from core.return_edge import Rect
 
 import app_config
 import sender as pc_sender_module

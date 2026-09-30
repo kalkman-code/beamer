@@ -1,6 +1,10 @@
 import unittest
+import os
+import sys
 
-from return_edge import CROSS, HOLD, PASS, Rect, ReturnEdge, arrival_position, edge_offset, union
+sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+
+from core.return_edge import CROSS, HOLD, PASS, Rect, ReturnEdge, arrival_position, edge_offset, union
 
 
 class FakeClock:
@@ -123,7 +127,7 @@ class PressureTests(unittest.TestCase):
 
 class PartEdgeTests(unittest.TestCase):
     def test_only_the_chosen_thirds_cross(self):
-        from return_edge import PartEdge
+        from core.return_edge import PartEdge
 
         # Thirds are the pointer's own display's: the left monitor spans 200 to 1280, so they
         # break at 560 and 920.
@@ -140,13 +144,13 @@ class PartEdgeTests(unittest.TestCase):
     def test_a_short_display_beside_a_tall_one_keeps_every_third(self):
         # Measured on the 1440-tall bounding box, the 900-tall display's end third would start at
         # 960 and most of it would not exist.
-        from return_edge import display_fraction
+        from core.return_edge import display_fraction
 
         short, tall = Rect(0, 0, 1440, 900), Rect(-2560, 0, 2560, 1440)
         self.assertAlmostEqual(display_fraction([tall, short], "right", (1439, 800)), 800 / 900)
 
     def test_parts_are_named_by_thirds(self):
-        from return_edge import in_parts, part_of
+        from core.return_edge import in_parts, part_of
 
         self.assertEqual([part_of(f) for f in (0.0, 0.34, 0.99, 1.0)], ["start", "middle", "end", "end"])
         self.assertFalse(in_parts(0.1, ("middle",)))

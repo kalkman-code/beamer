@@ -6,8 +6,12 @@ Byte-identical in mac_app and win_app."""
 import colorsys
 import unittest
 from types import SimpleNamespace
+import os
+import sys
 
-import effects
+sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+
+from core import effects
 
 PALETTE = ["#ff7828", "#ff3264", "#ffb43c"]
 NOTCH = {"x": 771.5, "y": 0.0, "w": 185.0, "h": 32.0, "r": 10.0}

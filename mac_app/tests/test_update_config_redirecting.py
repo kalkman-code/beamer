@@ -1,4 +1,8 @@
 import unittest
+import os
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 from bridge import KVMController
 from test_bridge import FakeClock, FakeQuartz, FakeSocket, crossing_config, link, quiet_logger

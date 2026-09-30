@@ -1,9 +1,9 @@
 #!/bin/bash
-# Builds Beamer.app and Beamer.dmg.
+# Builds Beamer.app (arm64 and x86_64 in one bundle) and Beamer.dmg.
 #
 #   ./build_dmg.sh            local build in mac_app/dist, signed with the same Developer ID identity
 #   ./build_dmg.sh --release  Developer ID, notarised and stapled, written to
-#                             docs/beamer-releases/<version>/ beside the repository, with nothing left in dist
+#                             docs/beamer-releases/<version>/ beside the repository as Beamer-<version>.dmg, with nothing left in dist
 #
 # The version is the repo-root VERSION file and the build number is the commit count, so a release
 # rebuilt from the same commit carries the same numbers. Nothing here uploads anywhere but Apple's
@@ -71,7 +71,31 @@ rm -rf "$SCRIPT_DIR/build" "$SCRIPT_DIR/dist"
 PYTHONDONTWRITEBYTECODE=1 .venv/bin/python3 -B setup.py py2app
 
 PY2APP_DIR="$(.venv/bin/python3 -c 'from pathlib import Path; import py2app; print(Path(py2app.__file__).parent)')"
-clang -O2 -arch arm64 -mmacosx-version-min=13.0 "$PY2APP_DIR/apptemplate/src/main.c" -framework Cocoa -o "$APP/Contents/MacOS/Beamer"
+clang -O2 -arch arm64 -arch x86_64 -mmacosx-version-min=13.0 "$PY2APP_DIR/apptemplate/src/main.c" -framework Cocoa -o "$APP/Contents/MacOS/Beamer"
+
+# cffi ships no universal2 wheel, so the extension pip installed for this Mac is single-architecture.
+# The other half comes from cffi's own wheel for the other architecture, and lipo fuses the two.
+# Everything else in the bundle (Python itself, PyObjC, PyNaCl) ships universal2 and is checked below.
+HOST_ARCH="$(uname -m)"
+[ "$HOST_ARCH" = arm64 ] && OTHER_ARCH=x86_64 || OTHER_ARCH=arm64
+CFFI_VERSION="$(.venv/bin/python3 -c 'import importlib.metadata as m; print(m.version("cffi"))')"
+PY_TAG="$(.venv/bin/python3 -c 'import sys; print(f"{sys.version_info[0]}{sys.version_info[1]}")')"
+mkdir -p "$STAGING_DIR/cffi-other"
+if [ "$OTHER_ARCH" = x86_64 ]; then
+    OTHER_PLATFORMS="--platform macosx_10_13_x86_64 --platform macosx_10_15_x86_64 --platform macosx_11_0_x86_64 --platform macosx_13_0_x86_64"
+else
+    OTHER_PLATFORMS="--platform macosx_11_0_arm64 --platform macosx_13_0_arm64"
+fi
+.venv/bin/python3 -m pip download -q --no-deps --only-binary=:all: --python-version "$PY_TAG" \
+    $OTHER_PLATFORMS "cffi==$CFFI_VERSION" -d "$STAGING_DIR/cffi-other"
+unzip -q -o "$STAGING_DIR"/cffi-other/cffi-*.whl '_cffi_backend*.so' -d "$STAGING_DIR/cffi-other/x"
+for ours in $(find "$APP/Contents" -name '_cffi_backend*.so'); do
+    theirs="$(ls "$STAGING_DIR"/cffi-other/x/_cffi_backend*.so)"
+    if [ "$(lipo -archs "$ours" | wc -w)" -lt 2 ]; then
+        lipo -create "$ours" "$theirs" -output "$STAGING_DIR/cffi-fused.so"
+        cp "$STAGING_DIR/cffi-fused.so" "$ours"
+    fi
+done
 
 xattr -cr "$APP"
 
@@ -82,7 +106,7 @@ for archive in "$APP"/Contents/Resources/lib/python3*.zip; do
     zip -q -d "$archive" '*.dSYM/*' || [ $? -eq 12 ]
 done
 
-# The packages py2app copies whole (rumps, cryptography, cffi, setuptools) arrive with the
+# The packages py2app copies whole (rumps, cffi, nacl, setuptools) arrive with the
 # __pycache__ pip compiled at install time, whose code objects name the venv's path on this Mac, and
 # py2app writes the building python's path into Info.plist. A shipped build once carried both. The
 # caches go, inside the zip too, where zipimport never reads a __pycache__ anyway; the loose packages
@@ -95,6 +119,21 @@ for packages in "$APP"/Contents/Resources/lib/python3.*/; do
     .venv/bin/python3 -m compileall -q -d "lib/$(basename "$packages")" "$packages" >/dev/null
 done
 /usr/libexec/PlistBuddy -c 'Delete :PythonInfoDict:PythonExecutable' "$APP/Contents/Info.plist"
+# Every Mach-O in the bundle must carry both architectures, or an Intel Mac (or an Apple silicon one
+# under Rosetta) fails on the one file that does not, at first use rather than at launch.
+find "$APP/Contents" -type f -print0 | xargs -0 file | grep 'Mach-O' | grep -v '(for architecture' \
+    | cut -d: -f1 > "$STAGING_DIR/machos.txt"
+single=0
+while IFS= read -r binary; do
+    archs="$(lipo -archs "$binary")"
+    if [ "$(printf '%s\n' $archs | grep -cx -e x86_64 -e arm64)" -ne 2 ]; then
+        echo "single-architecture Mach-O ($archs): ${binary#$APP/}" >&2
+        single=$((single + 1))
+    fi
+done < "$STAGING_DIR/machos.txt"
+[ "$single" -eq 0 ] || { echo "$single Mach-O files in the app lack arm64 or x86_64" >&2; exit 1; }
+echo "$(wc -l < "$STAGING_DIR/machos.txt" | tr -d ' ') Mach-O files in the app, every one arm64 and x86_64"
+
 # Anything still naming this Mac's home folder, in a file or inside the zipped stdlib, stops the build.
 .venv/bin/python3 - "$APP" "$HOME" <<'EOF'
 import pathlib, sys, zipfile
@@ -116,7 +155,7 @@ EOF
 if [ "$RELEASE" -eq 1 ]; then TIMESTAMP="--timestamp"; else TIMESTAMP="--timestamp=none"; fi
 
 # Inside-out rather than --deep: every nested Mach-O (the Python framework, the extension modules,
-# cryptography's _rust, the helper python) is signed on its own, then the framework, then the bundle,
+# PyNaCl's _sodium, the helper python) is signed on its own, then the framework, then the bundle,
 # whose signature seals the lot. --identifier pins the bundle id, which must never change - the
 # privacy grants are keyed to it.
 sign_app() {
@@ -124,12 +163,14 @@ sign_app() {
     find "$APP/Contents" -type f ! -path "$APP/Contents/MacOS/Beamer" -print0 \
         | xargs -0 file | grep 'Mach-O' | grep -v '(for architecture' | cut -d: -f1 > "$STAGING_DIR/nested.txt"
     while IFS= read -r binary; do
-        codesign --force --sign "$identity" --options runtime $TIMESTAMP "$binary" || return 1
+        local entitle=()
+        [ "$binary" = "$APP/Contents/MacOS/python" ] && entitle=(--entitlements "$SCRIPT_DIR/entitlements.plist")
+        codesign --force --sign "$identity" --options runtime $TIMESTAMP ${entitle[@]+"${entitle[@]}"} "$binary" || return 1
     done < "$STAGING_DIR/nested.txt"
     codesign --force --sign "$identity" --options runtime $TIMESTAMP \
         "$APP/Contents/Frameworks/Python.framework/Versions/"[0-9]* || return 1
     codesign --force --sign "$identity" --options runtime $TIMESTAMP \
-        --identifier uk.co.kalkman.beamer "$APP" || return 1
+        --entitlements "$SCRIPT_DIR/entitlements.plist" --identifier uk.co.kalkman.beamer "$APP" || return 1
 }
 
 # A real identity is stable across rebuilds, so macOS keeps the Accessibility and Input Monitoring
@@ -157,6 +198,13 @@ codesign -dvv "$APP" 2>&1 | grep -E '^(Identifier|Signature|Authority|Timestamp|
 # entitlement fails here rather than at a user's first launch.
 env -i HOME="$HOME" PATH=/usr/bin:/bin PYTHONHOME="$APP/Contents/Resources" \
     "$APP/Contents/MacOS/python" "$PROJECT_DIR/tools/runtime_probe.py"
+# The same probe as an Intel Mac would run it, where Rosetta is here to run it.
+if /usr/bin/arch -x86_64 /usr/bin/true 2>/dev/null; then
+    env -i HOME="$HOME" PATH=/usr/bin:/bin PYTHONHOME="$APP/Contents/Resources" \
+        /usr/bin/arch -x86_64 "$APP/Contents/MacOS/python" "$PROJECT_DIR/tools/runtime_probe.py"
+else
+    echo "Rosetta is not installed here: the x86_64 half of the bundle was not run" >&2
+fi
 
 notarise() {
     local result="$STAGING_DIR/notary.json" id status
@@ -195,8 +243,8 @@ if [ "$RELEASE" -eq 1 ]; then
     spctl -a -vv "$APP"
     spctl -a -vv -t install "$DMG"
     mkdir -p "$RELEASE_DIR"
-    cp "$DMG" "$RELEASE_DIR/Beamer.dmg"
-    echo "Released Beamer $VERSION ($BEAMER_BUILD) at $RELEASE_DIR/Beamer.dmg"
+    cp "$DMG" "$RELEASE_DIR/Beamer-$VERSION.dmg"
+    echo "Released Beamer $VERSION ($BEAMER_BUILD) at $RELEASE_DIR/Beamer-$VERSION.dmg"
 else
     echo "Built Beamer $VERSION ($BEAMER_BUILD) at $DMG"
 fi

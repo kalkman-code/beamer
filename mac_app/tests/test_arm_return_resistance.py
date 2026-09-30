@@ -1,8 +1,12 @@
 import json
 import unittest
+import os
+import sys
 
-import return_edge
-from receiver import ReceiverServer
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+
+from core import return_edge
+from core.receiver import ReceiverServer
 
 
 class ArmReturnResistanceTest(unittest.TestCase):

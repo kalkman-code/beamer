@@ -34,8 +34,8 @@ from PySide6.QtWidgets import QWidget
 
 import app_config
 import edge_glow
-import effects
-import return_edge as crossing
+from core import effects
+from core import return_edge as crossing
 
 LOGGER = logging.getLogger(__name__)
 

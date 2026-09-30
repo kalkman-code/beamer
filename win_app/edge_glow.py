@@ -21,8 +21,8 @@ from PySide6.QtGui import QColor, QCursor, QImage, QLinearGradient, QPainter, QP
 from PySide6.QtWidgets import QApplication, QSizePolicy, QWidget
 
 import app_config
-import effects
-import return_edge as crossing
+from core import effects
+from core import return_edge as crossing
 import theme
 import tokens
 

@@ -1,10 +1,13 @@
 import sys
 import unittest
 from pathlib import Path
+import os
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-import effects
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+
+from core import effects
 import pages
 
 
@@ -76,7 +79,7 @@ class DiagramTest(unittest.TestCase):
 
 class DesignChoicesTest(unittest.TestCase):
     def test_styles_are_today_then_each_direction_quiet_medium_showpiece(self):
-        import effects
+        from core import effects
 
         groups = pages.style_groups()
         self.assertEqual([group for group, _ in groups], ["Classic", "Membrane", "Sparks", "Instrument"])
@@ -90,7 +93,7 @@ class DesignChoicesTest(unittest.TestCase):
 
     def test_colours_are_today_then_each_direction_three_packs(self):
         import crossing
-        import effects
+        from core import effects
 
         groups = pages.colour_groups(crossing.GLOW_COLOURS)
         self.assertEqual(groups[0], ("Classic", [(name, name.capitalize()) for name in crossing.GLOW_COLOURS]))
@@ -105,7 +108,7 @@ class DesignChoicesTest(unittest.TestCase):
         self.assertEqual([group for group, _ in pages.style_groups(False)], ["Classic"])
         self.assertEqual([group for group, _ in pages.colour_groups(crossing.GLOW_COLOURS, False)], ["Classic"])
         from unittest import mock
-        import effects
+        from core import effects
 
         with mock.patch.object(effects, "_load", side_effect=ModuleNotFoundError("fx_ink")):
             self.assertIsInstance(pages.effects_load_error(), ModuleNotFoundError)

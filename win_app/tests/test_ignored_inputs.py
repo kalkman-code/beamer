@@ -6,14 +6,18 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
+import os
+import sys
+
+sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 import app_config
 import capture_win
-import ignored
-import protocol
+from core import ignored
+from core import protocol
 import sender
 from fakes import FakeClipboard, FakeDesktop
-from return_edge import Rect
+from core.return_edge import Rect
 
 VK_F13 = 0x7C
 VK_A = 0x41

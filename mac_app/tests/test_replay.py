@@ -8,8 +8,12 @@ responder, and it must fail the tag rather than inject what was recorded."""
 import socket
 import time
 import unittest
+import os
+import sys
 
-import protocol
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+
+from core import protocol
 from two_machines import Duo, wait_for
 
 

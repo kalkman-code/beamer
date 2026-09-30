@@ -12,7 +12,7 @@ from PySide6.QtGui import QColor, QImage, QPainter, QPainterPath, QPen
 from PySide6.QtWidgets import QSizePolicy, QWidget
 
 import edge_glow
-import effects
+from core import effects
 import motion
 import theme
 import tokens

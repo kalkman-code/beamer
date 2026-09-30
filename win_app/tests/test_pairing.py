@@ -1,8 +1,12 @@
 import json
 import unittest
+import os
+import sys
 
-import pairing
-from pairing import PairingHost, beacon_msg, decode, encode
+sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+
+from core import pairing
+from core.pairing import PairingHost, beacon_msg, decode, encode
 
 
 class FakeClock:

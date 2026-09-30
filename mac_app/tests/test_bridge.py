@@ -8,10 +8,13 @@ import struct
 import threading
 import types
 import unittest
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 import config
 import media_keys
-import protocol
+from core import protocol
 from bridge import (
     ACK_TIMEOUT_SECONDS,
     AUTH_FAILED_STATUS,
@@ -2090,6 +2093,19 @@ class CrossingWiringTests(unittest.TestCase):
         self.controller.full_screen_app = None
         self._push(10)
         self.assertTrue(self.controller.redirecting)
+
+    def test_with_the_hold_off_a_full_screen_app_does_not_hold_the_edges(self):
+        self.controller.cfg.crossing["hold_full_screen"] = False
+        self.controller.full_screen_app = "Steam"
+        self.assertIsNone(self.controller.full_screen_app)
+        self._push(10)
+        self.assertTrue(self.controller.redirecting)
+
+    def test_turning_the_hold_back_on_holds_for_the_app_still_in_front(self):
+        self.controller.cfg.crossing["hold_full_screen"] = False
+        self.controller.full_screen_app = "Steam"
+        self.controller.cfg.crossing["hold_full_screen"] = True
+        self.assertEqual(self.controller.full_screen_app, "Steam")
 
     def _double_tap(self):
         down = {FakeQuartz.kCGKeyboardEventKeycode: 0x3D, "flags": FakeQuartz.kCGEventFlagMaskAlternate}

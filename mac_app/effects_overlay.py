@@ -21,7 +21,7 @@ import rumps
 
 import crossing
 import desktop_mac
-import effects
+from core import effects
 import notch_beam
 import notch_island
 

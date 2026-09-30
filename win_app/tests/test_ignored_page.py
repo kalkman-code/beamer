@@ -3,9 +3,13 @@ window: what it does when the list cannot be saved."""
 
 import types
 import unittest
+import os
+import sys
+
+sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 import app_config
-import ignored
+from core import ignored
 
 try:
     import kvm_bridge_win

@@ -4,7 +4,7 @@ import json
 import os
 from dataclasses import dataclass, field
 
-import effects
+from core import effects
 from crossing import DEFAULT_CROSSING
 
 DEFAULT_CONFIG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.json")
@@ -75,6 +75,10 @@ class Config:
     check_updates: bool = True
     # Every address the window shows is hidden; see pages.redact.
     hide_addresses: bool = False
+    # Same on both machines: the Crossing and Design pages kept in step with the PC's, and the unix
+    # seconds of the last change to that or to a shared value; see settings_sync.
+    same_on_both: bool = False
+    same_set_at: int = 0
     # How the PC's pointer and scroll feel on this Mac; see receiver.InputScale.
     pointer_speed: float = 1.0
     scroll_speed: float = 1.0
@@ -82,6 +86,11 @@ class Config:
     appearance: str = "system"
     # Keys and buttons that stay on this Mac while its input is on Windows; see ignored.py.
     ignored_inputs: list = field(default_factory=list)
+
+
+def _stamp(value) -> int:
+    """A saved unix-seconds stamp, or 0 for anything that is not one."""
+    return int(value) if not isinstance(value, bool) and isinstance(value, (int, float)) and value > 0 else 0
 
 
 def key_map_style(key_map):
@@ -154,6 +163,8 @@ def load_config(path: str = None) -> Config:
         allow_windows_to_drive=raw.get("allow_windows_to_drive", True) is not False,
         check_updates=raw.get("check_updates", True) is not False,
         hide_addresses=raw.get("hide_addresses", False) is True,
+        same_on_both=raw.get("same_on_both", False) is True,
+        same_set_at=_stamp(raw.get("same_set_at", 0)),
         pointer_speed=raw.get("pointer_speed", 1.0),
         scroll_speed=raw.get("scroll_speed", 1.0),
         reverse_scroll=raw.get("reverse_scroll", False),

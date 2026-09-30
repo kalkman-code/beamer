@@ -5,10 +5,14 @@ while dragging, alerts, and waking the Mac."""
 import time
 import unittest
 from dataclasses import replace
+import os
+import sys
+
+sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 import app_config
 import capture_win
-import protocol
+from core import protocol
 from app_config import ConfigError, config_from_dict, config_to_dict, default_config
 import sender as sender_module
 import test_sender
@@ -63,7 +67,7 @@ class ReviewFixTests(unittest.TestCase):
             self.assertIn(vk, app_config.UNRECORDABLE_TRIGGER_VKS)
 
     def test_the_subnet_broadcast_of_a_home_address(self):
-        import wol
+        from core import wol
 
         self.assertEqual(wol.subnet_broadcast("192.168.1.10"), "192.168.1.255")
         self.assertIsNone(wol.subnet_broadcast("mac.local"))
@@ -85,6 +89,13 @@ class ConfigRangeTests(unittest.TestCase):
         saved = config_to_dict(replace(config, modifier_style="positional", block_while_dragging=False))
         again = config_from_dict(saved)
         self.assertEqual((again.modifier_style, again.block_while_dragging), ("positional", False))
+
+    def test_the_full_screen_hold_defaults_on_and_round_trips(self):
+        config = config_from_dict(raw())
+        self.assertTrue(config.hold_full_screen)
+        saved = config_to_dict(replace(config, hold_full_screen=False))
+        self.assertFalse(config_from_dict(saved).hold_full_screen)
+        self.assertTrue(config_from_dict(raw()).hold_full_screen)
 
     def test_an_unknown_modifier_style_is_refused(self):
         with self.assertRaises(ConfigError):
@@ -117,6 +128,14 @@ class HeldEdgeTests(unittest.TestCase):
         self.sender.full_screen_app = "Game"
         self.push()
         self.assertFalse(self.sender.redirecting)
+
+    def test_with_the_hold_off_a_full_screen_app_does_not_hold_the_edge_either_way(self):
+        self.sender.update_config(make_config(hold_full_screen=False))
+        self.sender.full_screen_app = "Game"
+        self.assertIsNone(self.sender.full_screen_app)
+        self.assertFalse(self.sender.edges_held)
+        self.push()
+        self.assertTrue(self.sender.redirecting)
 
     def test_a_drag_against_the_edge_does_not_cross(self):
         self.sender.on_mouse(capture_win.WM_LBUTTONDOWN, 0, 500, 0)

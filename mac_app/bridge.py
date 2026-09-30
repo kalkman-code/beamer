@@ -19,10 +19,10 @@ import crossing
 import desktop_mac
 from input_injector_mac import INJECTED_MARK
 import gestures
-import ignored
+from core import ignored
 import keyboard_layout
 import media_keys
-import protocol
+from core import protocol
 from key_codes import (
     KEY_NAME_TO_CODE,
     MODIFIER_KEY_CODES,
@@ -514,6 +514,12 @@ class KVMController:
         # Set by the app: called when Windows says the two machines have moved
         # in relation to each other.
         self.on_arrangement = None
+        # Same on both machines, as the receiver's: `on_settings(data)` for each settings message
+        # from Windows, `announce()` for what to send the moment the link is up, `peer_settings`
+        # whether Windows's welcome said it keeps settings in step.
+        self.on_settings = None
+        self.announce = lambda: []
+        self.peer_settings = None
         self.threads = []
         self.started = False
         self.capture_lock = threading.Lock()
@@ -570,12 +576,24 @@ class KVMController:
         # remembers cannot survive a restart; full_screen_app is the name of the frontmost app
         # while it is full screen, measured by the app on the main thread like notch_range.
         self.crossing_paused = False
-        self.full_screen_app = None
+        self._full_screen_app = None
         # Round trip: (seq, sent at) for every input event still unacknowledged, oldest first,
         # and the last few measured trips. Both under sequence_lock.
         self._unacked_sent_at = collections.deque()
         self._round_trips = collections.deque(maxlen=ROUND_TRIP_SAMPLES)
         self._round_trip_at = 0.0
+
+    @property
+    def full_screen_app(self):
+        """The full-screen app holding the edges, or None: also None while this Mac's own setting
+        has the hold off, read here so every reader of the hold agrees and a change applies at once."""
+        if self.cfg.crossing.get("hold_full_screen", True):
+            return self._full_screen_app
+        return None
+
+    @full_screen_app.setter
+    def full_screen_app(self, name):
+        self._full_screen_app = name
 
     @property
     def connected(self):
@@ -1480,6 +1498,7 @@ class KVMController:
                 raise _HandshakeError(f"Windows rejected the connection: {error}")
             if welcome_data.get("version") != protocol.PROTOCOL_VERSION:
                 raise _HandshakeError(OLD_RECEIVER_STATUS)
+            self.peer_settings = protocol.keeps_settings(welcome_data)
             sock.settimeout(SOCKET_IO_TIMEOUT_SECONDS)
         except _HandshakeError as exc:
             self.redirecting = False
@@ -1534,6 +1553,13 @@ class KVMController:
         else:
             self.connection_status = f"Connected to {host}:{port}"
             self.logger.info("connected to Windows at %s:%s", host, port)
+        try:
+            announcements = list(self.announce())
+        except Exception:
+            self.logger.exception("announce failed")
+            announcements = []
+        for announcement in announcements:
+            self._send_raw(announcement)
         return True
 
     def _connect_via_ssh_fallback(self):
@@ -1716,6 +1742,14 @@ class KVMController:
         if message_type == protocol.MSG_ARRANGEMENT:
             self._handle_arrangement(message.get("data", {}))
             return
+        if message_type == protocol.MSG_SETTINGS:
+            data = message.get("data")
+            if isinstance(data, dict) and self.on_settings is not None:
+                try:
+                    self.on_settings(data)
+                except Exception:
+                    self.logger.exception("settings handler failed")
+            return
         self.logger.debug("ignoring inbound message of type %r", message_type)
 
     def _handle_arrangement(self, data):
@@ -1734,6 +1768,10 @@ class KVMController:
         Sent straight out rather than queued: it is not input, and it must go
         whether or not input is currently redirected."""
         return self._send_raw(protocol.arrangement_msg(mac_edge, int(set_at)))
+
+    def send_settings(self, data):
+        """Tell Windows this Mac's settings state, straight out like the arrangement."""
+        return self._send_raw(protocol.settings_msg(data))
 
     def _apply_inbound_clipboard(self, data):
         if not isinstance(data, dict):

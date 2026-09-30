@@ -13,7 +13,7 @@ mechanism is what keeps a slow lean against the edge from ever building a switch
 
 from dataclasses import dataclass
 
-import return_edge
+from core import return_edge
 
 EDGES = ("left", "right", "top", "bottom")
 CORNERS = ("top_left", "top_right", "bottom_left", "bottom_right")
@@ -40,6 +40,8 @@ DEFAULT_CROSSING = {
     "glow_style": "glow",
     "glow_colour": "signal",
     "block_while_dragging": True,
+    # A full-screen app in front holds this Mac's edges. This Mac's own choice, never shared.
+    "hold_full_screen": True,
     # "Part of the edge": the thirds of `edge` that cross, as return_edge.PARTS names them.
     "edge_parts": ["middle"],
     # A switch by the shortcut or a menu, not a crossing, plays an arrival around the pointer.

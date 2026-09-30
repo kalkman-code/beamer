@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import re
 
-import effects
+from core import effects
 
 # (key, name, SF Symbol, what the page is for), in sidebar order, which is the order a new Mac is
 # set up in after the Overview; Cmd+1 is the first.
@@ -37,6 +37,9 @@ SCOPE = {
     "design": "For this Mac's screen only; the PC keeps its own.",
     "keyboard": "For this Mac's keyboard only; the PC keeps its own.",
 }
+# With Same on both machines on, under each row of the shared pages that stays this Mac's own.
+OWN_ROW = "This Mac only."
+OWN_NOTCH = "The notch is this Mac only."
 # The window's footer, and the pages where its first sentence would be untrue.
 FOOTER_APPLIES = "Changes apply as you make them."
 FOOTER_RUNNING = "Closing this window keeps Beamer running in the menu bar."

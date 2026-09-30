@@ -3,9 +3,13 @@ import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
+import os
+import sys
+
+sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 import app_config
-import protocol
+from core import protocol
 from dataclasses import replace
 
 from app_config import ConfigError, config_from_dict, config_to_dict, default_config
@@ -47,13 +51,13 @@ class EdgeGlowConfigTests(unittest.TestCase):
         self.assertEqual((saved["glow_style"], saved["glow_colour"]), ("beam", "sunset"))
 
     def test_colour_choices_are_the_shared_palettes_then_the_effect_packs(self):
-        import effects
+        from core import effects
         import tokens
 
         self.assertEqual(app_config.GLOW_COLOURS, tuple(tokens.PALETTES) + effects.PACK_IDS)
 
     def test_every_crossing_effect_and_pack_is_accepted_and_round_trips(self):
-        import effects
+        from core import effects
 
         for style in effects.EFFECT_IDS:
             with self.subTest(style=style):
@@ -71,7 +75,7 @@ class EdgeGlowConfigTests(unittest.TestCase):
         self.assertEqual((config.glow_style, config.glow_colour), ("discharge", "sunset"))
 
     def test_a_colour_resolves_to_todays_palette_else_its_pack(self):
-        import effects
+        from core import effects
         import tokens
 
         self.assertEqual(app_config.palette_colours("sunset"), tuple(tokens.PALETTES["sunset"]))

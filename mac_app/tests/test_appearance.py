@@ -6,6 +6,7 @@ import json
 import logging
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -13,6 +14,7 @@ from unittest import mock
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 import AppKit  # noqa: E402
+import objc  # noqa: E402
 import Quartz  # noqa: E402
 
 AppKit.NSApplication.sharedApplication()
@@ -116,6 +118,43 @@ class WindowAppearanceTests(unittest.TestCase):
         self.window.appearance_select.value = "light"
         self.window._apply_settings()
         self.assertEqual(self.window.settings_store.load().appearance, "light")
+
+    def test_turning_animations_off_folds_the_modules_while_the_scroll_offset_slides(self):
+        window = self.window
+        window._select_page("design")
+        scroll = window.pages["design"]
+        clip = scroll.contentView()
+        window.glow_box.value = True
+        window._reflect()
+        window.window.contentView().layoutSubtreeIfNeeded()
+        clip.scrollToPoint_((0, scroll.documentView().frame().size.height))
+        scroll.reflectScrolledClipView_(clip)
+        start = clip.bounds().origin.y
+        body = scroll.documentView().subviews()[0]
+        offsets, heights = [], []
+        with mock.patch.object(motion, "live", return_value=True):
+            window.glow_box.value = False
+            window._reflect()
+            deadline = time.monotonic() + 1.0
+            while time.monotonic() < deadline:
+                AppKit.NSRunLoop.currentRunLoop().runUntilDate_(AppKit.NSDate.dateWithTimeIntervalSinceNow_(0.01))
+                offsets.append(clip.bounds().origin.y)
+                heights.append({objc.pyobjc_id(view): view.frame().size.height
+                                for view in body.arrangedSubviews() if not view.isHidden()})
+        end = offsets[-1]
+        self.assertTrue(window.style_module.view.isHidden())
+        self.assertTrue(window.colour_module.view.isHidden())
+        self.assertLess(end, start)
+        # Clamped at once, the offset would jump straight from where it was to where it ends.
+        self.assertGreater(len({offset for offset in offsets if end < offset < start}), 3)
+        self.assertEqual(scroll.documentView().floor.constant(), 0.0)
+        # The held space is left empty at the foot of the page, never taken up by a module.
+        for sample in heights:
+            for view, height in sample.items():
+                bound = max(heights[0].get(view, height), heights[-1].get(view, height))
+                self.assertLessEqual(height, bound + 1)
+        window.glow_box.value = True
+        window._reflect()
 
 
 if __name__ == "__main__":

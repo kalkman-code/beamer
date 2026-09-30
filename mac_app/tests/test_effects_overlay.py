@@ -9,9 +9,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 import crossing
-import effects
+from core import effects
 import effects_overlay
-from return_edge import Rect
+from core.return_edge import Rect
 
 
 class FakeCG:
@@ -606,7 +606,7 @@ class RealEffectIntegrationTest(unittest.TestCase):
             module_name = _MODULE_FOR_EFFECT[effect_id]
             with self.subTest(effect=effect_id, module=module_name):
                 try:
-                    importlib.import_module(module_name)
+                    importlib.import_module(f"core.{module_name}")
                 except ImportError:
                     continue
                 fx = effects.effect(effect_id)

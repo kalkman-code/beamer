@@ -59,6 +59,55 @@ def _relayout(view):
         window.contentView().layoutSubtreeIfNeeded()
 
 
+def _now(changes):
+    """Runs `changes` unanimated, even inside a group, and stops any animation of what it sets."""
+    def run(context):
+        context.setDuration_(0.0)
+        context.setAllowsImplicitAnimation_(False)
+        changes()
+
+    AppKit.NSAnimationContext.runAnimationGroup_completionHandler_(run, None)
+
+
+def _collapse(view):
+    """Hides `view` inside a running group. On a scrolling page with a `floor` constraint (its
+    height at least the constant), the page gives up the space as the rows slide, not at once:
+    a page left shorter than its scroll offset has the clip view clamp in a single frame, dropping
+    everything on screen by the difference while the rows are still moving."""
+    scroll = view.enclosingScrollView()
+    page = scroll.documentView() if scroll is not None else None
+    floor = getattr(page, "floor", None)
+    if floor is None:
+        view.setHidden_(True)
+        _relayout(view)
+        return
+    clip = scroll.contentView()
+    height, origin = page.frame().size.height, clip.bounds().origin
+    _now(lambda: floor.setConstant_(0.0))
+    view.setHidden_(True)
+    _relayout(view)
+    natural = page.frame().size.height
+    if natural >= height:
+        return
+
+    def hold():
+        floor.setConstant_(height)
+        _relayout(view)
+        clip.scrollToPoint_(origin)
+        scroll.reflectScrolledClipView_(clip)
+
+    _now(hold)
+    key = objc.pyobjc_id(page)
+    serial = _serials.get(key, (0, None))[0] + 1
+    _serials[key] = (serial, None)
+
+    def eased():
+        if _serials.get(key, (None,))[0] == serial:
+            _now(lambda: floor.setConstant_(0.0))
+
+    _group(DURATION, lambda: floor.animator().setConstant_(natural), eased)
+
+
 def heading(view):
     """Whether `view` is hidden, or is on its way to being: during a hide the view is still shown
     for its fade, so isHidden() reads False until the fade is over."""
@@ -108,7 +157,7 @@ def set_hidden(view, hidden, done=None):
         def collapse():
             if _serials.get(key, (None,))[0] != serial:
                 return
-            _group(DURATION, lambda: (view.setHidden_(True), _relayout(view)), collapsed)
+            _group(DURATION, lambda: _collapse(view), collapsed)
 
         _group(FADE_OUT, lambda: view.animator().setAlphaValue_(0.0), collapse)
         return

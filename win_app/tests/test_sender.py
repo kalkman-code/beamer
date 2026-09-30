@@ -6,14 +6,18 @@ import socket
 import threading
 import time
 import unittest
+import os
+import sys
+
+sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 import capture_win
-import protocol
-import receiver
+from core import protocol
+from core import receiver
 import sender
 from app_config import Config
 from fakes import FakeClipboard, FakeDesktop, FakeInjector, wait_for_calls
-from return_edge import Rect
+from core.return_edge import Rect
 
 MONITORS = [Rect(0, 0, 1920, 1080)]
 

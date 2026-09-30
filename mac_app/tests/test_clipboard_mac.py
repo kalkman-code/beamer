@@ -5,9 +5,13 @@ general pasteboard, so the suite leaves the machine's clipboard alone."""
 import struct
 import unittest
 import zlib
+import os
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 import clipboard_mac
-import protocol
+from core import protocol
 
 
 def tiny_png(width=2, height=2):

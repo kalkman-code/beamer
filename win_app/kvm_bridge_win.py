@@ -32,6 +32,10 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+# From source, core/ sits beside this folder; the built app bundles it. Behind this folder, not
+# before it: the root also holds the Mac's theme.py, which must not stand in for this app's.
+sys.path.append(str(Path(__file__).resolve().parent.parent))
+
 import app_config
 from app_config import (
     Config,
@@ -47,26 +51,27 @@ from app_config import (
 import autostart_win
 import capture_win
 import desktop_win
-import effects
+from core import effects
 from diagram import ArrangementDiagram, PushStrip
 from edge_glow import EdgeGlow, PreviewLoop
 from effect_overlay import EffectOverlay, logical_point
 from effect_previews import EffectStill, SwitchStill, TileHover
 import firewall_win
-import ignored
+from core import ignored
 import motion
-import pairing
-from pairing import PAIRING_PORT, Announcer, local_address_towards
+from core import pairing
+from core.pairing import PAIRING_PORT, Announcer, local_address_towards
 import pages_win
-import protocol
-import receiver
-from receiver import ReceiverServer, ServerState
-import return_edge
+from core import protocol
+from core import receiver
+from core.receiver import ReceiverServer, ServerState
+from core import return_edge
 import sender
+from core import settings_sync
 from sender import MacSender
 import theme
 import tokens
-import updates
+from core import updates
 import widgets
 
 LOGGER = logging.getLogger(__name__)
@@ -202,6 +207,8 @@ class StatusBridge(QObject):
     learned = Signal(str, object, object)
     # Either link, telling us the two machines' arrangement changed at the other end.
     arrangement = Signal(str, int)
+    # Either link, carrying the Mac's Same on both machines state.
+    settings = Signal(object)
     alert = Signal(str, str)
     mac_learned = Signal(str)
     # (version, url) when a newer Beamer is out, else None.
@@ -232,6 +239,7 @@ class WindowsApplication(QWidget):
         self.bridge.focus.connect(self._on_focus)
         self.bridge.learned.connect(self._on_learned)
         self.bridge.arrangement.connect(self._on_arrangement)
+        self.bridge.settings.connect(self._on_settings)
         self.bridge.update.connect(self._on_update)
         self.bridge.rules_ready.connect(self._listen)
         self._update = None
@@ -274,6 +282,14 @@ class WindowsApplication(QWidget):
             ),
         )
         self.sender.send_peer_home = self.server.send_home
+        # Same on both machines, over either link: applied on the GUI thread, and announced with
+        # this PC's own arrangement the moment either link comes up.
+        for link in (self.server, self.sender):
+            link.settings_callback = self.bridge.settings.emit
+            link.announce = self._announce
+        self.scope_labels: dict = {}
+        self.own_notes: list = []
+        self._same_seen = None
         # Pause crossing and the full-screen hold are about this screen: the Mac's pointer does
         # not go home through a held edge either.
         self.server.edges_held = lambda: self.sender.edges_held
@@ -290,6 +306,7 @@ class WindowsApplication(QWidget):
         )
         try:
             self._config = load_config(config_path)
+            self._same_seen = self._same_fields()
             self._apply_input_scale(self._config)
             self._host = self._config.host
             self._status = ServerState.WAITING
@@ -371,7 +388,7 @@ class WindowsApplication(QWidget):
         }
         self._page_indexes: dict = {}
         for key, name, purpose in pages_win.PAGES:
-            scroll, layout = self._page_shell(name, purpose, pages_win.SCOPE.get(key))
+            scroll, layout = self._page_shell(name, purpose, pages_win.SCOPE.get(key), key)
             builders[key](layout, current)
             layout.addStretch(1)
             self._page_indexes[key] = self.stack.addWidget(scroll)
@@ -382,7 +399,7 @@ class WindowsApplication(QWidget):
 
         self._select_page("overview")
 
-    def _page_shell(self, title: str, purpose: str, scope: Optional[str] = None):
+    def _page_shell(self, title: str, purpose: str, scope: Optional[str] = None, key: Optional[str] = None):
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QFrame.Shape.NoFrame)
@@ -400,7 +417,8 @@ class WindowsApplication(QWidget):
         if scope is not None:
             # Whose settings these are, not something happening now, so not signal: on light,
             # signal reads as a link.
-            layout.addWidget(widgets.label(scope, "note-quiet", wrap=True))
+            self.scope_labels[key] = widgets.label(scope, "note-quiet", wrap=True)
+            layout.addWidget(self.scope_labels[key])
         scroll.setWidget(page)
         return scroll, layout
 
@@ -428,6 +446,7 @@ class WindowsApplication(QWidget):
         layout.addWidget(self.link_module)
         layout.addWidget(self._input_module())
         layout.addWidget(self._directions_module(current))
+        layout.addWidget(self._same_module(current))
         self.sign_in_module = self._sign_in_module()
         layout.addWidget(self.sign_in_module)
         layout.addWidget(self._updates_module(current))
@@ -532,6 +551,15 @@ class WindowsApplication(QWidget):
         # Hidden while only the shortcut is chosen: there is no edge to pause.
         self.pause_row = self._row(self.pause_button, self.crossing_state)
         module.body.addWidget(self.pause_row)
+        self.hold_switch = widgets.Switch("Hold the edges while an app is full screen")
+        self.hold_switch.setFont(theme.font(theme.TYPE["body"]))
+        self.hold_switch.setChecked(self._config.hold_full_screen if self._config else True)
+        self.hold_switch.toggled.connect(self._set_hold_full_screen)
+        module.body.addWidget(self.hold_switch)
+        module.body.addWidget(self._own_note())
+        module.body.addWidget(widgets.label(
+            "Off, your pointer can leave a full-screen game or video, and the Mac's pointer can come home "
+            "through this PC's edge. Useful if your keyboard has no key for the shortcut.", "note", wrap=True))
         return module
 
     def toggle_redirect(self) -> None:
@@ -596,6 +624,120 @@ class WindowsApplication(QWidget):
             self.allow_switch.setEnabled(False)
             self.send_switch.setEnabled(False)
         return module
+
+    def _same_module(self, current: Config) -> QWidget:
+        module = widgets.Module("Settings")
+        self.same_switch = widgets.Switch("Same on both machines")
+        self.same_switch.setFont(theme.font(theme.TYPE["body"]))
+        self.same_switch.setChecked(current.same_on_both)
+        self.same_switch.toggled.connect(self._set_same)
+        module.body.addWidget(self.same_switch)
+        self.same_note = widgets.label("", "note", wrap=True)
+        module.body.addWidget(self.same_note)
+        if self._config is None:
+            self.same_switch.setEnabled(False)
+        return module
+
+    def _own_note(self) -> QWidget:
+        """A note on a row this PC keeps to itself, shown only while the pages are kept in step."""
+        note = widgets.label(pages_win.OWN_ROW, "note", wrap=True)
+        note.setVisible(False)
+        self.own_notes.append(note)
+        return note
+
+    def _peer_too_old(self) -> bool:
+        """Whether a link is up to a Mac whose Beamer does not keep settings in step."""
+        with self._status_lock:
+            receiving = self._status == ServerState.CONNECTED
+        links = ((receiving, self.server.peer_settings), (self.sender.connected, self.sender.peer_settings))
+        return any(up and known is False for up, known in links)
+
+    def _show_same(self) -> None:
+        if self._config is None:
+            return
+        old = self._peer_too_old()
+        on = self._config.same_on_both and not old
+        if self.same_switch.isChecked() != on:
+            self.same_switch.blockSignals(True)
+            self.same_switch.setChecked(on)
+            self.same_switch.blockSignals(False)
+        self.same_switch.setEnabled(not old)
+        self.same_note.setText(settings_sync.switch_note("Mac", self._config.same_on_both, old))
+        widgets.set_role(self.same_note, "note-amber" if old else "note")
+        for key, label in self.scope_labels.items():
+            text = settings_sync.scope(key, "Mac", on, pages_win.SCOPE.get(key))
+            if label.text() != text:
+                label.setText(text)
+        for note in self.own_notes:
+            if motion.target_shown(note) != on:
+                motion.set_shown(note, on)
+
+    def _same_fields(self) -> tuple:
+        return tuple(getattr(self._config, field) if not isinstance(getattr(self._config, field), list)
+                     else tuple(getattr(self._config, field)) for field in settings_sync.PC_FIELDS.values())
+
+    def _same_state(self) -> dict:
+        config = self._config
+        return settings_sync.message_data(config.same_on_both, config.same_set_at, settings_sync.pc_values(config))
+
+    def _send_same(self) -> None:
+        data = self._same_state()
+        self.sender.send_settings(data)
+        self.server.send_settings(data)
+
+    def _announce(self) -> list:
+        """What this PC tells the Mac on every new link: its arrangement, only once chosen here
+        (one a hello filled in is the Mac's to name), and its settings state. On the link's thread."""
+        config = self._config
+        if config is None:
+            return []
+        messages = []
+        if config.mac_return_edge in return_edge.OPPOSITE and config.arrangement_set_at:
+            messages.append(protocol.arrangement_msg(return_edge.OPPOSITE[config.mac_return_edge], config.arrangement_set_at))
+        messages.append(protocol.settings_msg(self._same_state()))
+        return messages
+
+    def _set_same(self, on: bool) -> None:
+        """Turning it on carries this PC's Crossing and Design across; off, each end keeps what it
+        has. Either way the Mac follows, now if a link is up, else when one next comes up."""
+        if self._config is None:
+            return
+        self._config.same_on_both = bool(on)
+        self._config.same_set_at = settings_sync.next_stamp(self._config.same_set_at, time.time())
+        self._persist()
+        self._send_same()
+        self._show_same()
+
+    def _on_settings(self, data) -> None:
+        """The Mac's settings message, over either link. Its state stands only when it is newer
+        than this PC's; then its values replace the shared ones here."""
+        if self._config is None:
+            return
+        held = (self._config.same_on_both, settings_sync.pc_values(self._config))
+        taken = settings_sync.arrived(data, self._config.same_set_at, TRIGGER_KEYS, held)
+        if taken is None:
+            return
+        on, set_at, values = taken
+        config = replace(self._config, crossing_methods=list(self._config.crossing_methods),
+                         crossing_edge_parts=list(self._config.crossing_edge_parts))
+        config.same_on_both = on
+        config.same_set_at = set_at
+        if on:
+            settings_sync.apply_pc(config, values)
+        try:
+            app_config.validate_config(config)
+        except ConfigError:
+            LOGGER.exception("Settings from the Mac could not be applied")
+            return
+        self._config = config
+        self._same_seen = self._same_fields()
+        if not self._persist():
+            return
+        LOGGER.info("Settings from the Mac applied (same on both machines %s)", "on" if on else "off")
+        self.sender.update_config(config)
+        self._configure_trigger(config)
+        self._reflect_config(config)
+        self._show_same()
 
     def _sign_in_module(self) -> QWidget:
         module = widgets.Module("At sign-in")
@@ -839,6 +981,13 @@ class WindowsApplication(QWidget):
         self.sender.update_config(self._config)
         self._reflect_look()
         self._reflect_ways()
+
+    def _set_hold_full_screen(self, enabled: bool) -> None:
+        if self._config is None:
+            return
+        self._config.hold_full_screen = bool(enabled)
+        self._persist()
+        self.sender.update_config(self._config)
 
     def _set_block_while_dragging(self, enabled: bool) -> None:
         if self._config is None:
@@ -1168,6 +1317,7 @@ class WindowsApplication(QWidget):
         """The settings window's own palette. Last on the page, and never hidden with the
         crossing animations above it: it is chosen once, not part of what they show."""
         module = widgets.Module("Appearance")
+        module.body.addWidget(self._own_note())
         self.appearance_choice = widgets.Choice(
             (("system", "System"), ("light", "Light"), ("dark", "Dark")), 3, current.appearance,
             on_change=self._appearance_chosen,
@@ -1191,6 +1341,7 @@ class WindowsApplication(QWidget):
         self.glow_toggle.setChecked(current.edge_glow)
         self.glow_toggle.toggled.connect(self._apply_look)
         module.body.addWidget(self.glow_toggle)
+        module.body.addWidget(self._own_note())
         module.body.addWidget(
             widgets.label(
                 "Lights this PC as you push toward your Mac. Switched off, crossing still works. "
@@ -1416,11 +1567,20 @@ class WindowsApplication(QWidget):
     def _persist(self) -> bool:
         if self._config is None:
             return False
+        # A change to a shared setting while Same on both machines is on is stamped here, where
+        # every page's changes are saved, and sent once saved.
+        fields = self._same_fields()
+        shared = self._same_seen is not None and fields != self._same_seen and self._config.same_on_both
+        self._same_seen = fields
+        if shared:
+            self._config.same_set_at = settings_sync.next_stamp(self._config.same_set_at, time.time())
         try:
             save_config(self.config_path, self._config)
             # A change on the Crossing page reaches the Mac's pointer while it is here, not at its
             # next crossing: the way home is built from these settings when it arrives.
             self.server.rearm_return()
+            if shared:
+                self._send_same()
             return True
         except (ConfigError, OSError):
             LOGGER.exception("Setting could not be saved")
@@ -1731,6 +1891,7 @@ class WindowsApplication(QWidget):
         if self.server.listening:
             self.server.stop()
         self._config = config
+        self._same_seen = self._same_fields()
         self._apply_input_scale(config)
         if not config.edge_glow:
             self._hide_crossing()
@@ -1955,18 +2116,21 @@ class WindowsApplication(QWidget):
 
     def _reflect_config(self, config: Config) -> None:
         """Every control on every page set from `config`, without any of them saving back."""
-        for box in (*self.way_boxes.values(), self.dragging_switch, self.glow_toggle, self.landing_toggle,
+        for box in (*self.way_boxes.values(), self.dragging_switch, self.hold_switch, self.glow_toggle,
+                    self.landing_toggle,
                     self.resistance_slider, self.double_tap_slider):
             box.blockSignals(True)
         try:
             self.dragging_switch.setChecked(config.block_while_dragging)
+            self.hold_switch.setChecked(config.hold_full_screen)
             self.glow_toggle.setChecked(config.edge_glow)
             self.landing_toggle.setChecked(config.shortcut_arrival)
             self.switch_style_choice.set_value(config.shortcut_arrival_style)
             self.resistance_slider.setValue(config.crossing_resistance_px)
             self.double_tap_slider.setValue(config.double_tap_ms)
         finally:
-            for box in (*self.way_boxes.values(), self.dragging_switch, self.glow_toggle, self.landing_toggle,
+            for box in (*self.way_boxes.values(), self.dragging_switch, self.hold_switch, self.glow_toggle,
+                        self.landing_toggle,
                         self.resistance_slider, self.double_tap_slider):
                 box.blockSignals(False)
         self.resistance_readout.setText(f"{config.crossing_resistance_px} px")
@@ -2104,6 +2268,11 @@ class WindowsApplication(QWidget):
             # A different Mac: the old one's hardware address would wake the wrong machine.
             self._config.mac_hardware_address = ""
             changed = True
+        # The hello's way home only fills an edge this PC does not hold yet: one chosen here, or
+        # one the Mac's stamped arrangement set, stands, and the Mac announces its arrangement on
+        # every new link anyway.
+        if self._config.mac_return_edge:
+            edge = None
         for name, value in (("mac_host", host), ("mac_return_edge", edge or ""), ("mac_resistance_px", resistance)):
             if value in (None, "") or getattr(self._config, name) == value:
                 continue
@@ -2320,6 +2489,7 @@ class WindowsApplication(QWidget):
     def _refresh_window(self) -> None:
         if self._closing:
             return
+        self._show_same()
         with self._status_lock:
             state = self._status
             detail = self._status_detail
@@ -2456,5 +2626,26 @@ def main() -> None:
         kernel32.CloseHandle(mutex)
 
 
+def import_probe(out_path: str, names: list) -> int:
+    """tools/import_probe.py's way into the built exe, which has no interpreter of its own to lend:
+    import each named module from inside the build, write each outcome to out_path (a windowed
+    exe has no console), and stop at the first that fails. Touches no config, lock or window."""
+    import importlib
+    import traceback
+
+    with open(out_path, "w", encoding="utf-8") as out:
+        for name in names:
+            try:
+                module = importlib.import_module(name)
+            except BaseException:
+                out.write(f"FAIL {name}\n{traceback.format_exc()}")
+                return 1
+            out.write(f"ok {name} {getattr(module, '__file__', None) or 'built in'}\n")
+    return 0
+
+
 if __name__ == "__main__":
+    # Before the single-instance lock, so a Beamer already running does not turn the probe away.
+    if sys.argv[1:2] == ["--import-probe"]:
+        sys.exit(import_probe(sys.argv[2], sys.argv[3:]))
     main()
