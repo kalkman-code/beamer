@@ -15,7 +15,8 @@ from core import ignored
 from core import protocol
 import settings_store
 from bridge import KVMController
-from tests.test_bridge import FakeClock, FakeQuartz, make_config, quiet_logger
+from bridge_fakes import PAIRED_TOKEN, FakeClock, FakeQuartz, make_config, quiet_logger
+from fake_link import FakeLink
 
 KEY_F13 = 0x69
 KEY_A = 0x00
@@ -32,10 +33,11 @@ def other_button(number):
 class TapTests(unittest.TestCase):
     def setUp(self):
         self.controller = KVMController(
-            replace(make_config(), ignored_inputs=[ignored.key(KEY_F13), ignored.button("back"), ignored.media("volume_up")]),
+            replace(make_config(PAIRED_TOKEN), ignored_inputs=[ignored.key(KEY_F13), ignored.button("back"), ignored.media("volume_up")]),
             logger=quiet_logger(),
             quartz=FakeQuartz,
             clock=FakeClock(),
+            link_factory=FakeLink,
             system_event_converter=lambda event: event,
         )
         self.controller.redirecting = True

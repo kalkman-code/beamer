@@ -1,0 +1,2234 @@
+{
+  "v6": {
+    "$comment": "Wire version 6 (WIRE.md). Hex is bytes in wire order. Generated from core/protocol.py and checked against HKDF, X25519 and ChaCha20-Poly1305 written apart from it.",
+    "constants": {
+      "version": 6,
+      "salt_ascii": "beamer-link-v6",
+      "key_id_info_ascii": "beamer-key-id",
+      "frame_info_label_ascii": "beamer-frames",
+      "key_id_bytes": 16,
+      "preamble_bytes": 62,
+      "short_reply_bytes": 14,
+      "min_frame_bytes": 21,
+      "first_frame_max_bytes": 4096
+    },
+    "key_id": {
+      "$comment": "A token made by pairing is the b64 of 32 bytes in its one spelling. A typed token has no key id and never links.",
+      "cases": [
+        {
+          "token": "ZlLgvTLc4DGZaKE90HvBM3syIVscP_40UCQxQIXAZJw",
+          "key_id_hex": "563fcce238f33a62db0c2477e8cf8d83"
+        },
+        {
+          "token": "TGlx9eccM8GfzffKhQ--OFTUKTc-0htCVDOQWoYtvbE",
+          "key_id_hex": "ef62b05945926e757427bfb9918304ab"
+        },
+        {
+          "token": "jdbb2tZc4xZvk3W-8K9CDPBrKPI5CKJjfdvOVMgNkUI",
+          "key_id_hex": "aa67a6af2c5f8d896907027b508a4633"
+        }
+      ],
+      "typed_tokens": [
+        "hunter2",
+        "ZlLgvTLc4DGZaKE90HvBM3syIVscP_40UCQxQIXAZJB",
+        "ZlLgvTLc4DGZaKE90HvBM3syIVscP_40UCQxQIXAZJw=",
+        "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+      ]
+    },
+    "preamble": {
+      "token": "9Suyotys6fLcUmAkESPE_3qV71dADd7RngvKAVrIXsE",
+      "prefix_hex": "5ceca4f7d61aee01",
+      "key_id_hex": "6da7e3a4a107e4061473461dd45339a9",
+      "secret_hex": "edf28845a58fda5e0cf7865131591d7ba7d8ae837bc9c506fbf521cde9735351",
+      "share_hex": "33e2ce325442f38ac1bca48fbfcbbcc110999702868872242e8d3ee51099f159",
+      "preamble_hex": "4245414d59065ceca4f7d61aee016da7e3a4a107e4061473461dd45339a933e2ce325442f38ac1bca48fbfcbbcc110999702868872242e8d3ee51099f159"
+    },
+    "short_reply": {
+      "prefix_hex": "19c72d818ab184cf",
+      "reply_hex": "4245414d590619c72d818ab184cf"
+    },
+    "derive_key": {
+      "$comment": "info_i and key_i are for direction 0x01, the frames the initiator seals; info_r and key_r for 0x02. The second case gives the same two machines' prefixes and secrets the opposite roles: the shared secret is the same and every key changes.",
+      "cases": [
+        {
+          "comment": "A initiates, B responds",
+          "token": "KFX5cT76a4uBbZ-k66SlHbJJiHqvMrPcHqOVZl_v3Mo",
+          "key_id_hex": "7dd820d674da2b465292b2a5456ff756",
+          "prefix_i_hex": "220ca92180d4505b",
+          "prefix_r_hex": "4ed33c9398f8d412",
+          "secret_i_hex": "553ed8446b237ba96d54d931ea20db6068889999f84a4697620053bce5448d2a",
+          "secret_r_hex": "54555b4c654ed3274fd8c80bd13ec2a2b584921135988e83afcd7efc3074b910",
+          "share_i_hex": "0d5297c17a85a9a09d4bbaaacd973d9a171068c7f108f4169297cd84847dee3b",
+          "share_r_hex": "b6c7450905c00ca9a4a5e6d0ed892c8deea001da3b4c3073963da9ab40e7c608",
+          "shared_hex": "e42730a125f0a5d698205c7263739f082f56ba90bce85a06535f43157190c958",
+          "ikm_hex": "4b4658356354373661347542625a2d6b3636536c48624a4a694871764d72506348714f565a6c5f76334d6fe42730a125f0a5d698205c7263739f082f56ba90bce85a06535f43157190c958",
+          "info_i_hex": "6265616d65722d6672616d6573067dd820d674da2b465292b2a5456ff756220ca92180d4505b4ed33c9398f8d4120d5297c17a85a9a09d4bbaaacd973d9a171068c7f108f4169297cd84847dee3bb6c7450905c00ca9a4a5e6d0ed892c8deea001da3b4c3073963da9ab40e7c60801",
+          "info_r_hex": "6265616d65722d6672616d6573067dd820d674da2b465292b2a5456ff756220ca92180d4505b4ed33c9398f8d4120d5297c17a85a9a09d4bbaaacd973d9a171068c7f108f4169297cd84847dee3bb6c7450905c00ca9a4a5e6d0ed892c8deea001da3b4c3073963da9ab40e7c60802",
+          "key_i_hex": "56f347a5c2e2e7ea00674155bd179e73f5a36c07dedbc1e5df54c240e081141c",
+          "key_r_hex": "3fdcd429dd860e6868b0d7a13d47495e4ba4f22b604c354d88a23030fc69b8a4"
+        },
+        {
+          "comment": "the roles swapped: B initiates, A responds",
+          "token": "KFX5cT76a4uBbZ-k66SlHbJJiHqvMrPcHqOVZl_v3Mo",
+          "key_id_hex": "7dd820d674da2b465292b2a5456ff756",
+          "prefix_i_hex": "4ed33c9398f8d412",
+          "prefix_r_hex": "220ca92180d4505b",
+          "secret_i_hex": "54555b4c654ed3274fd8c80bd13ec2a2b584921135988e83afcd7efc3074b910",
+          "secret_r_hex": "553ed8446b237ba96d54d931ea20db6068889999f84a4697620053bce5448d2a",
+          "share_i_hex": "b6c7450905c00ca9a4a5e6d0ed892c8deea001da3b4c3073963da9ab40e7c608",
+          "share_r_hex": "0d5297c17a85a9a09d4bbaaacd973d9a171068c7f108f4169297cd84847dee3b",
+          "shared_hex": "e42730a125f0a5d698205c7263739f082f56ba90bce85a06535f43157190c958",
+          "ikm_hex": "4b4658356354373661347542625a2d6b3636536c48624a4a694871764d72506348714f565a6c5f76334d6fe42730a125f0a5d698205c7263739f082f56ba90bce85a06535f43157190c958",
+          "info_i_hex": "6265616d65722d6672616d6573067dd820d674da2b465292b2a5456ff7564ed33c9398f8d412220ca92180d4505bb6c7450905c00ca9a4a5e6d0ed892c8deea001da3b4c3073963da9ab40e7c6080d5297c17a85a9a09d4bbaaacd973d9a171068c7f108f4169297cd84847dee3b01",
+          "info_r_hex": "6265616d65722d6672616d6573067dd820d674da2b465292b2a5456ff7564ed33c9398f8d412220ca92180d4505bb6c7450905c00ca9a4a5e6d0ed892c8deea001da3b4c3073963da9ab40e7c6080d5297c17a85a9a09d4bbaaacd973d9a171068c7f108f4169297cd84847dee3b02",
+          "key_i_hex": "a52f673491a53fd46e3fce9594c36e7f2cebaa2ce44b8341266eea36f49c5dec",
+          "key_r_hex": "b065ffebf100b92677a67eee87dfe518ee38e8afab27762e652b271036ec3822"
+        }
+      ]
+    },
+    "low_order": {
+      "$comment": "X25519 shares of low order, including the non-canonical spellings (u = p and p + 1, and each with bit 255 set, which X25519 ignores). Every one gives 32 zero bytes whatever the secret; a side that gets that result, or whose X25519 refuses the share, ends the handshake and sends nothing.",
+      "secret_hex": "fbc88820911dfe5ad3a997933f2a714212cc62ec7db14d71764a4e15c9fadcd2",
+      "shares": [
+        {
+          "comment": "00000000..., bit 255 as listed",
+          "share_hex": "0000000000000000000000000000000000000000000000000000000000000000",
+          "result_hex": "0000000000000000000000000000000000000000000000000000000000000000"
+        },
+        {
+          "comment": "00000000..., bit 255 set",
+          "share_hex": "0000000000000000000000000000000000000000000000000000000000000080",
+          "result_hex": "0000000000000000000000000000000000000000000000000000000000000000"
+        },
+        {
+          "comment": "01000000..., bit 255 as listed",
+          "share_hex": "0100000000000000000000000000000000000000000000000000000000000000",
+          "result_hex": "0000000000000000000000000000000000000000000000000000000000000000"
+        },
+        {
+          "comment": "01000000..., bit 255 set",
+          "share_hex": "0100000000000000000000000000000000000000000000000000000000000080",
+          "result_hex": "0000000000000000000000000000000000000000000000000000000000000000"
+        },
+        {
+          "comment": "ecffffff..., bit 255 as listed",
+          "share_hex": "ecffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f",
+          "result_hex": "0000000000000000000000000000000000000000000000000000000000000000"
+        },
+        {
+          "comment": "ecffffff..., bit 255 set",
+          "share_hex": "ecffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+          "result_hex": "0000000000000000000000000000000000000000000000000000000000000000"
+        },
+        {
+          "comment": "e0eb7a7c..., bit 255 as listed",
+          "share_hex": "e0eb7a7c3b41b8ae1656e3faf19fc46ada098deb9c32b1fd866205165f49b800",
+          "result_hex": "0000000000000000000000000000000000000000000000000000000000000000"
+        },
+        {
+          "comment": "e0eb7a7c..., bit 255 set",
+          "share_hex": "e0eb7a7c3b41b8ae1656e3faf19fc46ada098deb9c32b1fd866205165f49b880",
+          "result_hex": "0000000000000000000000000000000000000000000000000000000000000000"
+        },
+        {
+          "comment": "5f9c95bc..., bit 255 as listed",
+          "share_hex": "5f9c95bca3508c24b1d0b1559c83ef5b04445cc4581c8e86d8224eddd09f1157",
+          "result_hex": "0000000000000000000000000000000000000000000000000000000000000000"
+        },
+        {
+          "comment": "5f9c95bc..., bit 255 set",
+          "share_hex": "5f9c95bca3508c24b1d0b1559c83ef5b04445cc4581c8e86d8224eddd09f11d7",
+          "result_hex": "0000000000000000000000000000000000000000000000000000000000000000"
+        },
+        {
+          "comment": "edffffff..., bit 255 as listed",
+          "share_hex": "edffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f",
+          "result_hex": "0000000000000000000000000000000000000000000000000000000000000000"
+        },
+        {
+          "comment": "edffffff..., bit 255 set",
+          "share_hex": "edffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+          "result_hex": "0000000000000000000000000000000000000000000000000000000000000000"
+        },
+        {
+          "comment": "eeffffff..., bit 255 as listed",
+          "share_hex": "eeffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f",
+          "result_hex": "0000000000000000000000000000000000000000000000000000000000000000"
+        },
+        {
+          "comment": "eeffffff..., bit 255 set",
+          "share_hex": "eeffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+          "result_hex": "0000000000000000000000000000000000000000000000000000000000000000"
+        }
+      ]
+    },
+    "frames": {
+      "$comment": "Preambles and frames of scripted links, in order. `message` is the object sealed, `plaintext_json` its exact bytes as text (compact, UTF-8, keys in this order), `frame_hex` the whole frame as it crosses the wire: length, counter, ciphertext and tag. Each side counts its own frames from 1. A link's `initiator` and `responder` give the fixed prefix and ephemeral secret that made its keys.",
+      "links": [
+        {
+          "name": "main",
+          "comment": "One pair, scripted end to end: the handshake frames, announcements, a take that lands at an edge, the clipboard and input, an acknowledgement, the responder sending the owner on, and the owner letting go.",
+          "token": "d29iG0O2IkW4GJvmmx4kRpgfPagOP8ghvKYxgUvSVQ0",
+          "initiator": {
+            "id_hex": "ce4b2ccf368aa44030114869407a1ece",
+            "prefix_hex": "c5c3f7ed79d4e12c",
+            "secret_hex": "fe8a413c1306dd7bbd26986e0280fa135ccd38356beebac8783dbc9aa5116b0f"
+          },
+          "responder": {
+            "id_hex": "9555d20d2b689d2c5bf8685fbb7b3f12",
+            "prefix_hex": "605aa2530bd47072",
+            "secret_hex": "eb4ec40c13fb7820f32e721a91d6ccf235cabec6a2b756070f7dafcf7a03063a"
+          },
+          "preamble_i_hex": "4245414d5906c5c3f7ed79d4e12cdbe5d310859156474e1f2ebf2340d195e682c6ca79e54ef902baa846ae032b0838891c3581615710e39a88e150191f20",
+          "preamble_r_hex": "4245414d5906605aa2530bd47072dbe5d310859156474e1f2ebf2340d1958a191ad26988c74fd4c5afe515da2c701991cb58e022d6bbf12bd0b16899d501",
+          "frames": [
+            {
+              "direction": "initiator_to_responder",
+              "counter": 1,
+              "message": {
+                "type": "hello",
+                "data": {
+                  "version": 6,
+                  "id": "zksszzaKpEAwEUhpQHoezg",
+                  "name": "Zo\u00eb\u2019s \ud835\udd39eamer Mac",
+                  "platform": "macos",
+                  "app": "1.5.0",
+                  "caps": [
+                    "clipboard",
+                    "clipboard_image",
+                    "gestures",
+                    "media_keys",
+                    "text",
+                    "settings"
+                  ],
+                  "hw": "02:00:5e:10:00:01",
+                  "port": 24820
+                }
+              },
+              "plaintext_json": "{\"type\":\"hello\",\"data\":{\"version\":6,\"id\":\"zksszzaKpEAwEUhpQHoezg\",\"name\":\"Zo\u00eb\u2019s \ud835\udd39eamer Mac\",\"platform\":\"macos\",\"app\":\"1.5.0\",\"caps\":[\"clipboard\",\"clipboard_image\",\"gestures\",\"media_keys\",\"text\",\"settings\"],\"hw\":\"02:00:5e:10:00:01\",\"port\":24820}}",
+              "frame_hex": "0000010f000000019d8e521f5109a56876d829db5ddaf5b206a033f29c830351a488889adcc5948fb4b5ce476283fbb9e6d93ef6937a270c88b7780d078a2e2b00cf5968b7daf225baacfc5a6229f1596b1ccf80ea5d25d94b4c90be19707e5be53a2e5913062ee37a524c2780eceee6d04cf67de999a3a4c8d9b2581038e8c440dd83f966103706a0a20fad71ce6b0f1f9778c23afaf4927c2fa732983db37b48a3b2cf6f281fa3504785fda0251df91cf4aea8157b8aea164e78104511096fabafaae0da2c177a194237cdf3b08208b07ad8a915d7ca4a64be48c04f566f405998cb1678edbf3076b9863ae583411b418bd2bb89fb18b083af3adf1716665ece318700e37d90c7c8fd13508f3dd5670b1c90"
+            },
+            {
+              "direction": "responder_to_initiator",
+              "counter": 1,
+              "message": {
+                "type": "welcome",
+                "data": {
+                  "version": 6,
+                  "id": "lVXSDStonSxb-Ghfu3s_Eg",
+                  "name": "VECTOR-PC",
+                  "platform": "windows",
+                  "app": "1.5.0",
+                  "caps": [
+                    "clipboard",
+                    "clipboard_image",
+                    "gestures",
+                    "media_keys",
+                    "text",
+                    "settings"
+                  ],
+                  "hw": "02:00:5e:10:00:02",
+                  "accepts": true
+                }
+              },
+              "plaintext_json": "{\"type\":\"welcome\",\"data\":{\"version\":6,\"id\":\"lVXSDStonSxb-Ghfu3s_Eg\",\"name\":\"VECTOR-PC\",\"platform\":\"windows\",\"app\":\"1.5.0\",\"caps\":[\"clipboard\",\"clipboard_image\",\"gestures\",\"media_keys\",\"text\",\"settings\"],\"hw\":\"02:00:5e:10:00:02\",\"accepts\":true}}",
+              "frame_hex": "00000108000000016576d825fdf4783e905e01465424997d0b6553233cb2e36df6e04b6e2ba3dfccbc58836ef781a9bad7040a1ce35d9467e62b110961080b97a93745f70f9b51e43d01adabcd34a021be1ce7c593c9b920562686d75f93bd92d0915bb257ce6fd78dff15303357f1bd990dff8bdd8ec1f12c40a0c0805ef8cfc367b70f4d6993b5f3584efc0fedfe3d7c388e74555497dd264c5e57d07b087ec61f4b32f5980d96aef4a7ef2ac08cb62620707a01c751be5889fcd062173158ba7f0c72c214af479377c310086448e990eeb31551e04d7f56a73351b6d5048a3e9f038256ef8a3b76d80b2636508739f9562c7eb32988a8d4c4448d129b03cbf946775543959398668db819"
+            },
+            {
+              "direction": "initiator_to_responder",
+              "counter": 2,
+              "message": {
+                "type": "paired",
+                "data": {
+                  "ids": [
+                    "Jn0hacrGB0cVCWudQUQKuA"
+                  ]
+                }
+              },
+              "plaintext_json": "{\"type\":\"paired\",\"data\":{\"ids\":[\"Jn0hacrGB0cVCWudQUQKuA\"]}}",
+              "frame_hex": "0000004f00000002a6871f9b4ff9df8e456bd4f2c12d1fc56d1030acdda7810c5b014977dabd28252fe1d72e6e11146dd42852a076d642cbb1fc487bc981babe7f60be955e03fec2b3c701dc23d154f2125351"
+            },
+            {
+              "direction": "responder_to_initiator",
+              "counter": 2,
+              "message": {
+                "type": "paired",
+                "data": {
+                  "ids": [
+                    "Jn0hacrGB0cVCWudQUQKuA"
+                  ]
+                }
+              },
+              "plaintext_json": "{\"type\":\"paired\",\"data\":{\"ids\":[\"Jn0hacrGB0cVCWudQUQKuA\"]}}",
+              "frame_hex": "0000004f000000028b09368f5e74591efc9585588a16e4fdf92109054f5ed6b0979d52074f2bb8b670293d4d68abab9f0d95b93db1cd74d79253e87ba74f15a77c97588071f443b76a5e94e0d02c6f499033d0"
+            },
+            {
+              "direction": "responder_to_initiator",
+              "counter": 3,
+              "message": {
+                "type": "arrangement",
+                "data": {
+                  "edge": "left",
+                  "set_at": 1789999400,
+                  "by": "lVXSDStonSxb-Ghfu3s_Eg"
+                }
+              },
+              "plaintext_json": "{\"type\":\"arrangement\",\"data\":{\"edge\":\"left\",\"set_at\":1789999400,\"by\":\"lVXSDStonSxb-Ghfu3s_Eg\"}}",
+              "frame_hex": "0000007300000003e426356323c86a3889051f2f14b4537377163a18e5b4d71b00c0085f60e9e5edff905d673cd3fc1b60a4f75bbf91313fe3ef821ef59d20c1ba0200415c98b9ab86b73b5343a16fe9c77eb2477ee681b7d146b92e4397ddc2ea7bd243986f89c732d04b5281055a337235c9e0703abe"
+            },
+            {
+              "direction": "initiator_to_responder",
+              "counter": 3,
+              "message": {
+                "type": "focus",
+                "data": {
+                  "route": 1,
+                  "target": "lVXSDStonSxb-Ghfu3s_Eg",
+                  "edge": "left",
+                  "offset": 0.42,
+                  "resistance_px": 120,
+                  "reach": [
+                    "Jn0hacrGB0cVCWudQUQKuA"
+                  ]
+                }
+              },
+              "plaintext_json": "{\"type\":\"focus\",\"data\":{\"route\":1,\"target\":\"lVXSDStonSxb-Ghfu3s_Eg\",\"edge\":\"left\",\"offset\":0.42,\"resistance_px\":120,\"reach\":[\"Jn0hacrGB0cVCWudQUQKuA\"]}}",
+              "frame_hex": "000000ac00000003a3057fbcfc3e92098fa251288b41d028478b9b9b5835598ba6832816cf8f47adc78aef7b463115c191452fa26fb4ac354b55946534511197981dd149a0a6fe3d7901d295d296ec4657d538afc9168e186dd13cb757ba5d8dabbd1ccc5a0cd3a3b1787225fcd8c368a2fd9c8a5fc68d0daf171d4dd6003ca9e1f2742d2aaa6bfc7e7c381ac314c2cef48f0ad6d3267843aca43b7d8eb507f2efa834fe7aa951126d23c21df8e07724"
+            },
+            {
+              "direction": "initiator_to_responder",
+              "counter": 4,
+              "message": {
+                "type": "clipboard",
+                "data": {
+                  "text": "copied on the Mac"
+                }
+              },
+              "plaintext_json": "{\"type\":\"clipboard\",\"data\":{\"text\":\"copied on the Mac\"}}",
+              "frame_hex": "0000004c0000000452f5f1c94336db922478f292d9f7550e222175057f629682881eb1bfa102c8b3db539db342732b449193b70ee0ab0a20e2a93592f622d2f07199896aacc89c8af075d67005f53089"
+            },
+            {
+              "direction": "responder_to_initiator",
+              "counter": 4,
+              "message": {
+                "type": "accept",
+                "data": {
+                  "route": 1
+                }
+              },
+              "plaintext_json": "{\"type\":\"accept\",\"data\":{\"route\":1}}",
+              "frame_hex": "0000003800000004c8dac67507deefdf4f7b8e35f98e3f3c55864d6dc894dbedc6d5483f6d19e965ab5d6822979ec8bb70443d76a48ae1778c41d887"
+            },
+            {
+              "direction": "initiator_to_responder",
+              "counter": 5,
+              "message": {
+                "type": "mousemove",
+                "data": {
+                  "dx": 12,
+                  "dy": -7,
+                  "seq": 1
+                }
+              },
+              "plaintext_json": "{\"type\":\"mousemove\",\"data\":{\"dx\":12,\"dy\":-7,\"seq\":1}}",
+              "frame_hex": "00000049000000051d4cf791dec65c49026221cf2ed6c09deb8fd89cd596db954633d6490f7c77c4f0371a26c14f796300876305ec959864ef34024fab8f59acc1a2d57b922ab72feb3882dede"
+            },
+            {
+              "direction": "initiator_to_responder",
+              "counter": 6,
+              "message": {
+                "type": "keydown",
+                "data": {
+                  "key": "a",
+                  "us": "a",
+                  "seq": 2
+                }
+              },
+              "plaintext_json": "{\"type\":\"keydown\",\"data\":{\"key\":\"a\",\"us\":\"a\",\"seq\":2}}",
+              "frame_hex": "0000004a0000000666bc213750e7b1e83b663550258b8b99fc9dcb8f602af5915a672b993668f7494f396607247411c410d4414319b213b4bd7049c17718102a4a215df047ba136db420e2fa6b2c"
+            },
+            {
+              "direction": "initiator_to_responder",
+              "counter": 7,
+              "message": {
+                "type": "keyup",
+                "data": {
+                  "key": "a",
+                  "us": "a",
+                  "seq": 3
+                }
+              },
+              "plaintext_json": "{\"type\":\"keyup\",\"data\":{\"key\":\"a\",\"us\":\"a\",\"seq\":3}}",
+              "frame_hex": "000000480000000733d109669480605fb22c7a39ab25d657815206d84002726212da70eec54175a731cdb4f262c99b7bef1db1cfdb2666e79f7d0bb239de24920c24124b38a5c032ebb1c5f1"
+            },
+            {
+              "direction": "initiator_to_responder",
+              "counter": 8,
+              "message": {
+                "type": "text",
+                "data": {
+                  "text": "caf\u00e9 \ud83d\ude00",
+                  "seq": 4
+                }
+              },
+              "plaintext_json": "{\"type\":\"text\",\"data\":{\"text\":\"caf\u00e9 \ud83d\ude00\",\"seq\":4}}",
+              "frame_hex": "0000004800000008e31bee6bad87639b502adb23e12dbd4504b6e5027ca661d7f5bb1b0cdb70d5d52caa5f61602a5540d5f9409576cf301720100095b90a9f0f4a1083c5e4902c26bf8822e4"
+            },
+            {
+              "direction": "initiator_to_responder",
+              "counter": 9,
+              "message": {
+                "type": "mousedown",
+                "data": {
+                  "button": "left",
+                  "seq": 5
+                }
+              },
+              "plaintext_json": "{\"type\":\"mousedown\",\"data\":{\"button\":\"left\",\"seq\":5}}",
+              "frame_hex": "000000490000000975e2ef1ca60f462c7d32fd9d666bc56e19c00e5dab059a36bc80745d965dddc1595a498b812890dfb88928e2372dfd4a59f03d6cf20e754eead6877c4b0039499d5552c36e"
+            },
+            {
+              "direction": "initiator_to_responder",
+              "counter": 10,
+              "message": {
+                "type": "mouseup",
+                "data": {
+                  "button": "left",
+                  "seq": 6
+                }
+              },
+              "plaintext_json": "{\"type\":\"mouseup\",\"data\":{\"button\":\"left\",\"seq\":6}}",
+              "frame_hex": "000000470000000a50c170db55401acfce9757876f53a11000c879e4247102f4d81cc6793eab8db88cdd3ace697a881413f0c0475ecf949b27deb066e1c155e054b902bc37abd00583cd4c"
+            },
+            {
+              "direction": "initiator_to_responder",
+              "counter": 11,
+              "message": {
+                "type": "scroll",
+                "data": {
+                  "dy": -14.5,
+                  "dx": 0,
+                  "mode": "pixel",
+                  "seq": 7
+                }
+              },
+              "plaintext_json": "{\"type\":\"scroll\",\"data\":{\"dy\":-14.5,\"dx\":0,\"mode\":\"pixel\",\"seq\":7}}",
+              "frame_hex": "000000570000000b8a5f54b155cfd6e7d0c4eb3c1a45ad8571bf5ab90aa1b6f013879406889d82b031b565da596d7a0930553ea72fe2e0676e3064ca2dc5842a0b924abc4b19fd00834175b02f2a09ffca2d79b9d36d698ba74a0e"
+            },
+            {
+              "direction": "initiator_to_responder",
+              "counter": 12,
+              "message": {
+                "type": "gesture",
+                "data": {
+                  "name": "swipe_left",
+                  "seq": 8
+                }
+              },
+              "plaintext_json": "{\"type\":\"gesture\",\"data\":{\"name\":\"swipe_left\",\"seq\":8}}",
+              "frame_hex": "0000004b0000000cd244598b570490f0fa01cf1fe2e0350157a2efa3672221fdf5aecbe14ed5bd9054e2cbb06c17309556c65d75be485b5fda450ad1bc0583041f616626476e4c94340f0ef9db830f"
+            },
+            {
+              "direction": "initiator_to_responder",
+              "counter": 13,
+              "message": {
+                "type": "ping",
+                "data": {}
+              },
+              "plaintext_json": "{\"type\":\"ping\",\"data\":{}}",
+              "frame_hex": "0000002d0000000da02f62310d52b03292f14777394159c9367339c680fabfa33f99d33b62ce6d80a0ff8370a68f34197b"
+            },
+            {
+              "direction": "responder_to_initiator",
+              "counter": 5,
+              "message": {
+                "type": "accepts",
+                "data": {
+                  "accepts": true
+                }
+              },
+              "plaintext_json": "{\"type\":\"accepts\",\"data\":{\"accepts\":true}}",
+              "frame_hex": "0000003e0000000599b393084eb2eae70848e3c7e743cc3f5faae07184dfc1761042bab70013692024983d89bef8000a6901db4de6b90b511f5717e298544ba1d187"
+            },
+            {
+              "direction": "responder_to_initiator",
+              "counter": 6,
+              "message": {
+                "type": "ack",
+                "data": {
+                  "seq": 8,
+                  "held_us": 1830
+                }
+              },
+              "plaintext_json": "{\"type\":\"ack\",\"data\":{\"seq\":8,\"held_us\":1830}}",
+              "frame_hex": "0000004200000006e611a99b032eda628686253980746bddef3d45b7c6c328e91f52316254be42c5daf80c84e033abf0bbd56bda71add51f57d83373e270712926095b696390"
+            },
+            {
+              "direction": "responder_to_initiator",
+              "counter": 7,
+              "message": {
+                "type": "switch",
+                "data": {
+                  "route": 1,
+                  "next": "Jn0hacrGB0cVCWudQUQKuA",
+                  "edge": "right",
+                  "offset": 0.5
+                }
+              },
+              "plaintext_json": "{\"type\":\"switch\",\"data\":{\"route\":1,\"next\":\"Jn0hacrGB0cVCWudQUQKuA\",\"edge\":\"right\",\"offset\":0.5}}",
+              "frame_hex": "0000007400000007f808d11519327258bddc308b5a9de58953e969ccab30cac544fa280832aea062588b3eb0f8cd835da0124ce7881132b2989fd34668f0ed24b76b4d9ff988ed70e7c87f664e0a3e9c01cd87160e8e2b80837a0805c101ad9baa15246274fabe979926ebc14c164a00dc0407b653fdfc73"
+            },
+            {
+              "direction": "initiator_to_responder",
+              "counter": 14,
+              "message": {
+                "type": "focus",
+                "data": {
+                  "route": 2,
+                  "target": "Jn0hacrGB0cVCWudQUQKuA"
+                }
+              },
+              "plaintext_json": "{\"type\":\"focus\",\"data\":{\"route\":2,\"target\":\"Jn0hacrGB0cVCWudQUQKuA\"}}",
+              "frame_hex": "000000590000000ed1c84c550417d1be3bb8e9eb8845d5aa1f37cb3522e7dcec619ba0fcd166f5474bbcb0c6521f4395848dd738236a4c1d00fb82d19fce75c2a1291f0976a2e4ffe3c9c572f5c654b488fc92a76bae289e674a1cdc86"
+            }
+          ]
+        },
+        {
+          "name": "second_link_refuse",
+          "comment": "Another machine's link to the same responder while the first owns it: its take is refused as owned.",
+          "token": "JJFjICwLZafZiBuondxFwOjUj_UIEH-OldoT_rTAIG4",
+          "initiator": {
+            "id_hex": "267d2169cac6074715096b9d41440ab8",
+            "prefix_hex": "1a2615b21c40c84d",
+            "secret_hex": "e0cbc164f5af9c97b0a327d8116c456270d5c8d39fabd0a224c172db5be0a098"
+          },
+          "responder": {
+            "id_hex": "9555d20d2b689d2c5bf8685fbb7b3f12",
+            "prefix_hex": "784ad556f2a5cba6",
+            "secret_hex": "c066580cfa3fbe16348d6451d99d5bbdb2f1f8a5ca91a5bcaee0d1b82bcebfa9"
+          },
+          "preamble_i_hex": "4245414d59061a2615b21c40c84d8492d0f3347a2df328167e8d9f7236f679c614403fffe59cdc41feb5fb791f1785022b17974107869c2cc46ee606ef1a",
+          "preamble_r_hex": "4245414d5906784ad556f2a5cba68492d0f3347a2df328167e8d9f7236f648c64982e242b1fb668871100142da127e7cad213c76febdd31be82eae80872f",
+          "frames": [
+            {
+              "direction": "initiator_to_responder",
+              "counter": 1,
+              "message": {
+                "type": "hello",
+                "data": {
+                  "version": 6,
+                  "id": "Jn0hacrGB0cVCWudQUQKuA",
+                  "name": "Vector Linux",
+                  "platform": "linux",
+                  "app": "1.5.0",
+                  "caps": [
+                    "text"
+                  ],
+                  "port": 24820
+                }
+              },
+              "plaintext_json": "{\"type\":\"hello\",\"data\":{\"version\":6,\"id\":\"Jn0hacrGB0cVCWudQUQKuA\",\"name\":\"Vector Linux\",\"platform\":\"linux\",\"app\":\"1.5.0\",\"caps\":[\"text\"],\"port\":24820}}",
+              "frame_hex": "000000ab00000001c4ba3b8c0126062fb13075f5c71de0c282aca36e3dc48f93487b4b70463d206d44805f8ab984cfa7751757df78b9decf5b8ad21c93b0d7366ea41ad5965d48a9a26a7cff2ef8ad8772c2d54cf8f9e08e7128550d588f44956392fcff70ddc1e2c67b3372bfdf3adddf8f37ba5694dc3002ec93c93f4281df194430dd74cf4368d93a5cd06c9dfe140710e17348abc0b94725f0a4aae570b0d7d5d90323e5774b6bb5aa5816091f"
+            },
+            {
+              "direction": "responder_to_initiator",
+              "counter": 1,
+              "message": {
+                "type": "welcome",
+                "data": {
+                  "version": 6,
+                  "id": "lVXSDStonSxb-Ghfu3s_Eg",
+                  "name": "VECTOR-PC",
+                  "platform": "windows",
+                  "app": "1.5.0",
+                  "caps": [
+                    "clipboard",
+                    "clipboard_image",
+                    "gestures",
+                    "media_keys",
+                    "text",
+                    "settings"
+                  ],
+                  "accepts": true
+                }
+              },
+              "plaintext_json": "{\"type\":\"welcome\",\"data\":{\"version\":6,\"id\":\"lVXSDStonSxb-Ghfu3s_Eg\",\"name\":\"VECTOR-PC\",\"platform\":\"windows\",\"app\":\"1.5.0\",\"caps\":[\"clipboard\",\"clipboard_image\",\"gestures\",\"media_keys\",\"text\",\"settings\"],\"accepts\":true}}",
+              "frame_hex": "000000ef00000001af092c709c7fbd25b8d36fea2b33c52b88279a82e46f41f45088294961a87979432a320fa92b75c22cd7e5951aba5e8dc4b2c33e1e8b5482f0774eae6ad61e7c1de7d7e5d806e99830e47c87269caa125f50ae5d912fdbb9fa404c376b6cff57ae2b84ae13012eed4a24f273bd92e115e25495e1f722b67f5ffc2146c0f0b41fdf37795e73c7f112f3ecb6174607047ff906ec6fe29080153615f9eb4b8784ac747efaf5d286b54591d456b70e5908a1e605c96abaa16859c203461ed0f2ecc9855fdf843717dd140130547c8db2737455dfb6f0da4b9ee0d32073e788c50c20b95c90c609e8d26860c8bf"
+            },
+            {
+              "direction": "initiator_to_responder",
+              "counter": 2,
+              "message": {
+                "type": "focus",
+                "data": {
+                  "route": 1,
+                  "target": "lVXSDStonSxb-Ghfu3s_Eg",
+                  "edge": "right",
+                  "offset": 0.1,
+                  "resistance_px": 120,
+                  "reach": []
+                }
+              },
+              "plaintext_json": "{\"type\":\"focus\",\"data\":{\"route\":1,\"target\":\"lVXSDStonSxb-Ghfu3s_Eg\",\"edge\":\"right\",\"offset\":0.1,\"resistance_px\":120,\"reach\":[]}}",
+              "frame_hex": "000000940000000251f37e820ea254ead726a137ce40e73c1107cd3d1f5c673ea3c361ee5c2d4c3eded71d0e25e0a4805f15f937394af9abf67b3de8900328bce14bca61cc95f9017109f9385411ebce3009c92191765d62b53e35500ecd59884f1fb210696aa42c41b6e128a8fbd467e486c71ca6951d00596ff2e61333465a2f91a0319711c1810ab59461f783ed9fb425e90dd49be910"
+            },
+            {
+              "direction": "responder_to_initiator",
+              "counter": 2,
+              "message": {
+                "type": "refuse",
+                "data": {
+                  "route": 1,
+                  "why": "owned"
+                }
+              },
+              "plaintext_json": "{\"type\":\"refuse\",\"data\":{\"route\":1,\"why\":\"owned\"}}",
+              "frame_hex": "0000004600000002096c632f95185455690c25ac05a2eeb5451d1a08459e22a52e13a806dbc00b0a206e75f8c52cb19b6949d8c9b3a6abfabe12ee2506a63acade0d0347bcf1b1d2346a"
+            }
+          ]
+        },
+        {
+          "name": "invalid_hello",
+          "comment": "A first frame that opens but is not a hello is answered with welcome carrying only version and error invalid_hello; the link then closes.",
+          "token": "W9KV7C3NXUDKK_x6TNdudEriSq-SGZW23jt3H8ZnI60",
+          "initiator": {
+            "id_hex": "ce4b2ccf368aa44030114869407a1ece",
+            "prefix_hex": "d50d5c6c63fe3a4e",
+            "secret_hex": "33337ef2076e7ee274f2f79ccd15b8d1a056f82dc4f2cc2f483c67405ee7a72c"
+          },
+          "responder": {
+            "id_hex": "9555d20d2b689d2c5bf8685fbb7b3f12",
+            "prefix_hex": "31f49eeefa1a2c0c",
+            "secret_hex": "63bb1a8be5def55ac28f0bfff8db6e5d80654277afab193c6dec4cd3aa417faf"
+          },
+          "preamble_i_hex": "4245414d5906d50d5c6c63fe3a4e19e1585cf1c9acb8eb7edf1ba8ce0c24a1f6c4d9be95fd931788eb9d3bc9e895bf90e5f7c15ba7bd09dacae715d3cb62",
+          "preamble_r_hex": "4245414d590631f49eeefa1a2c0c19e1585cf1c9acb8eb7edf1ba8ce0c2401d1985943dabcf2e907d71c80046a930726833024d627b40b1bcf16cb7b9152",
+          "frames": [
+            {
+              "direction": "initiator_to_responder",
+              "counter": 1,
+              "message": {
+                "type": "ping",
+                "data": {}
+              },
+              "plaintext_json": "{\"type\":\"ping\",\"data\":{}}",
+              "frame_hex": "0000002d00000001155b51b387a13972cd4a7b86964d1c513f2cc57c3982e0a15584aacb5c06de898b47e019bbe9ccdf06"
+            },
+            {
+              "direction": "responder_to_initiator",
+              "counter": 1,
+              "message": {
+                "type": "welcome",
+                "data": {
+                  "version": 6,
+                  "error": "invalid_hello"
+                }
+              },
+              "plaintext_json": "{\"type\":\"welcome\",\"data\":{\"version\":6,\"error\":\"invalid_hello\"}}",
+              "frame_hex": "0000005300000001b705e1aaa9270a4a035fd38d0bb4b43884ff098ffe10b9604abb14693e1c9e694470ab5e311c5d47631b05b6323679393c4ee2505a80048580df7ce01cde518b8093b589a3c66886e7220fbb8b1e67"
+            }
+          ]
+        },
+        {
+          "name": "wrong_id",
+          "comment": "A well-formed hello whose id is not the one the responder holds for this pair is answered with welcome carrying only version and error wrong_id.",
+          "token": "WGMao3L3hwvO3EX60mvxck2GjKtFMH2laq6IpM4v6nA",
+          "initiator": {
+            "id_hex": "ce4b2ccf368aa44030114869407a1ece",
+            "prefix_hex": "beead5deac3f4b87",
+            "secret_hex": "f9ba84df4e1c8ba2214663941631ed6d2d700b5f2f4f0b01431dd6a06ce80b95"
+          },
+          "responder": {
+            "id_hex": "9555d20d2b689d2c5bf8685fbb7b3f12",
+            "prefix_hex": "312580750bbcd085",
+            "secret_hex": "0423f1839d6babf78f9c7daf5fe17254b7401f26e1c9204e27ecdfa4a8e5eaf5"
+          },
+          "preamble_i_hex": "4245414d5906beead5deac3f4b879e9bd4ee287885019bc02ec20cdb08c4977e757f406758ce95be25eaced26ef23bf52800ab0df9ce0900b1ed8f645a0d",
+          "preamble_r_hex": "4245414d5906312580750bbcd0859e9bd4ee287885019bc02ec20cdb08c47431f522394d9b2153dcc53ad88ca6aac3fa72b6043108ab307b2859e19c7e51",
+          "frames": [
+            {
+              "direction": "initiator_to_responder",
+              "counter": 1,
+              "message": {
+                "type": "hello",
+                "data": {
+                  "version": 6,
+                  "id": "8FBlxLFvgwCi51Lrwo3i_g",
+                  "name": "Not the paired machine",
+                  "platform": "macos",
+                  "app": "1.5.0",
+                  "caps": [
+                    "clipboard",
+                    "clipboard_image",
+                    "gestures",
+                    "media_keys",
+                    "text",
+                    "settings"
+                  ],
+                  "port": 24820
+                }
+              },
+              "plaintext_json": "{\"type\":\"hello\",\"data\":{\"version\":6,\"id\":\"8FBlxLFvgwCi51Lrwo3i_g\",\"name\":\"Not the paired machine\",\"platform\":\"macos\",\"app\":\"1.5.0\",\"caps\":[\"clipboard\",\"clipboard_image\",\"gestures\",\"media_keys\",\"text\",\"settings\"],\"port\":24820}}",
+              "frame_hex": "000000f6000000019e27e5e544a4c753d5237054484603d59926a6200d6e2e02fe338ca02cdf0a9cc35aa6428e5b026159f6ff7db8a0765600893a785db5e16c21bd5b7fdbc21c7e3e7d0085d8c8b523a58575457d8c3bea7e681c29ab30a8c9d5d50246deca02cece8b44a17cbfd591ed93233f602c5779ab88e7f5983415428df469fd6a2862e0c60a6f1a1daa86cc9cea77917809d1e8fe9bcdc2fb07e65691100a4ad75380b4c27cf3c34a5b5261405fb8021e3af1a63299d0a6c66d8e39edd655a360fee0763c42e7c3af2d34185e6ca6dc2b79b1a08112325dbeb7df96edaa1140bbec9986d1c417bdd74b1da1cd99f3b3f70b5de93a1b"
+            },
+            {
+              "direction": "responder_to_initiator",
+              "counter": 1,
+              "message": {
+                "type": "welcome",
+                "data": {
+                  "version": 6,
+                  "error": "wrong_id"
+                }
+              },
+              "plaintext_json": "{\"type\":\"welcome\",\"data\":{\"version\":6,\"error\":\"wrong_id\"}}",
+              "frame_hex": "0000004e00000001caa4c615aa97b5c59f6cdabb9cf21ba1768d0d3ca880be843d2fe2a4b044854e0938eaedbd863b9a2fca37b096d21e0b01bf915356faa5d0886618918977b6ec26490f762ebf6c40149c"
+            }
+          ],
+          "wrong_id_hello_id_hex": "f05065c4b16f8300a2e752ebc28de2fe"
+        }
+      ]
+    },
+    "bad_frames": {
+      "$comment": "Each case is offered to a responder that has accepted nothing yet; it must end the link without sending a byte. `good_frame_hex` is the untouched first frame the cases are made from.",
+      "link": {
+        "name": "bad_frames",
+        "token": "IjioTbViP1kHl1gukLz7GcTOFand1k4XTsSA-DhOsfY",
+        "initiator": {
+          "id_hex": "ce4b2ccf368aa44030114869407a1ece",
+          "prefix_hex": "256a5372d069b984",
+          "secret_hex": "f3bdb5ab7657f74c0c5a9d732774d48a6399c284ffa8e17a775ed9cf2e82a26d"
+        },
+        "responder": {
+          "id_hex": "9555d20d2b689d2c5bf8685fbb7b3f12",
+          "prefix_hex": "8724b439eab12036",
+          "secret_hex": "6f65ce0958ed710c7443ef34bf78a8e8891feceb7ff1a0a2bcf25ac8c80b67c3"
+        },
+        "preamble_i_hex": "4245414d5906256a5372d069b9848b279bca95deb36543f1c9d126da65cc3bf8204d02aa88975f62d0ff8667e7161fbdb8b0beb2946bc8a095ddd082c30a",
+        "preamble_r_hex": "4245414d59068724b439eab120368b279bca95deb36543f1c9d126da65cc85076dbb7587f8d1e44378f3783c60fadbd24fc4d6af89553c4af2a356539316"
+      },
+      "good_message": {
+        "type": "hello",
+        "data": {
+          "version": 6,
+          "id": "zksszzaKpEAwEUhpQHoezg",
+          "name": "Vector Mac",
+          "platform": "macos",
+          "app": "1.5.0",
+          "caps": [
+            "text"
+          ],
+          "port": 24820
+        }
+      },
+      "good_frame_hex": "000000a900000001ae2c9c3e4c81ff61fda7b1bcbf59580ae7b7757e6217750ffee65c144956f722240dee7d6d426e8e780bb9a007243d46f57890d494af15b01e7a0471c04e0f3cf97c743edb8f2daffdeb872d7fca46f22e4dafd10a6a0be38e41ef561d924bccd0ab10249899448a09c65162e5c012b8395114dc1612e1bc103d3d1940f50859c2f578e5ad3b445d3a01e9294c9bf7f6345533549b628f818cece55116a8cf1ab5644280b0",
+      "cases": [
+        {
+          "comment": "the last tag byte flipped",
+          "receiver": "responder",
+          "frame_hex": "000000a900000001ae2c9c3e4c81ff61fda7b1bcbf59580ae7b7757e6217750ffee65c144956f722240dee7d6d426e8e780bb9a007243d46f57890d494af15b01e7a0471c04e0f3cf97c743edb8f2daffdeb872d7fca46f22e4dafd10a6a0be38e41ef561d924bccd0ab10249899448a09c65162e5c012b8395114dc1612e1bc103d3d1940f50859c2f578e5ad3b445d3a01e9294c9bf7f6345533549b628f818cece55116a8cf1ab5644280b1",
+          "must": "close_without_reply"
+        },
+        {
+          "comment": "a skipped counter: a valid hello sealed as counter 2, offered as the first frame",
+          "receiver": "responder",
+          "frame_hex": "000000a9000000022c6e825c24d7151aa9ee61ba7e86c0476eea67da477089082bb3b906fe9e5c3fbf7b61568f7607badfe06fac7ab45ff144f65de64dc315af6c366383b204057469aed3c26c8f6b6fdd7bd3f43ad14e565c6c50c29fb877f0d1df2ed3b31478754f430da52a37e8fd7be8097dd196fd25ac49479715b74dc435525498e464a9858f8bd4a377abaadabb127342cb596f7dc8179e784cf89013e217e6c8fb52dae1697ff78168",
+          "must": "close_without_reply"
+        },
+        {
+          "comment": "sealed in the wrong direction: a frame the responder sealed, offered to the responder",
+          "receiver": "responder",
+          "frame_hex": "0000002d00000001677c0a6bf1da5f56ab82ed5b41c1294bbb928ed80769e4fb782635b95a6bb4d5437b8b4f51f0a0fd24",
+          "must": "close_without_reply"
+        }
+      ]
+    },
+    "ids": {
+      "$comment": "A machine id is 16 bytes in JSON as URL-safe base64 without padding, 22 characters, in its one spelling: decode, encode again, refuse the text if it differs.",
+      "cases": [
+        {
+          "id_hex": "447bc174a9c1124cfdc36e239ebea541",
+          "b64": "RHvBdKnBEkz9w24jnr6lQQ"
+        },
+        {
+          "id_hex": "0c9416bd1e4476edbeca782cc83d0e7f",
+          "b64": "DJQWvR5Edu2-yngsyD0Ofw"
+        },
+        {
+          "id_hex": "fbffbf11111111111111111111111111",
+          "b64": "-_-_EREREREREREREREREQ"
+        }
+      ],
+      "refused": [
+        {
+          "kind": "non_canonical",
+          "comment": "padding added",
+          "text": "RHvBdKnBEkz9w24jnr6lQQ==",
+          "id_hex": "447bc174a9c1124cfdc36e239ebea541"
+        },
+        {
+          "kind": "non_canonical",
+          "comment": "the standard alphabet, + and / for - and _",
+          "text": "+/+/EREREREREREREREREQ",
+          "id_hex": "fbffbf11111111111111111111111111"
+        },
+        {
+          "kind": "non_canonical",
+          "comment": "the last character changed in its unused bits",
+          "text": "RHvBdKnBEkz9w24jnr6lQR",
+          "id_hex": "447bc174a9c1124cfdc36e239ebea541"
+        },
+        {
+          "kind": "all_zero",
+          "comment": "sixteen zero bytes are never an id",
+          "text": "AAAAAAAAAAAAAAAAAAAAAA"
+        },
+        {
+          "kind": "wrong_length",
+          "comment": "15 bytes",
+          "text": "RHvBdKnBEkz9w24jnr6l"
+        },
+        {
+          "kind": "wrong_length",
+          "comment": "17 bytes",
+          "text": "RHvBdKnBEkz9w24jnr6lQQc"
+        },
+        {
+          "kind": "whitespace",
+          "comment": "a leading space",
+          "text": " RHvBdKnBEkz9w24jnr6lQQ"
+        },
+        {
+          "kind": "non_ascii",
+          "comment": "a character outside ASCII",
+          "text": "RHvBdKnBEkz9w24jnr6lQ\u00e9"
+        }
+      ]
+    },
+    "malformed": {
+      "$comment": "Message bodies a receiver must not act on, and what a desktop does with each: `end_link` ends the link, `ignore` drops the message and the link goes on, `answer_invalid_hello` is a first frame answered with welcome carrying error invalid_hello (and the link closed). `reader` says which validator a desktop reads it with: a hello or welcome as the first frame each way, an ack, or any other message. `also_acceptable` is for a text a JSON parser may refuse outright (WIRE.md, Encodings): ending the link instead of ignoring it is allowed. `well_formed_hello` is accepted, so the refusals around it mean something.",
+      "well_formed_hello": {
+        "hex": "7b2274797065223a2268656c6c6f222c2264617461223a7b2276657273696f6e223a362c226964223a227a6b73737a7a614b704541774555687051486f657a67222c226e616d65223a22566563746f72204d6163222c22706c6174666f726d223a226d61636f73222c22617070223a22312e352e30222c2263617073223a5b22636c6970626f617264222c2274657874225d2c22706f7274223a32343832302c226877223a2230323a30303a35653a31303a30303a3031227d7d",
+        "text": "{\"type\":\"hello\",\"data\":{\"version\":6,\"id\":\"zksszzaKpEAwEUhpQHoezg\",\"name\":\"Vector Mac\",\"platform\":\"macos\",\"app\":\"1.5.0\",\"caps\":[\"clipboard\",\"text\"],\"port\":24820,\"hw\":\"02:00:5e:10:00:01\"}}"
+      },
+      "cases": [
+        {
+          "comment": "an integer written 1.0 (dx)",
+          "hex": "7b2274797065223a226d6f7573656d6f7665222c2264617461223a7b226478223a312e302c226479223a302c22736571223a317d7d",
+          "text": "{\"type\":\"mousemove\",\"data\":{\"dx\":1.0,\"dy\":0,\"seq\":1}}",
+          "reader": "input",
+          "action": "ignore"
+        },
+        {
+          "comment": "an integer written 1e0 (seq)",
+          "hex": "7b2274797065223a226d6f7573656d6f7665222c2264617461223a7b226478223a312c226479223a302c22736571223a3165307d7d",
+          "text": "{\"type\":\"mousemove\",\"data\":{\"dx\":1,\"dy\":0,\"seq\":1e0}}",
+          "reader": "input",
+          "action": "ignore"
+        },
+        {
+          "comment": "a boolean for an integer (seq)",
+          "hex": "7b2274797065223a226d6f7573656d6f7665222c2264617461223a7b226478223a312c226479223a302c22736571223a747275657d7d",
+          "text": "{\"type\":\"mousemove\",\"data\":{\"dx\":1,\"dy\":0,\"seq\":true}}",
+          "reader": "input",
+          "action": "ignore"
+        },
+        {
+          "comment": "a boolean for an integer (dx)",
+          "hex": "7b2274797065223a226d6f7573656d6f7665222c2264617461223a7b226478223a66616c73652c226479223a302c22736571223a317d7d",
+          "text": "{\"type\":\"mousemove\",\"data\":{\"dx\":false,\"dy\":0,\"seq\":1}}",
+          "reader": "input",
+          "action": "ignore"
+        },
+        {
+          "comment": "NaN in a number",
+          "hex": "7b2274797065223a227363726f6c6c222c2264617461223a7b226479223a4e614e2c226478223a302c226d6f6465223a226c696e65222c22736571223a317d7d",
+          "text": "{\"type\":\"scroll\",\"data\":{\"dy\":NaN,\"dx\":0,\"mode\":\"line\",\"seq\":1}}",
+          "reader": "input",
+          "action": "ignore",
+          "also_acceptable": "end_link"
+        },
+        {
+          "comment": "Infinity in a number",
+          "hex": "7b2274797065223a227363726f6c6c222c2264617461223a7b226479223a496e66696e6974792c226478223a302c226d6f6465223a226c696e65222c22736571223a317d7d",
+          "text": "{\"type\":\"scroll\",\"data\":{\"dy\":Infinity,\"dx\":0,\"mode\":\"line\",\"seq\":1}}",
+          "reader": "input",
+          "action": "ignore",
+          "also_acceptable": "end_link"
+        },
+        {
+          "comment": "a byte order mark before the object",
+          "hex": "efbbbf7b2274797065223a226d6f7573656d6f7665222c2264617461223a7b226478223a312c226479223a302c22736571223a317d7d",
+          "text": "\ufeff{\"type\":\"mousemove\",\"data\":{\"dx\":1,\"dy\":0,\"seq\":1}}",
+          "reader": "input",
+          "action": "ignore",
+          "also_acceptable": "end_link"
+        },
+        {
+          "comment": "a lone surrogate in a string",
+          "hex": "7b2274797065223a2274657874222c2264617461223a7b2274657874223a225c7564383030222c22736571223a317d7d",
+          "text": "{\"type\":\"text\",\"data\":{\"text\":\"\\ud800\",\"seq\":1}}",
+          "reader": "input",
+          "action": "ignore",
+          "also_acceptable": "end_link"
+        },
+        {
+          "comment": "not an object: an array",
+          "hex": "5b312c325d",
+          "text": "[1,2]",
+          "reader": "message",
+          "action": "end_link"
+        },
+        {
+          "comment": "not an object: a number",
+          "hex": "37",
+          "text": "7",
+          "reader": "message",
+          "action": "end_link"
+        },
+        {
+          "comment": "not UTF-8",
+          "hex": "fffe7b7d",
+          "text": null,
+          "reader": "message",
+          "action": "end_link"
+        },
+        {
+          "comment": "no type",
+          "hex": "7b2264617461223a7b7d7d",
+          "text": "{\"data\":{}}",
+          "reader": "message",
+          "action": "ignore"
+        },
+        {
+          "comment": "a type that is not a string",
+          "hex": "7b2274797065223a352c2264617461223a7b7d7d",
+          "text": "{\"type\":5,\"data\":{}}",
+          "reader": "message",
+          "action": "ignore"
+        },
+        {
+          "comment": "data that is not an object",
+          "hex": "7b2274797065223a2270696e67222c2264617461223a5b5d7d",
+          "text": "{\"type\":\"ping\",\"data\":[]}",
+          "reader": "message",
+          "action": "ignore"
+        },
+        {
+          "comment": "hello: hw in upper case",
+          "hex": "7b2274797065223a2268656c6c6f222c2264617461223a7b2276657273696f6e223a362c226964223a227a6b73737a7a614b704541774555687051486f657a67222c226e616d65223a22566563746f72204d6163222c22706c6174666f726d223a226d61636f73222c22617070223a22312e352e30222c2263617073223a5b22636c6970626f617264222c2274657874225d2c22706f7274223a32343832302c226877223a2230323a30303a35453a31303a30303a3031227d7d",
+          "text": "{\"type\":\"hello\",\"data\":{\"version\":6,\"id\":\"zksszzaKpEAwEUhpQHoezg\",\"name\":\"Vector Mac\",\"platform\":\"macos\",\"app\":\"1.5.0\",\"caps\":[\"clipboard\",\"text\"],\"port\":24820,\"hw\":\"02:00:5E:10:00:01\"}}",
+          "reader": "hello",
+          "action": "answer_invalid_hello"
+        },
+        {
+          "comment": "hello: hw too short",
+          "hex": "7b2274797065223a2268656c6c6f222c2264617461223a7b2276657273696f6e223a362c226964223a227a6b73737a7a614b704541774555687051486f657a67222c226e616d65223a22566563746f72204d6163222c22706c6174666f726d223a226d61636f73222c22617070223a22312e352e30222c2263617073223a5b22636c6970626f617264222c2274657874225d2c22706f7274223a32343832302c226877223a2230323a30303a3565227d7d",
+          "text": "{\"type\":\"hello\",\"data\":{\"version\":6,\"id\":\"zksszzaKpEAwEUhpQHoezg\",\"name\":\"Vector Mac\",\"platform\":\"macos\",\"app\":\"1.5.0\",\"caps\":[\"clipboard\",\"text\"],\"port\":24820,\"hw\":\"02:00:5e\"}}",
+          "reader": "hello",
+          "action": "answer_invalid_hello"
+        },
+        {
+          "comment": "hello: app empty",
+          "hex": "7b2274797065223a2268656c6c6f222c2264617461223a7b2276657273696f6e223a362c226964223a227a6b73737a7a614b704541774555687051486f657a67222c226e616d65223a22566563746f72204d6163222c22706c6174666f726d223a226d61636f73222c22617070223a22222c2263617073223a5b22636c6970626f617264222c2274657874225d2c22706f7274223a32343832302c226877223a2230323a30303a35653a31303a30303a3031227d7d",
+          "text": "{\"type\":\"hello\",\"data\":{\"version\":6,\"id\":\"zksszzaKpEAwEUhpQHoezg\",\"name\":\"Vector Mac\",\"platform\":\"macos\",\"app\":\"\",\"caps\":[\"clipboard\",\"text\"],\"port\":24820,\"hw\":\"02:00:5e:10:00:01\"}}",
+          "reader": "hello",
+          "action": "answer_invalid_hello"
+        },
+        {
+          "comment": "hello: app over 32 characters",
+          "hex": "7b2274797065223a2268656c6c6f222c2264617461223a7b2276657273696f6e223a362c226964223a227a6b73737a7a614b704541774555687051486f657a67222c226e616d65223a22566563746f72204d6163222c22706c6174666f726d223a226d61636f73222c22617070223a22787878787878787878787878787878787878787878787878787878787878787878222c2263617073223a5b22636c6970626f617264222c2274657874225d2c22706f7274223a32343832302c226877223a2230323a30303a35653a31303a30303a3031227d7d",
+          "text": "{\"type\":\"hello\",\"data\":{\"version\":6,\"id\":\"zksszzaKpEAwEUhpQHoezg\",\"name\":\"Vector Mac\",\"platform\":\"macos\",\"app\":\"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\",\"caps\":[\"clipboard\",\"text\"],\"port\":24820,\"hw\":\"02:00:5e:10:00:01\"}}",
+          "reader": "hello",
+          "action": "answer_invalid_hello"
+        },
+        {
+          "comment": "hello: app outside printable ASCII",
+          "hex": "7b2274797065223a2268656c6c6f222c2264617461223a7b2276657273696f6e223a362c226964223a227a6b73737a7a614b704541774555687051486f657a67222c226e616d65223a22566563746f72204d6163222c22706c6174666f726d223a226d61636f73222c22617070223a22312e352e305c7530306539222c2263617073223a5b22636c6970626f617264222c2274657874225d2c22706f7274223a32343832302c226877223a2230323a30303a35653a31303a30303a3031227d7d",
+          "text": "{\"type\":\"hello\",\"data\":{\"version\":6,\"id\":\"zksszzaKpEAwEUhpQHoezg\",\"name\":\"Vector Mac\",\"platform\":\"macos\",\"app\":\"1.5.0\\u00e9\",\"caps\":[\"clipboard\",\"text\"],\"port\":24820,\"hw\":\"02:00:5e:10:00:01\"}}",
+          "reader": "hello",
+          "action": "answer_invalid_hello"
+        },
+        {
+          "comment": "hello: caps not a list",
+          "hex": "7b2274797065223a2268656c6c6f222c2264617461223a7b2276657273696f6e223a362c226964223a227a6b73737a7a614b704541774555687051486f657a67222c226e616d65223a22566563746f72204d6163222c22706c6174666f726d223a226d61636f73222c22617070223a22312e352e30222c2263617073223a22636c6970626f617264222c22706f7274223a32343832302c226877223a2230323a30303a35653a31303a30303a3031227d7d",
+          "text": "{\"type\":\"hello\",\"data\":{\"version\":6,\"id\":\"zksszzaKpEAwEUhpQHoezg\",\"name\":\"Vector Mac\",\"platform\":\"macos\",\"app\":\"1.5.0\",\"caps\":\"clipboard\",\"port\":24820,\"hw\":\"02:00:5e:10:00:01\"}}",
+          "reader": "hello",
+          "action": "answer_invalid_hello"
+        },
+        {
+          "comment": "hello: more than 16 caps",
+          "hex": "7b2274797065223a2268656c6c6f222c2264617461223a7b2276657273696f6e223a362c226964223a227a6b73737a7a614b704541774555687051486f657a67222c226e616d65223a22566563746f72204d6163222c22706c6174666f726d223a226d61636f73222c22617070223a22312e352e30222c2263617073223a5b2263617030222c2263617031222c2263617032222c2263617033222c2263617034222c2263617035222c2263617036222c2263617037222c2263617038222c2263617039222c226361703130222c226361703131222c226361703132222c226361703133222c226361703134222c226361703135222c226361703136225d2c22706f7274223a32343832302c226877223a2230323a30303a35653a31303a30303a3031227d7d",
+          "text": "{\"type\":\"hello\",\"data\":{\"version\":6,\"id\":\"zksszzaKpEAwEUhpQHoezg\",\"name\":\"Vector Mac\",\"platform\":\"macos\",\"app\":\"1.5.0\",\"caps\":[\"cap0\",\"cap1\",\"cap2\",\"cap3\",\"cap4\",\"cap5\",\"cap6\",\"cap7\",\"cap8\",\"cap9\",\"cap10\",\"cap11\",\"cap12\",\"cap13\",\"cap14\",\"cap15\",\"cap16\"],\"port\":24820,\"hw\":\"02:00:5e:10:00:01\"}}",
+          "reader": "hello",
+          "action": "answer_invalid_hello"
+        },
+        {
+          "comment": "hello: an empty cap",
+          "hex": "7b2274797065223a2268656c6c6f222c2264617461223a7b2276657273696f6e223a362c226964223a227a6b73737a7a614b704541774555687051486f657a67222c226e616d65223a22566563746f72204d6163222c22706c6174666f726d223a226d61636f73222c22617070223a22312e352e30222c2263617073223a5b2274657874222c22225d2c22706f7274223a32343832302c226877223a2230323a30303a35653a31303a30303a3031227d7d",
+          "text": "{\"type\":\"hello\",\"data\":{\"version\":6,\"id\":\"zksszzaKpEAwEUhpQHoezg\",\"name\":\"Vector Mac\",\"platform\":\"macos\",\"app\":\"1.5.0\",\"caps\":[\"text\",\"\"],\"port\":24820,\"hw\":\"02:00:5e:10:00:01\"}}",
+          "reader": "hello",
+          "action": "answer_invalid_hello"
+        },
+        {
+          "comment": "hello: a cap that is not a string",
+          "hex": "7b2274797065223a2268656c6c6f222c2264617461223a7b2276657273696f6e223a362c226964223a227a6b73737a7a614b704541774555687051486f657a67222c226e616d65223a22566563746f72204d6163222c22706c6174666f726d223a226d61636f73222c22617070223a22312e352e30222c2263617073223a5b2274657874222c355d2c22706f7274223a32343832302c226877223a2230323a30303a35653a31303a30303a3031227d7d",
+          "text": "{\"type\":\"hello\",\"data\":{\"version\":6,\"id\":\"zksszzaKpEAwEUhpQHoezg\",\"name\":\"Vector Mac\",\"platform\":\"macos\",\"app\":\"1.5.0\",\"caps\":[\"text\",5],\"port\":24820,\"hw\":\"02:00:5e:10:00:01\"}}",
+          "reader": "hello",
+          "action": "answer_invalid_hello"
+        },
+        {
+          "comment": "hello: platform with a space",
+          "hex": "7b2274797065223a2268656c6c6f222c2264617461223a7b2276657273696f6e223a362c226964223a227a6b73737a7a614b704541774555687051486f657a67222c226e616d65223a22566563746f72204d6163222c22706c6174666f726d223a224d6163204f53222c22617070223a22312e352e30222c2263617073223a5b22636c6970626f617264222c2274657874225d2c22706f7274223a32343832302c226877223a2230323a30303a35653a31303a30303a3031227d7d",
+          "text": "{\"type\":\"hello\",\"data\":{\"version\":6,\"id\":\"zksszzaKpEAwEUhpQHoezg\",\"name\":\"Vector Mac\",\"platform\":\"Mac OS\",\"app\":\"1.5.0\",\"caps\":[\"clipboard\",\"text\"],\"port\":24820,\"hw\":\"02:00:5e:10:00:01\"}}",
+          "reader": "hello",
+          "action": "answer_invalid_hello"
+        },
+        {
+          "comment": "hello: platform over 16 characters",
+          "hex": "7b2274797065223a2268656c6c6f222c2264617461223a7b2276657273696f6e223a362c226964223a227a6b73737a7a614b704541774555687051486f657a67222c226e616d65223a22566563746f72204d6163222c22706c6174666f726d223a226161616161616161616161616161616161222c22617070223a22312e352e30222c2263617073223a5b22636c6970626f617264222c2274657874225d2c22706f7274223a32343832302c226877223a2230323a30303a35653a31303a30303a3031227d7d",
+          "text": "{\"type\":\"hello\",\"data\":{\"version\":6,\"id\":\"zksszzaKpEAwEUhpQHoezg\",\"name\":\"Vector Mac\",\"platform\":\"aaaaaaaaaaaaaaaaa\",\"app\":\"1.5.0\",\"caps\":[\"clipboard\",\"text\"],\"port\":24820,\"hw\":\"02:00:5e:10:00:01\"}}",
+          "reader": "hello",
+          "action": "answer_invalid_hello"
+        },
+        {
+          "comment": "hello: name empty",
+          "hex": "7b2274797065223a2268656c6c6f222c2264617461223a7b2276657273696f6e223a362c226964223a227a6b73737a7a614b704541774555687051486f657a67222c226e616d65223a22222c22706c6174666f726d223a226d61636f73222c22617070223a22312e352e30222c2263617073223a5b22636c6970626f617264222c2274657874225d2c22706f7274223a32343832302c226877223a2230323a30303a35653a31303a30303a3031227d7d",
+          "text": "{\"type\":\"hello\",\"data\":{\"version\":6,\"id\":\"zksszzaKpEAwEUhpQHoezg\",\"name\":\"\",\"platform\":\"macos\",\"app\":\"1.5.0\",\"caps\":[\"clipboard\",\"text\"],\"port\":24820,\"hw\":\"02:00:5e:10:00:01\"}}",
+          "reader": "hello",
+          "action": "answer_invalid_hello"
+        },
+        {
+          "comment": "hello: name of 49 code points",
+          "hex": "7b2274797065223a2268656c6c6f222c2264617461223a7b2276657273696f6e223a362c226964223a227a6b73737a7a614b704541774555687051486f657a67222c226e616d65223a226e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e222c22706c6174666f726d223a226d61636f73222c22617070223a22312e352e30222c2263617073223a5b22636c6970626f617264222c2274657874225d2c22706f7274223a32343832302c226877223a2230323a30303a35653a31303a30303a3031227d7d",
+          "text": "{\"type\":\"hello\",\"data\":{\"version\":6,\"id\":\"zksszzaKpEAwEUhpQHoezg\",\"name\":\"nnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnn\",\"platform\":\"macos\",\"app\":\"1.5.0\",\"caps\":[\"clipboard\",\"text\"],\"port\":24820,\"hw\":\"02:00:5e:10:00:01\"}}",
+          "reader": "hello",
+          "action": "answer_invalid_hello"
+        },
+        {
+          "comment": "hello: id of sixteen zero bytes",
+          "hex": "7b2274797065223a2268656c6c6f222c2264617461223a7b2276657273696f6e223a362c226964223a2241414141414141414141414141414141414141414141222c226e616d65223a22566563746f72204d6163222c22706c6174666f726d223a226d61636f73222c22617070223a22312e352e30222c2263617073223a5b22636c6970626f617264222c2274657874225d2c22706f7274223a32343832302c226877223a2230323a30303a35653a31303a30303a3031227d7d",
+          "text": "{\"type\":\"hello\",\"data\":{\"version\":6,\"id\":\"AAAAAAAAAAAAAAAAAAAAAA\",\"name\":\"Vector Mac\",\"platform\":\"macos\",\"app\":\"1.5.0\",\"caps\":[\"clipboard\",\"text\"],\"port\":24820,\"hw\":\"02:00:5e:10:00:01\"}}",
+          "reader": "hello",
+          "action": "answer_invalid_hello"
+        },
+        {
+          "comment": "hello: id of the wrong length",
+          "hex": "7b2274797065223a2268656c6c6f222c2264617461223a7b2276657273696f6e223a362c226964223a227a6b73737a7a614b704541774555687051486f65222c226e616d65223a22566563746f72204d6163222c22706c6174666f726d223a226d61636f73222c22617070223a22312e352e30222c2263617073223a5b22636c6970626f617264222c2274657874225d2c22706f7274223a32343832302c226877223a2230323a30303a35653a31303a30303a3031227d7d",
+          "text": "{\"type\":\"hello\",\"data\":{\"version\":6,\"id\":\"zksszzaKpEAwEUhpQHoe\",\"name\":\"Vector Mac\",\"platform\":\"macos\",\"app\":\"1.5.0\",\"caps\":[\"clipboard\",\"text\"],\"port\":24820,\"hw\":\"02:00:5e:10:00:01\"}}",
+          "reader": "hello",
+          "action": "answer_invalid_hello"
+        },
+        {
+          "comment": "hello: version 5",
+          "hex": "7b2274797065223a2268656c6c6f222c2264617461223a7b2276657273696f6e223a352c226964223a227a6b73737a7a614b704541774555687051486f657a67222c226e616d65223a22566563746f72204d6163222c22706c6174666f726d223a226d61636f73222c22617070223a22312e352e30222c2263617073223a5b22636c6970626f617264222c2274657874225d2c22706f7274223a32343832302c226877223a2230323a30303a35653a31303a30303a3031227d7d",
+          "text": "{\"type\":\"hello\",\"data\":{\"version\":5,\"id\":\"zksszzaKpEAwEUhpQHoezg\",\"name\":\"Vector Mac\",\"platform\":\"macos\",\"app\":\"1.5.0\",\"caps\":[\"clipboard\",\"text\"],\"port\":24820,\"hw\":\"02:00:5e:10:00:01\"}}",
+          "reader": "hello",
+          "action": "answer_invalid_hello"
+        },
+        {
+          "comment": "hello: port above 65535",
+          "hex": "7b2274797065223a2268656c6c6f222c2264617461223a7b2276657273696f6e223a362c226964223a227a6b73737a7a614b704541774555687051486f657a67222c226e616d65223a22566563746f72204d6163222c22706c6174666f726d223a226d61636f73222c22617070223a22312e352e30222c2263617073223a5b22636c6970626f617264222c2274657874225d2c22706f7274223a36353533362c226877223a2230323a30303a35653a31303a30303a3031227d7d",
+          "text": "{\"type\":\"hello\",\"data\":{\"version\":6,\"id\":\"zksszzaKpEAwEUhpQHoezg\",\"name\":\"Vector Mac\",\"platform\":\"macos\",\"app\":\"1.5.0\",\"caps\":[\"clipboard\",\"text\"],\"port\":65536,\"hw\":\"02:00:5e:10:00:01\"}}",
+          "reader": "hello",
+          "action": "answer_invalid_hello"
+        },
+        {
+          "comment": "hello: port as a string",
+          "hex": "7b2274797065223a2268656c6c6f222c2264617461223a7b2276657273696f6e223a362c226964223a227a6b73737a7a614b704541774555687051486f657a67222c226e616d65223a22566563746f72204d6163222c22706c6174666f726d223a226d61636f73222c22617070223a22312e352e30222c2263617073223a5b22636c6970626f617264222c2274657874225d2c22706f7274223a223234383230222c226877223a2230323a30303a35653a31303a30303a3031227d7d",
+          "text": "{\"type\":\"hello\",\"data\":{\"version\":6,\"id\":\"zksszzaKpEAwEUhpQHoezg\",\"name\":\"Vector Mac\",\"platform\":\"macos\",\"app\":\"1.5.0\",\"caps\":[\"clipboard\",\"text\"],\"port\":\"24820\",\"hw\":\"02:00:5e:10:00:01\"}}",
+          "reader": "hello",
+          "action": "answer_invalid_hello"
+        },
+        {
+          "comment": "hello: port written 1.0",
+          "hex": "7b2274797065223a2268656c6c6f222c2264617461223a7b2276657273696f6e223a362c226964223a227a6b73737a7a614b704541774555687051486f657a67222c226e616d65223a22566563746f72204d6163222c22706c6174666f726d223a226d61636f73222c22617070223a22312e352e30222c2263617073223a5b22636c6970626f617264222c2274657874225d2c22706f7274223a312e302c226877223a2230323a30303a35653a31303a30303a3031227d7d",
+          "text": "{\"type\":\"hello\",\"data\":{\"version\":6,\"id\":\"zksszzaKpEAwEUhpQHoezg\",\"name\":\"Vector Mac\",\"platform\":\"macos\",\"app\":\"1.5.0\",\"caps\":[\"clipboard\",\"text\"],\"port\":1.0,\"hw\":\"02:00:5e:10:00:01\"}}",
+          "reader": "hello",
+          "action": "answer_invalid_hello"
+        },
+        {
+          "comment": "welcome: accepts as a string",
+          "hex": "7b2274797065223a2277656c636f6d65222c2264617461223a7b2276657273696f6e223a362c226964223a226c5658534453746f6e5378622d4768667533735f4567222c226e616d65223a22564543544f522d5043222c22706c6174666f726d223a2277696e646f7773222c22617070223a22312e352e30222c2263617073223a5b2274657874225d2c2261636365707473223a2274727565227d7d",
+          "text": "{\"type\":\"welcome\",\"data\":{\"version\":6,\"id\":\"lVXSDStonSxb-Ghfu3s_Eg\",\"name\":\"VECTOR-PC\",\"platform\":\"windows\",\"app\":\"1.5.0\",\"caps\":[\"text\"],\"accepts\":\"true\"}}",
+          "reader": "welcome",
+          "action": "end_link"
+        },
+        {
+          "comment": "welcome: accepts missing",
+          "hex": "7b2274797065223a2277656c636f6d65222c2264617461223a7b2276657273696f6e223a362c226964223a226c5658534453746f6e5378622d4768667533735f4567222c226e616d65223a22564543544f522d5043222c22706c6174666f726d223a2277696e646f7773222c22617070223a22312e352e30222c2263617073223a5b2274657874225d7d7d",
+          "text": "{\"type\":\"welcome\",\"data\":{\"version\":6,\"id\":\"lVXSDStonSxb-Ghfu3s_Eg\",\"name\":\"VECTOR-PC\",\"platform\":\"windows\",\"app\":\"1.5.0\",\"caps\":[\"text\"]}}",
+          "reader": "welcome",
+          "action": "end_link"
+        },
+        {
+          "comment": "welcome: an error that is not one of the two",
+          "hex": "7b2274797065223a2277656c636f6d65222c2264617461223a7b2276657273696f6e223a362c226572726f72223a22676f5f61776179227d7d",
+          "text": "{\"type\":\"welcome\",\"data\":{\"version\":6,\"error\":\"go_away\"}}",
+          "reader": "welcome",
+          "action": "end_link"
+        },
+        {
+          "comment": "welcome: id of sixteen zero bytes",
+          "hex": "7b2274797065223a2277656c636f6d65222c2264617461223a7b2276657273696f6e223a362c226964223a2241414141414141414141414141414141414141414141222c226e616d65223a22564543544f522d5043222c22706c6174666f726d223a2277696e646f7773222c22617070223a22312e352e30222c2263617073223a5b2274657874225d2c2261636365707473223a747275657d7d",
+          "text": "{\"type\":\"welcome\",\"data\":{\"version\":6,\"id\":\"AAAAAAAAAAAAAAAAAAAAAA\",\"name\":\"VECTOR-PC\",\"platform\":\"windows\",\"app\":\"1.5.0\",\"caps\":[\"text\"],\"accepts\":true}}",
+          "reader": "welcome",
+          "action": "end_link"
+        },
+        {
+          "comment": "welcome: version 5",
+          "hex": "7b2274797065223a2277656c636f6d65222c2264617461223a7b2276657273696f6e223a352c226964223a226c5658534453746f6e5378622d4768667533735f4567222c226e616d65223a22564543544f522d5043222c22706c6174666f726d223a2277696e646f7773222c22617070223a22312e352e30222c2263617073223a5b2274657874225d2c2261636365707473223a747275657d7d",
+          "text": "{\"type\":\"welcome\",\"data\":{\"version\":5,\"id\":\"lVXSDStonSxb-Ghfu3s_Eg\",\"name\":\"VECTOR-PC\",\"platform\":\"windows\",\"app\":\"1.5.0\",\"caps\":[\"text\"],\"accepts\":true}}",
+          "reader": "welcome",
+          "action": "end_link"
+        },
+        {
+          "comment": "ack: seq written 1.0",
+          "hex": "7b2274797065223a2261636b222c2264617461223a7b22736571223a312e302c2268656c645f7573223a307d7d",
+          "text": "{\"type\":\"ack\",\"data\":{\"seq\":1.0,\"held_us\":0}}",
+          "reader": "ack",
+          "action": "end_link"
+        },
+        {
+          "comment": "ack: held_us negative",
+          "hex": "7b2274797065223a2261636b222c2264617461223a7b22736571223a312c2268656c645f7573223a2d317d7d",
+          "text": "{\"type\":\"ack\",\"data\":{\"seq\":1,\"held_us\":-1}}",
+          "reader": "ack",
+          "action": "end_link"
+        },
+        {
+          "comment": "ack: held_us above 2^31 - 1",
+          "hex": "7b2274797065223a2261636b222c2264617461223a7b22736571223a312c2268656c645f7573223a323134373438333634387d7d",
+          "text": "{\"type\":\"ack\",\"data\":{\"seq\":1,\"held_us\":2147483648}}",
+          "reader": "ack",
+          "action": "end_link"
+        },
+        {
+          "comment": "ack: held_us missing",
+          "hex": "7b2274797065223a2261636b222c2264617461223a7b22736571223a317d7d",
+          "text": "{\"type\":\"ack\",\"data\":{\"seq\":1}}",
+          "reader": "ack",
+          "action": "end_link"
+        },
+        {
+          "comment": "ack: locked false",
+          "hex": "7b2274797065223a2261636b222c2264617461223a7b22736571223a312c2268656c645f7573223a302c226c6f636b6564223a66616c73657d7d",
+          "text": "{\"type\":\"ack\",\"data\":{\"seq\":1,\"held_us\":0,\"locked\":false}}",
+          "reader": "ack",
+          "action": "end_link"
+        },
+        {
+          "comment": "accept: route 0",
+          "hex": "7b2274797065223a22616363657074222c2264617461223a7b22726f757465223a307d7d",
+          "text": "{\"type\":\"accept\",\"data\":{\"route\":0}}",
+          "reader": "accept",
+          "action": "ignore"
+        },
+        {
+          "comment": "accept: route as a string",
+          "hex": "7b2274797065223a22616363657074222c2264617461223a7b22726f757465223a2231227d7d",
+          "text": "{\"type\":\"accept\",\"data\":{\"route\":\"1\"}}",
+          "reader": "accept",
+          "action": "ignore"
+        },
+        {
+          "comment": "refuse: no route",
+          "hex": "7b2274797065223a22726566757365222c2264617461223a7b22776879223a226f776e6564227d7d",
+          "text": "{\"type\":\"refuse\",\"data\":{\"why\":\"owned\"}}",
+          "reader": "refuse",
+          "action": "ignore"
+        },
+        {
+          "comment": "switch: next of sixteen zero bytes",
+          "hex": "7b2274797065223a22737769746368222c2264617461223a7b22726f757465223a312c226e657874223a2241414141414141414141414141414141414141414141227d7d",
+          "text": "{\"type\":\"switch\",\"data\":{\"route\":1,\"next\":\"AAAAAAAAAAAAAAAAAAAAAA\"}}",
+          "reader": "switch",
+          "action": "ignore"
+        },
+        {
+          "comment": "switch: edge without offset",
+          "hex": "7b2274797065223a22737769746368222c2264617461223a7b22726f757465223a312c226e657874223a224a6e30686163724742306356435775645155514b7541222c2265646765223a226c656674227d7d",
+          "text": "{\"type\":\"switch\",\"data\":{\"route\":1,\"next\":\"Jn0hacrGB0cVCWudQUQKuA\",\"edge\":\"left\"}}",
+          "reader": "switch",
+          "action": "ignore"
+        },
+        {
+          "comment": "switch: an edge that is not one",
+          "hex": "7b2274797065223a22737769746368222c2264617461223a7b22726f757465223a312c226e657874223a224a6e30686163724742306356435775645155514b7541222c2265646765223a226d6964646c65222c226f6666736574223a302e357d7d",
+          "text": "{\"type\":\"switch\",\"data\":{\"route\":1,\"next\":\"Jn0hacrGB0cVCWudQUQKuA\",\"edge\":\"middle\",\"offset\":0.5}}",
+          "reader": "switch",
+          "action": "ignore"
+        }
+      ],
+      "implementation_defined": [
+        {
+          "comment": "a repeated key: a receiver may refuse the message or keep the last value (WIRE.md, Encodings); a desktop ignores it, and a correct sender never sends one",
+          "hex": "7b2274797065223a226d6f7573656d6f7665222c2264617461223a7b226478223a312c226478223a322c226479223a302c22736571223a317d7d",
+          "text": "{\"type\":\"mousemove\",\"data\":{\"dx\":1,\"dx\":2,\"dy\":0,\"seq\":1}}",
+          "reader": "input",
+          "desktop_action": "ignore"
+        }
+      ]
+    },
+    "qr": {
+      "$comment": "The text a pairing QR holds: four keys in order, lower case, each once, nothing else. `k` is the code's 16-byte QR secret as 22 characters of b64.",
+      "good": [
+        {
+          "text": "beamer://pair?host=192.168.0.7&port=24821&code=482913&k=brvRqu2MyhOhbZZMAnqfWg",
+          "host": "192.168.0.7",
+          "port": 24821,
+          "code": "482913",
+          "secret_hex": "6ebbd1aaed8cca13a16d964c027a9f5a"
+        },
+        {
+          "text": "beamer://pair?host=192.168.1.20&port=24821&code=007045&k=1K4lYhJOxhk3Ka_ys0hZag",
+          "host": "192.168.1.20",
+          "port": 24821,
+          "code": "007045",
+          "secret_hex": "d4ae2562124ec6193729aff2b348596a"
+        }
+      ],
+      "bad": [
+        {
+          "comment": "the wrong scheme",
+          "text": "beamerx://pair?host=192.168.0.7&port=24821&code=482913&k=brvRqu2MyhOhbZZMAnqfWg",
+          "error": "bad_qr"
+        },
+        {
+          "comment": "a slash before the query",
+          "text": "beamer://pair/?host=192.168.0.7&port=24821&code=482913&k=brvRqu2MyhOhbZZMAnqfWg",
+          "error": "bad_qr"
+        },
+        {
+          "comment": "no k",
+          "text": "beamer://pair?host=192.168.0.7&port=24821&code=482913",
+          "error": "bad_qr"
+        },
+        {
+          "comment": "an extra key",
+          "text": "beamer://pair?host=192.168.0.7&port=24821&code=482913&k=brvRqu2MyhOhbZZMAnqfWg&x=1",
+          "error": "bad_qr"
+        },
+        {
+          "comment": "the keys in another order",
+          "text": "beamer://pair?port=24821&host=192.168.0.7&code=482913&k=brvRqu2MyhOhbZZMAnqfWg",
+          "error": "bad_qr"
+        },
+        {
+          "comment": "an upper-case key",
+          "text": "beamer://pair?Host=192.168.0.7&port=24821&code=482913&k=brvRqu2MyhOhbZZMAnqfWg",
+          "error": "bad_qr"
+        },
+        {
+          "comment": "a repeated key",
+          "text": "beamer://pair?host=192.168.0.7&port=24821&code=482913&k=brvRqu2MyhOhbZZMAnqfWg&k=brvRqu2MyhOhbZZMAnqfWg",
+          "error": "bad_qr"
+        },
+        {
+          "comment": "a host with a leading zero octet",
+          "text": "beamer://pair?host=192.168.0.07&port=24821&code=482913&k=brvRqu2MyhOhbZZMAnqfWg",
+          "error": "bad_qr"
+        },
+        {
+          "comment": "a host that is a name",
+          "text": "beamer://pair?host=beamer.example&port=24821&code=482913&k=brvRqu2MyhOhbZZMAnqfWg",
+          "error": "bad_qr"
+        },
+        {
+          "comment": "a host of five octets",
+          "text": "beamer://pair?host=192.168.0.7.5&port=24821&code=482913&k=brvRqu2MyhOhbZZMAnqfWg",
+          "error": "bad_qr"
+        },
+        {
+          "comment": "a host octet above 255",
+          "text": "beamer://pair?host=192.168.0.256&port=24821&code=482913&k=brvRqu2MyhOhbZZMAnqfWg",
+          "error": "bad_qr"
+        },
+        {
+          "comment": "port 0",
+          "text": "beamer://pair?host=192.168.0.7&port=0&code=482913&k=brvRqu2MyhOhbZZMAnqfWg",
+          "error": "bad_qr"
+        },
+        {
+          "comment": "port 65536",
+          "text": "beamer://pair?host=192.168.0.7&port=65536&code=482913&k=brvRqu2MyhOhbZZMAnqfWg",
+          "error": "bad_qr"
+        },
+        {
+          "comment": "a port with a leading zero",
+          "text": "beamer://pair?host=192.168.0.7&port=024821&code=482913&k=brvRqu2MyhOhbZZMAnqfWg",
+          "error": "bad_qr"
+        },
+        {
+          "comment": "a port with a sign",
+          "text": "beamer://pair?host=192.168.0.7&port=+24821&code=482913&k=brvRqu2MyhOhbZZMAnqfWg",
+          "error": "bad_qr"
+        },
+        {
+          "comment": "a port with a digit percent-encoded: the text is read as it is",
+          "text": "beamer://pair?host=192.168.0.7&port=%32%34821&code=482913&k=brvRqu2MyhOhbZZMAnqfWg",
+          "error": "bad_qr"
+        },
+        {
+          "comment": "a code of five digits",
+          "text": "beamer://pair?host=192.168.0.7&port=24821&code=48291&k=brvRqu2MyhOhbZZMAnqfWg",
+          "error": "bad_qr"
+        },
+        {
+          "comment": "a code with a letter",
+          "text": "beamer://pair?host=192.168.0.7&port=24821&code=48291a&k=brvRqu2MyhOhbZZMAnqfWg",
+          "error": "bad_qr"
+        },
+        {
+          "comment": "a code in full-width digits",
+          "text": "beamer://pair?host=192.168.0.7&port=24821&code=\uff14\uff18\uff12\uff19\uff11\uff13&k=brvRqu2MyhOhbZZMAnqfWg",
+          "error": "bad_qr"
+        },
+        {
+          "comment": "k of 21 characters",
+          "text": "beamer://pair?host=192.168.0.7&port=24821&code=482913&k=brvRqu2MyhOhbZZMAnqfW",
+          "error": "bad_qr"
+        },
+        {
+          "comment": "k with padding",
+          "text": "beamer://pair?host=192.168.0.7&port=24821&code=482913&k=brvRqu2MyhOhbZZMAnqfWg==",
+          "error": "bad_qr"
+        },
+        {
+          "comment": "k in a non-canonical spelling: its last character changed in its unused bits",
+          "text": "beamer://pair?host=192.168.0.7&port=24821&code=482913&k=brvRqu2MyhOhbZZMAnqfWh",
+          "error": "bad_qr"
+        },
+        {
+          "comment": "k in the standard alphabet, + and / for - and _",
+          "text": "beamer://pair?host=192.168.0.7&port=24821&code=482913&k=+/+/AAAAAAAAAAAAAAAAAA",
+          "error": "bad_qr"
+        }
+      ]
+    },
+    "key_table": {
+      "$comment": "WIRE.md section 7's table. `sender` is the family of the machine whose key was pressed (mac: macos and ios; pc: every other platform, an unknown one included); `physical` is the key on that machine's own keyboard; the three columns are the name it travels as to a peer of the same family, and across families under each saved style. `evdev` maps a Linux sender's key codes to physical names; a code not in it is a character key.",
+      "mac_platforms": [
+        "ios",
+        "macos"
+      ],
+      "unknown_platform_is": "pc",
+      "rows": [
+        {
+          "key": "Mac Control",
+          "sender": "mac",
+          "physical": "ctrl",
+          "same_family": "ctrl",
+          "across_semantic": "cmd",
+          "across_positional": "ctrl"
+        },
+        {
+          "key": "Mac right Control",
+          "sender": "mac",
+          "physical": "ctrl_r",
+          "same_family": "ctrl_r",
+          "across_semantic": "cmd",
+          "across_positional": "ctrl"
+        },
+        {
+          "key": "Mac Command",
+          "sender": "mac",
+          "physical": "cmd",
+          "same_family": "cmd",
+          "across_semantic": "ctrl",
+          "across_positional": "cmd"
+        },
+        {
+          "key": "Mac right Command",
+          "sender": "mac",
+          "physical": "cmd_r",
+          "same_family": "cmd_r",
+          "across_semantic": "ctrl",
+          "across_positional": "cmd"
+        },
+        {
+          "key": "Mac Option",
+          "sender": "mac",
+          "physical": "alt",
+          "same_family": "alt",
+          "across_semantic": "alt",
+          "across_positional": "alt"
+        },
+        {
+          "key": "Mac right Option",
+          "sender": "mac",
+          "physical": "alt_r",
+          "same_family": "alt_r",
+          "across_semantic": "alt",
+          "across_positional": "alt"
+        },
+        {
+          "key": "PC Control",
+          "sender": "pc",
+          "physical": "ctrl",
+          "same_family": "ctrl",
+          "across_semantic": "cmd",
+          "across_positional": "ctrl"
+        },
+        {
+          "key": "PC right Control",
+          "sender": "pc",
+          "physical": "ctrl_r",
+          "same_family": "ctrl_r",
+          "across_semantic": "cmd_r",
+          "across_positional": "ctrl_r"
+        },
+        {
+          "key": "PC Windows or Super",
+          "sender": "pc",
+          "physical": "cmd",
+          "same_family": "cmd",
+          "across_semantic": "ctrl",
+          "across_positional": "cmd"
+        },
+        {
+          "key": "PC right Windows or Super",
+          "sender": "pc",
+          "physical": "cmd_r",
+          "same_family": "cmd_r",
+          "across_semantic": "ctrl_r",
+          "across_positional": "cmd_r"
+        },
+        {
+          "key": "PC Alt",
+          "sender": "pc",
+          "physical": "alt",
+          "same_family": "alt",
+          "across_semantic": "alt",
+          "across_positional": "alt"
+        },
+        {
+          "key": "PC right Alt or AltGr",
+          "sender": "pc",
+          "physical": "alt_r",
+          "same_family": "alt_r",
+          "across_semantic": "alt_r",
+          "across_positional": "alt_r"
+        }
+      ],
+      "names": [
+        "alt",
+        "alt_r",
+        "backspace",
+        "browser_back",
+        "browser_forward",
+        "caps_lock",
+        "cmd",
+        "cmd_r",
+        "ctrl",
+        "ctrl_r",
+        "delete",
+        "down",
+        "end",
+        "enter",
+        "esc",
+        "f1",
+        "f10",
+        "f11",
+        "f12",
+        "f13",
+        "f14",
+        "f15",
+        "f16",
+        "f17",
+        "f18",
+        "f19",
+        "f2",
+        "f20",
+        "f21",
+        "f22",
+        "f23",
+        "f24",
+        "f3",
+        "f4",
+        "f5",
+        "f6",
+        "f7",
+        "f8",
+        "f9",
+        "home",
+        "insert",
+        "left",
+        "media_next",
+        "media_play_pause",
+        "media_prev",
+        "media_stop",
+        "menu",
+        "num_lock",
+        "page_down",
+        "page_up",
+        "pause",
+        "print_screen",
+        "right",
+        "scroll_lock",
+        "shift",
+        "shift_r",
+        "space",
+        "tab",
+        "up",
+        "volume_down",
+        "volume_mute",
+        "volume_up"
+      ],
+      "evdev": {
+        "1": "esc",
+        "14": "backspace",
+        "15": "tab",
+        "28": "enter",
+        "29": "ctrl",
+        "42": "shift",
+        "54": "shift_r",
+        "56": "alt",
+        "57": "space",
+        "58": "caps_lock",
+        "59": "f1",
+        "60": "f2",
+        "61": "f3",
+        "62": "f4",
+        "63": "f5",
+        "64": "f6",
+        "65": "f7",
+        "66": "f8",
+        "67": "f9",
+        "68": "f10",
+        "69": "num_lock",
+        "70": "scroll_lock",
+        "87": "f11",
+        "88": "f12",
+        "96": "enter",
+        "97": "ctrl_r",
+        "99": "print_screen",
+        "100": "alt_r",
+        "102": "home",
+        "103": "up",
+        "104": "page_up",
+        "105": "left",
+        "106": "right",
+        "107": "end",
+        "108": "down",
+        "109": "page_down",
+        "110": "insert",
+        "111": "delete",
+        "113": "volume_mute",
+        "114": "volume_down",
+        "115": "volume_up",
+        "119": "pause",
+        "125": "cmd",
+        "126": "cmd_r",
+        "127": "menu",
+        "158": "browser_back",
+        "159": "browser_forward",
+        "163": "media_next",
+        "164": "media_play_pause",
+        "165": "media_prev",
+        "166": "media_stop",
+        "183": "f13",
+        "184": "f14",
+        "185": "f15",
+        "186": "f16",
+        "187": "f17",
+        "188": "f18",
+        "189": "f19",
+        "190": "f20",
+        "191": "f21",
+        "192": "f22",
+        "193": "f23",
+        "194": "f24"
+      }
+    },
+    "ack": {
+      "$comment": "sample_us = max(0, (arrived_at_us - sent_at_us) - held_us): the round trip with the responder's holding time taken out, for an ack whose seq is higher than the last. `held_us_asked` is what a sender has, `held_us_on_wire` what it sends.",
+      "cases": [
+        {
+          "comment": "an ordinary acknowledgement",
+          "seq": 5,
+          "sent_at_us": 1000000,
+          "arrived_at_us": 1012400,
+          "held_us_asked": 1830,
+          "held_us_on_wire": 1830,
+          "sample_us": 10570,
+          "message": {
+            "type": "ack",
+            "data": {
+              "seq": 5,
+              "held_us": 1830
+            }
+          }
+        },
+        {
+          "comment": "held longer than the round trip: the sample is clamped to 0",
+          "seq": 6,
+          "sent_at_us": 2000000,
+          "arrived_at_us": 2000900,
+          "held_us_asked": 1500,
+          "held_us_on_wire": 1500,
+          "sample_us": 0,
+          "message": {
+            "type": "ack",
+            "data": {
+              "seq": 6,
+              "held_us": 1500
+            }
+          }
+        },
+        {
+          "comment": "held_us asked above the limit is sent as 2^31 - 1",
+          "seq": 7,
+          "sent_at_us": 10000000,
+          "arrived_at_us": 13000000000,
+          "held_us_asked": 5000000000,
+          "held_us_on_wire": 2147483647,
+          "sample_us": 10842516353,
+          "message": {
+            "type": "ack",
+            "data": {
+              "seq": 7,
+              "held_us": 2147483647
+            }
+          }
+        },
+        {
+          "comment": "a negative held_us is sent as 0",
+          "seq": 8,
+          "sent_at_us": 500,
+          "arrived_at_us": 4500,
+          "held_us_asked": -5,
+          "held_us_on_wire": 0,
+          "sample_us": 4000,
+          "message": {
+            "type": "ack",
+            "data": {
+              "seq": 8,
+              "held_us": 0
+            }
+          }
+        }
+      ]
+    }
+  },
+  "pairing_v3": {
+    "$comment": "Pairing version 3 (WIRE.md section 6). Hex is bytes in wire order. Every exchange shows every intermediate value and all four messages. The host of a typed exchange still draws a QR secret when it shows a code, which nothing uses, so its `qr_secret_hex` is null. `beacon` is the host's beacon while the code is up.",
+    "constants": {
+      "pairing_version": 3,
+      "pair_start_v": 3,
+      "dsi_ascii": "CPace255",
+      "channel_ascii": "beamer-pair-v3",
+      "token_info_ascii": "beamer-pair-token-v3",
+      "done_label_ascii": "beamer-pair-done",
+      "role_requester_ascii": "requester",
+      "role_host_ascii": "host",
+      "id_bytes": 16,
+      "qr_secret_bytes": 16,
+      "max_peers": 32,
+      "nonce_bytes": 16,
+      "max_name_chars": 48,
+      "tcp_port": 24821,
+      "link_key_id_info_ascii": "beamer-key-id"
+    },
+    "exchanges": [
+      {
+        "comment": "Desktop to desktop with the code typed; the requester's name is 48 code points outside ASCII and the BMP, 177 bytes, so its length in ADa takes two LEB128 bytes",
+        "code": "482913",
+        "qr_secret_hex": null,
+        "prs_hex": "343832393133",
+        "wall": 1790000000,
+        "pair_id": "6b1a17a072cddecd660c7e94f007ed5c",
+        "requester": {
+          "name": "Zo\u00eb\u2019s \ud835\udd39\ud835\udd39\ud835\udd39\ud835\udd39\ud835\udd39\ud835\udd39\ud835\udd39\ud835\udd39\ud835\udd39\ud835\udd39\ud835\udd39\ud835\udd39\ud835\udd39\ud835\udd39\ud835\udd39\ud835\udd39\ud835\udd39\ud835\udd39\ud835\udd39\ud835\udd39\ud835\udd39\ud835\udd39\ud835\udd39\ud835\udd39\ud835\udd39\ud835\udd39\ud835\udd39\ud835\udd39\ud835\udd39\ud835\udd39\ud835\udd39\ud835\udd39\ud835\udd39\ud835\udd39\ud835\udd39\ud835\udd39\ud835\udd39\ud835\udd39\ud835\udd39\ud835\udd39\ud835\udd39\ud835\udd39",
+          "id_hex": "7f1a2715e76636bc63a54bd739c172ae",
+          "platform": "macos",
+          "port": 24820,
+          "nonce_hex": "6cf2cf66a42563eb3f6006864fb0191f",
+          "scalar_hex": "15923d653efd46f0053e88b1ffc6a1056ba4ec696e5f0afe5cb89d8852f2a975"
+        },
+        "host": {
+          "name": "VECTOR-PC",
+          "id_hex": "f092b8d69193df6d5fc72f7728b586e5",
+          "platform": "windows",
+          "port": 24820,
+          "scalar_hex": "efe1b90d899464d39cd9debb10aac2c1844f4d68dfc60d32514f61fbf0f8272a"
+        },
+        "sid_hex": "203662316131376130373263646465636436363063376539346630303765643563106cf2cf66a42563eb3f6006864fb0191f",
+        "ada_hex": "09726571756573746572107f1a2715e76636bc63a54bd739c172aeb1015a6fc3abe280997320f09d94b9f09d94b9f09d94b9f09d94b9f09d94b9f09d94b9f09d94b9f09d94b9f09d94b9f09d94b9f09d94b9f09d94b9f09d94b9f09d94b9f09d94b9f09d94b9f09d94b9f09d94b9f09d94b9f09d94b9f09d94b9f09d94b9f09d94b9f09d94b9f09d94b9f09d94b9f09d94b9f09d94b9f09d94b9f09d94b9f09d94b9f09d94b9f09d94b9f09d94b9f09d94b9f09d94b9f09d94b9f09d94b9f09d94b9f09d94b9f09d94b9f09d94b9056d61636f730260f4",
+        "adb_hex": "04686f737410f092b8d69193df6d5fc72f7728b586e509564543544f522d50430777696e646f77730260f4",
+        "generator_string_hex": "084350616365323535063438323931336f0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000e6265616d65722d706169722d763332203662316131376130373263646465636436363063376539346630303765643563106cf2cf66a42563eb3f6006864fb0191f",
+        "generator_hex": "38fcfaec3a9b04ea43ed77aae6def40c1647d49e3250e64ce7a75f6afa27f47e",
+        "ya_hex": "b88597b640460d1bfc4b71edf60ccf1f51cc72886823608b83cc04549b1bd402",
+        "yb_hex": "af819c42049c95eb2cad943caaa5cc41088395735fb9a2fbbf78dc1eed532b05",
+        "k_hex": "7cb66d16be514e2b1d237bf302c078d27dac3ad3f6e1c3b536e26672d8009251",
+        "isk_hex": "11b5d74f9d45fe210e6549f68bc7090520650051e59a8f39afcf620e862b031981a123f552c79c021775c821e4605b4542ea532320da766f4f2f4a123546fe21",
+        "mac_key_hex": "d1d304cc077c480a21f16115253bc33ac97f2d7c1b5ebf53a108f84fe094c8df8ae97bd6cd1032abfa56d98d14b1b4d8fefc88aec798d12f4f630e45267fee47",
+        "ta_hex": "9a633f11139bafd2e6418c9b635403691a273727ee5eb0bd14f243b8482576bc4de4a1515ac68e8683572e3ce1e50112b0118da958c30557924c938da55fd469",
+        "tb_hex": "0bb2ac485c17c9cff049c04c880483dd1d416ae4146119278242a23814e7f8530ebfe9112f32f6c66e08fce3faac2b7760d29746a1211c331b5ebdea9b13ae6b",
+        "td_hex": "d887825c70d762e318bc12a59f15b84c0a2ec7a975b9ad2eebad2f6c156958ae8a2ece6a6d5025cb5793dfa31985f704156b3203db4787ec28e0569ef39febb8",
+        "token": "LHEBqJlZwOS2QO7xBT4I4pgmRcsXRdXD3Pik1dvYr9g",
+        "key_id_hex": "bd4028e4171970c7648554b603ae08a7",
+        "beacon": {
+          "type": "beacon",
+          "name": "VECTOR-PC",
+          "port": 24820,
+          "pairing": 3,
+          "platform": "windows",
+          "pair": "6b1a17a072cddecd660c7e94f007ed5c",
+          "id": "8JK41pGT321fxy93KLWG5Q"
+        },
+        "messages": {
+          "pair_start": {
+            "type": "pair_start",
+            "pair": "6b1a17a072cddecd660c7e94f007ed5c",
+            "v": 3,
+            "nonce": "bPLPZqQlY-s_YAaGT7AZHw",
+            "share": "uIWXtkBGDRv8S3Ht9gzPH1HMcohoI2CLg8wEVJsb1AI",
+            "name": "Zo\u00eb\u2019s \ud835\udd39\ud835\udd39\ud835\udd39\ud835\udd39\ud835\udd39\ud835\udd39\ud835\udd39\ud835\udd39\ud835\udd39\ud835\udd39\ud835\udd39\ud835\udd39\ud835\udd39\ud835\udd39\ud835\udd39\ud835\udd39\ud835\udd39\ud835\udd39\ud835\udd39\ud835\udd39\ud835\udd39\ud835\udd39\ud835\udd39\ud835\udd39\ud835\udd39\ud835\udd39\ud835\udd39\ud835\udd39\ud835\udd39\ud835\udd39\ud835\udd39\ud835\udd39\ud835\udd39\ud835\udd39\ud835\udd39\ud835\udd39\ud835\udd39\ud835\udd39\ud835\udd39\ud835\udd39\ud835\udd39\ud835\udd39",
+            "id": "fxonFedmNrxjpUvXOcFyrg",
+            "platform": "macos",
+            "port": 24820
+          },
+          "pair_answer": {
+            "type": "pair_answer",
+            "pair": "6b1a17a072cddecd660c7e94f007ed5c",
+            "ok": true,
+            "share": "r4GcQgSclessrZQ8qqXMQQiDlXNfuaL7v3jcHu1TKwU",
+            "tag": "C7KsSFwXyc_wScBMiASD3R1BauQUYRkngkKiOBTn-FMOv-kRLzL2xm4I_OP6rCt3YNKXRqEhHDMbXr3qmxOuaw",
+            "name": "VECTOR-PC",
+            "id": "8JK41pGT321fxy93KLWG5Q",
+            "platform": "windows",
+            "port": 24820
+          },
+          "pair_confirm": {
+            "type": "pair_confirm",
+            "pair": "6b1a17a072cddecd660c7e94f007ed5c",
+            "tag": "mmM_ERObr9LmQYybY1QDaRonNyfuXrC9FPJDuEgldrxN5KFRWsaOhoNXLjzh5QESsBGNqVjDBVeSTJONpV_UaQ"
+          },
+          "pair_done": {
+            "type": "pair_done",
+            "pair": "6b1a17a072cddecd660c7e94f007ed5c",
+            "ok": true,
+            "tag": "2IeCXHDXYuMYvBKlnxW4TAoux6l1ua0u660vbBVpWK6KLs5qbVAly1eT36MZhfcEFWsyA9tHh-wo4Fae85_ruA"
+          }
+        }
+      },
+      {
+        "comment": "A phone pairing by QR: port 0, qr 1, and a 22-byte password",
+        "code": "007045",
+        "qr_secret_hex": "84cbf854f707c846c7983bc925720e43",
+        "prs_hex": "30303730343584cbf854f707c846c7983bc925720e43",
+        "wall": 1790000000,
+        "pair_id": "560a79d5d80bd38bb9cba7feab676f5a",
+        "requester": {
+          "name": "Zo\u00eb\u2019s \ud835\udd39Phone",
+          "id_hex": "7351f4c520f23e274386518b04263b45",
+          "platform": "ios",
+          "port": 0,
+          "nonce_hex": "a52fb4c89aeb3c4d852e72d968716615",
+          "scalar_hex": "6bcdc467211ecb43070f4b56545b3f449b857c4cf31638ac6077d382487af241"
+        },
+        "host": {
+          "name": "Vector Mac",
+          "id_hex": "f97993aa97b7e46d94b3ea908385496f",
+          "platform": "macos",
+          "port": 24820,
+          "scalar_hex": "da2749702debfa5a82c0b79c76babc40a2075010d1b82d55ea9f42550f5f71eb"
+        },
+        "sid_hex": "20353630613739643564383062643338626239636261376665616236373666356110a52fb4c89aeb3c4d852e72d968716615",
+        "ada_hex": "09726571756573746572107351f4c520f23e274386518b04263b45125a6fc3abe280997320f09d94b950686f6e6503696f73020000",
+        "adb_hex": "04686f737410f97993aa97b7e46d94b3ea908385496f0a566563746f72204d6163056d61636f730260f4",
+        "generator_string_hex": "0843506163653235351630303730343584cbf854f707c846c7983bc925720e435f00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000e6265616d65722d706169722d76333220353630613739643564383062643338626239636261376665616236373666356110a52fb4c89aeb3c4d852e72d968716615",
+        "generator_hex": "c4436fa1dd38fa76d517649079fb0383b896fd8424e80d7afd03d1228e18c60c",
+        "ya_hex": "16123bf4a050b8d6108fdbfb34603070c4bb889bbb519da871762f3c24541a3d",
+        "yb_hex": "18fd0ab7b04495afddf97045e803daca7c6e5ed3b5b58222662a1adb473ea10f",
+        "k_hex": "88eb95e6c99e858e88c4505f3bcdda28fdc5e8466e833f1a91db2be20cc0c170",
+        "isk_hex": "bc4e441e77b82a5c103c30b894a85cf727041202189fc217b900e6b1e69712304bd715cec81c7906bddca2a278eeb40908631fbc767d0db19f2473fb7f130c83",
+        "mac_key_hex": "108600fbfd30bf469c531d510d7cd3d01903e9a7c10afb0202cc72b8f7fefe001c76044506f14e221ebb88e2cb2b87f8d05abcb49c62afca6df030ee83ada661",
+        "ta_hex": "b37c62139dabe7fd5fe9d28bfc903646fd51ed7e6f0bdb60bd79f400b20753e3fb8fe7b3b4ec58f18e6225efb7f07b94718d001410bfe6639a901b64401c6d70",
+        "tb_hex": "a27aedac2b0b34527b6b18403ef924e86f4ee41512781dcf2a591a17398876e4254d8b4f8115e121e3e297b5654de0dee5b266abff4d1881bb0e641740c8b188",
+        "td_hex": "1d71124282af1f69b57bbd5b7d7ce9ad5301d383c7ff571dbb2121df746ab0fd768a2c7e73d7345c163aca190fc141af6a72af6871f1e6125703554c0b630ded",
+        "token": "C8JiSxEGfm05PG-nyz4LUdNUj1JdXuGb2a40GzaP6Hs",
+        "key_id_hex": "cdb296999f78d090a03ff1bf1a1e0bc1",
+        "beacon": {
+          "type": "beacon",
+          "name": "Vector Mac",
+          "port": 24820,
+          "pairing": 3,
+          "platform": "macos",
+          "pair": "560a79d5d80bd38bb9cba7feab676f5a",
+          "id": "-XmTqpe35G2Us-qQg4VJbw"
+        },
+        "messages": {
+          "pair_start": {
+            "type": "pair_start",
+            "pair": "560a79d5d80bd38bb9cba7feab676f5a",
+            "v": 3,
+            "nonce": "pS-0yJrrPE2FLnLZaHFmFQ",
+            "share": "FhI79KBQuNYQj9v7NGAwcMS7iJu7UZ2ocXYvPCRUGj0",
+            "name": "Zo\u00eb\u2019s \ud835\udd39Phone",
+            "id": "c1H0xSDyPidDhlGLBCY7RQ",
+            "platform": "ios",
+            "port": 0,
+            "qr": 1
+          },
+          "pair_answer": {
+            "type": "pair_answer",
+            "pair": "560a79d5d80bd38bb9cba7feab676f5a",
+            "ok": true,
+            "share": "GP0Kt7BEla_d-XBF6APaynxuXtO1tYIiZioa20c-oQ8",
+            "tag": "onrtrCsLNFJ7axhAPvkk6G9O5BUSeB3PKlkaFzmIduQlTYtPgRXhIePil7VlTeDe5bJmq_9NGIG7DmQXQMixiA",
+            "name": "Vector Mac",
+            "id": "-XmTqpe35G2Us-qQg4VJbw",
+            "platform": "macos",
+            "port": 24820
+          },
+          "pair_confirm": {
+            "type": "pair_confirm",
+            "pair": "560a79d5d80bd38bb9cba7feab676f5a",
+            "tag": "s3xiE52r5_1f6dKL_JA2Rv1R7X5vC9tgvXn0ALIHU-P7j-eztOxY8Y5iJe-38HuUcY0AFBC_5mOakBtkQBxtcA"
+          },
+          "pair_done": {
+            "type": "pair_done",
+            "pair": "560a79d5d80bd38bb9cba7feab676f5a",
+            "ok": true,
+            "tag": "HXESQoKvH2m1e71bfXzprVMB04PH_1cduyEh33RqsP12iix-c9c0XBY6yhkPwUGvanKvaHHx5hJXA1VMC2MN7Q"
+          }
+        }
+      },
+      {
+        "comment": "Desktop to desktop, typed, a code with leading zeros and a platform of the other family",
+        "code": "000042",
+        "qr_secret_hex": null,
+        "prs_hex": "303030303432",
+        "wall": 1790000000,
+        "pair_id": "7485855e2ff3537624d6731e0b308f5d",
+        "requester": {
+          "name": "Vector Linux",
+          "id_hex": "acbf7b53ac934af0f26eb25afef3e8c7",
+          "platform": "linux",
+          "port": 24820,
+          "nonce_hex": "e833a976fa9b18ad5c7980cfaa55e7f7",
+          "scalar_hex": "bdffd589e9ced02461a5ef4228f2ff2c82880d3d099803f75ad31542ff191b10"
+        },
+        "host": {
+          "name": "Vector Mac",
+          "id_hex": "a9499058bf9095dfccf322cd2eecdd63",
+          "platform": "macos",
+          "port": 24820,
+          "scalar_hex": "d0c7b5bf565d63a9bfc559362408373daa9b54911cc4a6971255028963a6b6bd"
+        },
+        "sid_hex": "20373438353835356532666633353337363234643637333165306233303866356410e833a976fa9b18ad5c7980cfaa55e7f7",
+        "ada_hex": "0972657175657374657210acbf7b53ac934af0f26eb25afef3e8c70c566563746f72204c696e7578056c696e75780260f4",
+        "adb_hex": "04686f737410a9499058bf9095dfccf322cd2eecdd630a566563746f72204d6163056d61636f730260f4",
+        "generator_string_hex": "084350616365323535063030303034326f0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000e6265616d65722d706169722d76333220373438353835356532666633353337363234643637333165306233303866356410e833a976fa9b18ad5c7980cfaa55e7f7",
+        "generator_hex": "fa378c5e5ee926a78be4658d8078c28d5cb09d97826188b58c4cb5f306120b37",
+        "ya_hex": "c19aee9da1eb7c1e13fc65e94e9f1790fc94cde878c3c7cfc8a3b520521f352b",
+        "yb_hex": "94ab022f3b8af4af14b3b8daf9fb7d7284fe8f73b0c69ff52c02704cdea5176b",
+        "k_hex": "5787d0e9056ffa445c7090afc3a2d73c8156fe297b1f06adf254f29d001dc03c",
+        "isk_hex": "d93f1bf808a9595fed05e3fda8bc817674b1106f57df7e097d06009ff17dbe9ede89c2983e39edab5feaaefa8870dd2e11fc6161f289b6e24d7d211c4ce1d9cd",
+        "mac_key_hex": "7a661c4137e689dea5d61b2d69ae33689d8413cc75456fbaab867b385417e8832b3252c5bee83b254e7978810ee4ec2a3ce1e81470728a293c730dc0b9f307b5",
+        "ta_hex": "e9dc788647dac88820bd6878c464ee9e0d542991e46d154a046a26b71437280bcbff1e3085621d31d6ee1f2b4588f9e681257b6499318811e1933d1da5b116d0",
+        "tb_hex": "b6e6096fbc3a8d28175df2cb3c0d6089f2ef78d45f3d3715a3f53968d2f2855116fcae11c84321b4b30767ee5d0df51431c4f1a61cf2767dbaee0a83136eab79",
+        "td_hex": "27e90f476470ce5598f3251791e2751dd9d847bdef452d3bff4898e4499162a17842091923facf3e4c61251c63d69575a527b957e3586fbe75f182a74d82d91a",
+        "token": "esINH1XDelrSEJXsJtR21YTssYEyRvbtIqSSIOsWRTo",
+        "key_id_hex": "caa0ab0e5217c66890086973797f5f84",
+        "beacon": {
+          "type": "beacon",
+          "name": "Vector Mac",
+          "port": 24820,
+          "pairing": 3,
+          "platform": "macos",
+          "pair": "7485855e2ff3537624d6731e0b308f5d",
+          "id": "qUmQWL-Qld_M8yLNLuzdYw"
+        },
+        "messages": {
+          "pair_start": {
+            "type": "pair_start",
+            "pair": "7485855e2ff3537624d6731e0b308f5d",
+            "v": 3,
+            "nonce": "6DOpdvqbGK1ceYDPqlXn9w",
+            "share": "wZrunaHrfB4T_GXpTp8XkPyUzeh4w8fPyKO1IFIfNSs",
+            "name": "Vector Linux",
+            "id": "rL97U6yTSvDybrJa_vPoxw",
+            "platform": "linux",
+            "port": 24820
+          },
+          "pair_answer": {
+            "type": "pair_answer",
+            "pair": "7485855e2ff3537624d6731e0b308f5d",
+            "ok": true,
+            "share": "lKsCLzuK9K8Us7ja-ft9coT-j3Owxp_1LAJwTN6lF2s",
+            "tag": "tuYJb7w6jSgXXfLLPA1gifLveNRfPTcVo_U5aNLyhVEW_K4RyEMhtLMHZ-5dDfUUMcTxphzydn267gqDE26reQ",
+            "name": "Vector Mac",
+            "id": "qUmQWL-Qld_M8yLNLuzdYw",
+            "platform": "macos",
+            "port": 24820
+          },
+          "pair_confirm": {
+            "type": "pair_confirm",
+            "pair": "7485855e2ff3537624d6731e0b308f5d",
+            "tag": "6dx4hkfayIggvWh4xGTung1UKZHkbRVKBGomtxQ3KAvL_x4whWIdMdbuHytFiPnmgSV7ZJkxiBHhkz0dpbEW0A"
+          },
+          "pair_done": {
+            "type": "pair_done",
+            "pair": "7485855e2ff3537624d6731e0b308f5d",
+            "ok": true,
+            "tag": "J-kPR2RwzlWY8yUXkeJ1HdnYR73vRS07_0iY5EmRYqF4QgkZI_rPPkxhJRxj1pV1pSe5V-NYb7518YKnTYLZGg"
+          }
+        }
+      }
+    ],
+    "wrong_prs": {
+      "$comment": "A QR's `qr` stripped from pair_start on the path. The host, seeing none, makes its answer from the 6-byte code; the requester, which used the 22-byte password, works out another Tb, so it must refuse the answer, send the abort once, and never send a tag of its own.",
+      "code": "482913",
+      "qr_secret_hex": "3666a6143242ff4d8e13976a5cf5dc4c",
+      "pair_id": "f48bff217ad09abd9a9ea102fd35837b",
+      "requester": {
+        "name": "Vector iPhone",
+        "id_hex": "a31775d1fa533aeb765a1cb27c8d3dd0",
+        "platform": "ios",
+        "port": 0,
+        "nonce_hex": "e9b5efb759c3ff1fa75d5d419a9d3010",
+        "scalar_hex": "5404d969974546686ebae1e98c6e3eb820d1ceebbd6bc2afa1549325697f8ce9"
+      },
+      "host": {
+        "name": "Vector Mac",
+        "id_hex": "e99388242ed8a48e1a2a52f413fedc4d",
+        "platform": "macos",
+        "port": 24820,
+        "scalar_hex": "87fca97bb3ab7dc11b58737e34f1ab6612f101a921c686efc5c2797dfc383547"
+      },
+      "pair_start_sent": {
+        "type": "pair_start",
+        "pair": "f48bff217ad09abd9a9ea102fd35837b",
+        "v": 3,
+        "nonce": "6bXvt1nD_x-nXV1Bmp0wEA",
+        "share": "12SR4JdY9lNANdwbTqWbdxUWP8kGtAZe1LtmmXPvKnM",
+        "name": "Vector iPhone",
+        "id": "oxd10fpTOut2WhyyfI090A",
+        "platform": "ios",
+        "port": 0,
+        "qr": 1
+      },
+      "pair_start_received": {
+        "type": "pair_start",
+        "pair": "f48bff217ad09abd9a9ea102fd35837b",
+        "v": 3,
+        "nonce": "6bXvt1nD_x-nXV1Bmp0wEA",
+        "share": "12SR4JdY9lNANdwbTqWbdxUWP8kGtAZe1LtmmXPvKnM",
+        "name": "Vector iPhone",
+        "id": "oxd10fpTOut2WhyyfI090A",
+        "platform": "ios",
+        "port": 0
+      },
+      "prs_used_by_host_hex": "343832393133",
+      "prs_used_by_requester_hex": "3438323931333666a6143242ff4d8e13976a5cf5dc4c",
+      "pair_answer": {
+        "type": "pair_answer",
+        "pair": "f48bff217ad09abd9a9ea102fd35837b",
+        "ok": true,
+        "share": "wJgT0kmLsiJ-vSn5E-gn7KkDnFY6YukdIs8EyFsUpns",
+        "tag": "pnK6OEBUOrLxq6OX37qZixC90rDDSiUvzENE1nL2DW48qK2PbX4N-TNmj48adDvUvt-pCVtaRrHd8NUPkc7ObQ",
+        "name": "Vector Mac",
+        "id": "6ZOIJC7YpI4aKlL0E_7cTQ",
+        "platform": "macos",
+        "port": 24820
+      },
+      "answer_tb_hex": "a672ba3840543ab2f1aba397dfba998b10bdd2b0c34a252fcc4344d672f60d6e3ca8ad8f6d7e0df933668f8f1a743bd4bedfa9095b5a46b1ddf0d50f91cece6d",
+      "expected_tb_hex": "03f59a2654737281a0b7f5e9f669680c5772ec58c415a35f0b96dd27ee801243af00a9b168cc9926528fe6b01921d5ed158b1b4587caba7e81af1af45f1ca03f",
+      "requester_must": "refused",
+      "pair_confirm_abort": {
+        "type": "pair_confirm",
+        "pair": "f48bff217ad09abd9a9ea102fd35837b",
+        "tag": ""
+      },
+      "host_reply_to_abort": {
+        "type": "pair_done",
+        "pair": "f48bff217ad09abd9a9ea102fd35837b",
+        "ok": false,
+        "error": "refused"
+      }
+    },
+    "tcp": {
+      "$comment": "One exchange over TCP on port 24821, in order: the host sends its beacon as soon as the connection is accepted, then the four messages. Each is a 4-byte big-endian length, 1 to 1024, then the JSON a datagram would carry with \"beamy\":1 first. `message` is the object without `beamy`. The desktops write compact JSON with every character outside ASCII escaped as \\uXXXX (the requester's name here has some); a receiver must accept either spelling, because the tags bind the decoded name and id, never these bytes.",
+      "exchange_comment": "A phone pairing by QR: port 0, qr 1, and a 22-byte password",
+      "frames": [
+        {
+          "from": "host",
+          "message": {
+            "type": "beacon",
+            "name": "Vector Mac",
+            "port": 24820,
+            "pairing": 3,
+            "platform": "macos",
+            "pair": "560a79d5d80bd38bb9cba7feab676f5a",
+            "id": "-XmTqpe35G2Us-qQg4VJbw"
+          },
+          "bytes_hex": "000000a37b226265616d79223a312c2274797065223a22626561636f6e222c226e616d65223a22566563746f72204d6163222c22706f7274223a32343832302c2270616972696e67223a332c22706c6174666f726d223a226d61636f73222c2270616972223a223536306137396435643830626433386262396362613766656162363736663561222c226964223a222d586d547170653335473255732d71516734564a6277227d"
+        },
+        {
+          "from": "requester",
+          "message": {
+            "type": "pair_start",
+            "pair": "560a79d5d80bd38bb9cba7feab676f5a",
+            "v": 3,
+            "nonce": "pS-0yJrrPE2FLnLZaHFmFQ",
+            "share": "FhI79KBQuNYQj9v7NGAwcMS7iJu7UZ2ocXYvPCRUGj0",
+            "name": "Zo\u00eb\u2019s \ud835\udd39Phone",
+            "id": "c1H0xSDyPidDhlGLBCY7RQ",
+            "platform": "ios",
+            "port": 0,
+            "qr": 1
+          },
+          "bytes_hex": "000001107b226265616d79223a312c2274797065223a22706169725f7374617274222c2270616972223a223536306137396435643830626433386262396362613766656162363736663561222c2276223a332c226e6f6e6365223a2270532d30794a7272504532464c6e4c5a6148466d4651222c227368617265223a2246684937394b4251754e59516a3976374e474177634d5337694a7537555a326f6358597650435255476a30222c226e616d65223a225a6f5c75303065625c753230313973205c75643833355c756464333950686f6e65222c226964223a22633148307853447950696444686c474c424359375251222c22706c6174666f726d223a22696f73222c22706f7274223a302c227172223a317d"
+        },
+        {
+          "from": "host",
+          "message": {
+            "type": "pair_answer",
+            "pair": "560a79d5d80bd38bb9cba7feab676f5a",
+            "ok": true,
+            "share": "GP0Kt7BEla_d-XBF6APaynxuXtO1tYIiZioa20c-oQ8",
+            "tag": "onrtrCsLNFJ7axhAPvkk6G9O5BUSeB3PKlkaFzmIduQlTYtPgRXhIePil7VlTeDe5bJmq_9NGIG7DmQXQMixiA",
+            "name": "Vector Mac",
+            "id": "-XmTqpe35G2Us-qQg4VJbw",
+            "platform": "macos",
+            "port": 24820
+          },
+          "bytes_hex": "0000013b7b226265616d79223a312c2274797065223a22706169725f616e73776572222c2270616972223a223536306137396435643830626433386262396362613766656162363736663561222c226f6b223a747275652c227368617265223a224750304b743742456c615f642d58424636415061796e787558744f31745949695a696f613230632d6f5138222c22746167223a226f6e72747243734c4e464a376178684150766b6b3647394f35425553654233504b6c6b61467a6d496475516c5459745067525868496550696c37566c5465446535624a6d715f394e47494737446d5158514d69786941222c226e616d65223a22566563746f72204d6163222c226964223a222d586d547170653335473255732d71516734564a6277222c22706c6174666f726d223a226d61636f73222c22706f7274223a32343832307d"
+        },
+        {
+          "from": "requester",
+          "message": {
+            "type": "pair_confirm",
+            "pair": "560a79d5d80bd38bb9cba7feab676f5a",
+            "tag": "s3xiE52r5_1f6dKL_JA2Rv1R7X5vC9tgvXn0ALIHU-P7j-eztOxY8Y5iJe-38HuUcY0AFBC_5mOakBtkQBxtcA"
+          },
+          "bytes_hex": "000000aa7b226265616d79223a312c2274797065223a22706169725f636f6e6669726d222c2270616972223a223536306137396435643830626433386262396362613766656162363736663561222c22746167223a227333786945353272355f316636644b4c5f4a413252763152375835764339746776586e30414c4948552d50376a2d657a744f7859385935694a652d3338487555635930414642435f356d4f616b42746b514278746341227d"
+        },
+        {
+          "from": "host",
+          "message": {
+            "type": "pair_done",
+            "pair": "560a79d5d80bd38bb9cba7feab676f5a",
+            "ok": true,
+            "tag": "HXESQoKvH2m1e71bfXzprVMB04PH_1cduyEh33RqsP12iix-c9c0XBY6yhkPwUGvanKvaHHx5hJXA1VMC2MN7Q"
+          },
+          "bytes_hex": "000000b17b226265616d79223a312c2274797065223a22706169725f646f6e65222c2270616972223a223536306137396435643830626433386262396362613766656162363736663561222c226f6b223a747275652c22746167223a2248584553516f4b7648326d316537316266587a7072564d42303450485f3163647579456833335271735031326969782d633963305842593679686b5077554776616e4b766148487835684a584131564d43324d4e3751227d"
+        }
+      ]
+    },
+    "refusals": {
+      "$comment": "pair_start messages whose id is not 16 bytes or is all zero. The host answers each with a refusal, drops its code, and stores nothing. Each case is offered to a fresh host. `answer_cases` are the same identities in an otherwise valid pair_answer to the requester whose `pair_start` is `requester_start`: it must refuse each before it sends a tag.",
+      "code": "482913",
+      "qr_secret_hex": "d0ad50d37c8a80130464b7b6db810cde",
+      "pair_id": "a51e977cc732222ea863acfb997bbb65",
+      "host": {
+        "name": "Vector Mac",
+        "id_hex": "12e943ce5db1d4ce5517ca8c5f4b9441",
+        "platform": "macos",
+        "port": 24820,
+        "scalar_hex": "639cf3789074fcf2ada110845df67625d663b1773fc0339204cc68bfa56526f5"
+      },
+      "cases": [
+        {
+          "comment": "an id of 15 bytes",
+          "pair_start": {
+            "type": "pair_start",
+            "pair": "a51e977cc732222ea863acfb997bbb65",
+            "v": 3,
+            "nonce": "Foy7tdc9AIfHP-kALt4WBA",
+            "share": "exGh8KupW9xbtLwGcV5-HqiS_v4yeTedmSZUeqoMDww",
+            "name": "Vector Mac 2",
+            "id": "6isGOM0sd37xvObJNHXe",
+            "platform": "macos",
+            "port": 24820
+          },
+          "must_answer": {
+            "type": "pair_answer",
+            "pair": "a51e977cc732222ea863acfb997bbb65",
+            "ok": false,
+            "error": "refused"
+          }
+        },
+        {
+          "comment": "an id of 17 bytes",
+          "pair_start": {
+            "type": "pair_start",
+            "pair": "a51e977cc732222ea863acfb997bbb65",
+            "v": 3,
+            "nonce": "Foy7tdc9AIfHP-kALt4WBA",
+            "share": "exGh8KupW9xbtLwGcV5-HqiS_v4yeTedmSZUeqoMDww",
+            "name": "Vector Mac 2",
+            "id": "6isGOM0sd37xvObJNHXe9Ak",
+            "platform": "macos",
+            "port": 24820
+          },
+          "must_answer": {
+            "type": "pair_answer",
+            "pair": "a51e977cc732222ea863acfb997bbb65",
+            "ok": false,
+            "error": "refused"
+          }
+        },
+        {
+          "comment": "an id of sixteen zero bytes",
+          "pair_start": {
+            "type": "pair_start",
+            "pair": "a51e977cc732222ea863acfb997bbb65",
+            "v": 3,
+            "nonce": "Foy7tdc9AIfHP-kALt4WBA",
+            "share": "exGh8KupW9xbtLwGcV5-HqiS_v4yeTedmSZUeqoMDww",
+            "name": "Vector Mac 2",
+            "id": "AAAAAAAAAAAAAAAAAAAAAA",
+            "platform": "macos",
+            "port": 24820
+          },
+          "must_answer": {
+            "type": "pair_answer",
+            "pair": "a51e977cc732222ea863acfb997bbb65",
+            "ok": false,
+            "error": "refused"
+          }
+        },
+        {
+          "comment": "an empty id, as 1.4.3 sent",
+          "pair_start": {
+            "type": "pair_start",
+            "pair": "a51e977cc732222ea863acfb997bbb65",
+            "v": 3,
+            "nonce": "Foy7tdc9AIfHP-kALt4WBA",
+            "share": "exGh8KupW9xbtLwGcV5-HqiS_v4yeTedmSZUeqoMDww",
+            "name": "Vector Mac 2",
+            "id": "",
+            "platform": "macos",
+            "port": 24820
+          },
+          "must_answer": {
+            "type": "pair_answer",
+            "pair": "a51e977cc732222ea863acfb997bbb65",
+            "ok": false,
+            "error": "refused"
+          }
+        },
+        {
+          "comment": "an id of 32 bytes",
+          "pair_start": {
+            "type": "pair_start",
+            "pair": "a51e977cc732222ea863acfb997bbb65",
+            "v": 3,
+            "nonce": "Foy7tdc9AIfHP-kALt4WBA",
+            "share": "exGh8KupW9xbtLwGcV5-HqiS_v4yeTedmSZUeqoMDww",
+            "name": "Vector Mac 2",
+            "id": "Lt2oNXE5B9o3QY6gzSmPIEkuwr3ibAHmHVitsAGNkY4",
+            "platform": "macos",
+            "port": 24820
+          },
+          "must_answer": {
+            "type": "pair_answer",
+            "pair": "a51e977cc732222ea863acfb997bbb65",
+            "ok": false,
+            "error": "refused"
+          }
+        }
+      ],
+      "requester": {
+        "name": "Vector Mac 2",
+        "id_hex": "ea2b0638cd2c777ef1bce6c93475def4",
+        "platform": "macos",
+        "port": 24820,
+        "nonce_hex": "168cbbb5d73d0087c73fe9002ede1604",
+        "scalar_hex": "a65185c9519a1c46177b1c5d2233c2495997ea0dac8c90c5407a25e4a2d1a3d7"
+      },
+      "requester_start": {
+        "type": "pair_start",
+        "pair": "a51e977cc732222ea863acfb997bbb65",
+        "v": 3,
+        "nonce": "Foy7tdc9AIfHP-kALt4WBA",
+        "share": "exGh8KupW9xbtLwGcV5-HqiS_v4yeTedmSZUeqoMDww",
+        "name": "Vector Mac 2",
+        "id": "6isGOM0sd37xvObJNHXe9A",
+        "platform": "macos",
+        "port": 24820
+      },
+      "answer_cases": [
+        {
+          "comment": "a host id of 15 bytes",
+          "pair_answer": {
+            "type": "pair_answer",
+            "pair": "a51e977cc732222ea863acfb997bbb65",
+            "ok": true,
+            "share": "kQTdUhBZhzMTIFK7wnJoctuMB6QSc5GXlKg6gifPBU4",
+            "tag": "5cEc6ZTCaAEAKdGgv7gb_U7dNqJv0G8l7TMJhDtGvw5kwXiqwvvVZ4OBMEAeuW858nckMWb7jLFxhbc01Od4NA",
+            "name": "Vector Mac",
+            "id": "6isGOM0sd37xvObJNHXe",
+            "platform": "macos",
+            "port": 24820
+          },
+          "requester_must": "refused"
+        },
+        {
+          "comment": "a host id of 17 bytes",
+          "pair_answer": {
+            "type": "pair_answer",
+            "pair": "a51e977cc732222ea863acfb997bbb65",
+            "ok": true,
+            "share": "kQTdUhBZhzMTIFK7wnJoctuMB6QSc5GXlKg6gifPBU4",
+            "tag": "5cEc6ZTCaAEAKdGgv7gb_U7dNqJv0G8l7TMJhDtGvw5kwXiqwvvVZ4OBMEAeuW858nckMWb7jLFxhbc01Od4NA",
+            "name": "Vector Mac",
+            "id": "6isGOM0sd37xvObJNHXe9Ak",
+            "platform": "macos",
+            "port": 24820
+          },
+          "requester_must": "refused"
+        },
+        {
+          "comment": "a host id of sixteen zero bytes",
+          "pair_answer": {
+            "type": "pair_answer",
+            "pair": "a51e977cc732222ea863acfb997bbb65",
+            "ok": true,
+            "share": "kQTdUhBZhzMTIFK7wnJoctuMB6QSc5GXlKg6gifPBU4",
+            "tag": "5cEc6ZTCaAEAKdGgv7gb_U7dNqJv0G8l7TMJhDtGvw5kwXiqwvvVZ4OBMEAeuW858nckMWb7jLFxhbc01Od4NA",
+            "name": "Vector Mac",
+            "id": "AAAAAAAAAAAAAAAAAAAAAA",
+            "platform": "macos",
+            "port": 24820
+          },
+          "requester_must": "refused"
+        },
+        {
+          "comment": "an empty id, as 1.4.3 sent",
+          "pair_answer": {
+            "type": "pair_answer",
+            "pair": "a51e977cc732222ea863acfb997bbb65",
+            "ok": true,
+            "share": "kQTdUhBZhzMTIFK7wnJoctuMB6QSc5GXlKg6gifPBU4",
+            "tag": "5cEc6ZTCaAEAKdGgv7gb_U7dNqJv0G8l7TMJhDtGvw5kwXiqwvvVZ4OBMEAeuW858nckMWb7jLFxhbc01Od4NA",
+            "name": "Vector Mac",
+            "id": "",
+            "platform": "macos",
+            "port": 24820
+          },
+          "requester_must": "refused"
+        },
+        {
+          "comment": "a host id of 32 bytes",
+          "pair_answer": {
+            "type": "pair_answer",
+            "pair": "a51e977cc732222ea863acfb997bbb65",
+            "ok": true,
+            "share": "kQTdUhBZhzMTIFK7wnJoctuMB6QSc5GXlKg6gifPBU4",
+            "tag": "5cEc6ZTCaAEAKdGgv7gb_U7dNqJv0G8l7TMJhDtGvw5kwXiqwvvVZ4OBMEAeuW858nckMWb7jLFxhbc01Od4NA",
+            "name": "Vector Mac",
+            "id": "Lt2oNXE5B9o3QY6gzSmPIEkuwr3ibAHmHVitsAGNkY4",
+            "platform": "macos",
+            "port": 24820
+          },
+          "requester_must": "refused"
+        }
+      ]
+    }
+  }
+}

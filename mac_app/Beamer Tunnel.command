@@ -5,7 +5,8 @@
 
 set -u
 
-CONFIG="$HOME/Library/Application Support/Beamer/config.json"
+CONFIG="$HOME/Library/Application Support/Beamer/settings.json"
+[ -r "$CONFIG" ] || CONFIG="$HOME/Library/Application Support/Beamer/config.json"
 HOST=""
 if [ -r "$CONFIG" ]; then
     HOST="$(sed -n 's/.*"host": *"\([^"]*\)".*/\1/p' "$CONFIG" | head -n 1)"

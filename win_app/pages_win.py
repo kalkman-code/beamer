@@ -12,8 +12,8 @@ from core import effects
 # (key, name, what the page is for), in sidebar order, which is setup order; Ctrl+1 is the first.
 PAGES = (
     ("overview", "Overview",
-     "Where input is right now, and the controls you reach for every day. Pair with your Mac here "
-     "first."),
+     "The machines paired with this PC, where input is right now, and the controls you reach for "
+     "every day. Pair a machine here first."),
     ("crossing", "Crossing",
      "Choose how the pointer or a key moves input to your Mac, and how hard the edge pushes back "
      "first."),
@@ -176,19 +176,19 @@ def toggle_part(parts, part, on) -> list:
 NOT_LEARNED_EDGE = "Not learned yet: your Mac tells this PC when it first connects, or choose a side."
 
 
-def crossing_state_sentence(paired, mac_heard, sending, connected, armed, paused, full_screen_app) -> str:
+def crossing_state_sentence(paired, heard, sending, connected, armed, paused, full_screen_app, name="your Mac") -> str:
     """The Crossing page's line under Pause: why nothing can cross, first match wins, and only then
-    whether crossing is on, held or paused."""
+    whether crossing is on, held or paused. `name` is the machine it is about."""
     if not paired:
-        return "Not paired yet, so no edge or shortcut moves input until you pair with your Mac above."
-    if not mac_heard:
-        return "Waiting to hear from your Mac. This PC cannot push into it until your Mac has connected once."
+        return "Not paired yet, so no edge or shortcut moves input until you pair a machine above."
+    if not heard:
+        return f"Waiting to hear from {name}. This PC cannot push into it until it has connected once."
     if not sending:
-        return "This PC drives your Mac is off, so edges and the shortcut do nothing."
+        return f"This PC does not drive {name}, so edges and the shortcut do nothing."
     if not connected:
         return (
-            "Not connected to your Mac, so edges and the shortcut do nothing yet. "
-            "Check that Windows drives this Mac is on, on your Mac."
+            f"Not connected to {name}, so edges and the shortcut do nothing yet. "
+            "Check that it is switched on and lets this PC drive it."
         )
     if not armed:
         return "Only the shortcut is switched on; there is nothing to pause."
@@ -205,14 +205,6 @@ def crossing_state_sentence(paired, mac_heard, sending, connected, armed, paused
 def crossing_state_blocked(paired, mac_heard, sending, connected) -> bool:
     """Whether crossing_state_sentence is giving a reason nothing can cross."""
     return not (paired and mac_heard and sending and connected)
-
-
-def outward_link_line(connected) -> str:
-    """The Overview's line for this PC's own link to the Mac, which its edges need and the receiver's
-    status above it does not say."""
-    if connected:
-        return "This PC to your Mac: Linked"
-    return "This PC to your Mac: not connected, so pushing an edge does nothing"
 
 
 def crossing_rows(methods) -> frozenset:

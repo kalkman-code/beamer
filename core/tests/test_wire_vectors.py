@@ -1,10 +1,12 @@
-"""The link's crypto against the committed v5 vectors in tools/phone_vectors.json, byte for byte.
+"""Wire version 5 against its committed vectors, byte for byte: core/tests/v5_vectors.json, the
+version 5 sections of the vector file the phone apps are built against, copied beside the tests,
+replayed through the frozen version 5 link in core/tests/v5_link.py now that no app speaks it.
 
 The vectors were written by the cryptography-backed protocol.py of 1.4.x and are never
-regenerated: libsodium through PyNaCl has to reproduce them exactly, in both directions, or a
-1.5 app cannot talk to a 1.4 one or to the phone apps built against the same file. Each vector is
-checked twice, once through protocol.py and once through the raw primitives with no protocol.py
-in the way, so a mistake in the module and a mistake in the primitives cannot cancel out.
+regenerated: libsodium through PyNaCl reproduces them exactly, in both directions, so the frozen
+link is the 1.4.x peer the version 6 refusal tests talk to. Each vector is checked twice, once
+through the frozen link and once through the raw primitives with no protocol.py in the way, so a
+mistake in the copy and a mistake in the primitives cannot cancel out.
 
 Also here: the failures are refused the way callers expect (AuthenticationError, and the
 counter not spent), the pairing section's low-order shares are still refused, and no module of
@@ -23,12 +25,15 @@ from nacl.bindings import crypto_aead_chacha20poly1305_ietf_decrypt, crypto_aead
 
 from core import pairing
 from core import protocol
+from core.tests import v5_link
 
 _TESTS_DIR = os.path.dirname(os.path.abspath(__file__))
 _REPO_ROOT = os.path.dirname(os.path.dirname(_TESTS_DIR))
 
-with open(os.path.join(_REPO_ROOT, "tools", "phone_vectors.json"), encoding="utf-8") as _handle:
+with open(os.path.join(_TESTS_DIR, "v5_vectors.json"), encoding="utf-8") as _handle:
     VECTORS = json.load(_handle)
+with open(os.path.join(_TESTS_DIR, "pairing_vectors.json"), encoding="utf-8") as _handle:
+    PAIRING = json.load(_handle)
 
 
 def _hkdf_sha256(key_material, salt, info):
@@ -48,14 +53,14 @@ def _frame_parts(frame_hex):
 class DeriveKeyVectorTests(unittest.TestCase):
     def test_the_salt_and_info_are_the_ones_in_the_file(self):
         vector = VECTORS["derive_key"]
-        self.assertEqual(vector["salt_ascii"].encode("ascii"), protocol.KEY_SALT)
-        self.assertEqual(vector["info_label_ascii"].encode("ascii"), protocol.KEY_INFO)
-        self.assertEqual(VECTORS["protocol_version"], protocol.PROTOCOL_VERSION)
+        self.assertEqual(vector["salt_ascii"].encode("ascii"), v5_link.KEY_SALT)
+        self.assertEqual(vector["info_label_ascii"].encode("ascii"), v5_link.KEY_INFO)
+        self.assertEqual(VECTORS["protocol_version"], v5_link.PROTOCOL_VERSION)
 
     def test_the_module_derives_the_committed_key(self):
         vector = VECTORS["derive_key"]
         sender, receiver = bytes.fromhex(vector["sender_prefix_hex"]), bytes.fromhex(vector["receiver_prefix_hex"])
-        self.assertEqual(protocol.derive_key(vector["token"], sender, receiver).hex(), vector["key_hex"])
+        self.assertEqual(v5_link.derive_key(vector["token"], sender, receiver).hex(), vector["key_hex"])
 
     def test_hmac_by_hand_derives_the_committed_key(self):
         vector = VECTORS["derive_key"]
@@ -66,11 +71,11 @@ class DeriveKeyVectorTests(unittest.TestCase):
     def test_the_two_directions_have_different_keys(self):
         vector = VECTORS["derive_key"]
         sender, receiver = bytes.fromhex(vector["sender_prefix_hex"]), bytes.fromhex(vector["receiver_prefix_hex"])
-        self.assertNotEqual(protocol.derive_key(vector["token"], sender, receiver), protocol.derive_key(vector["token"], receiver, sender))
+        self.assertNotEqual(v5_link.derive_key(vector["token"], sender, receiver), v5_link.derive_key(vector["token"], receiver, sender))
 
     def test_the_preamble_is_the_committed_one(self):
         vector = VECTORS["preamble"]
-        session = protocol.SecureSession("any token", prefix=bytes.fromhex(vector["nonce_prefix_hex"]))
+        session = v5_link.SecureSession("any token", prefix=bytes.fromhex(vector["nonce_prefix_hex"]))
         self.assertEqual(session.preamble().hex(), vector["preamble_hex"])
 
 
@@ -86,8 +91,8 @@ class FrameVectorTests(unittest.TestCase):
         self.assertEqual({frame["direction"] for frame in self.frames}, {"a_to_b", "b_to_a"})
 
     def _pair(self):
-        side_a = protocol.SecureSession(self.token, prefix=self.prefix_a)
-        side_b = protocol.SecureSession(self.token, prefix=self.prefix_b)
+        side_a = v5_link.SecureSession(self.token, prefix=self.prefix_a)
+        side_b = v5_link.SecureSession(self.token, prefix=self.prefix_b)
         side_a.accept_preamble(side_b.preamble())
         side_b.accept_preamble(side_a.preamble())
         return side_a, side_b
@@ -115,7 +120,7 @@ class FrameVectorTests(unittest.TestCase):
         for frame in self.frames:
             with self.subTest(direction=frame["direction"], counter=frame["counter"]):
                 sender, receiver = self._ends(frame["direction"])
-                key = _hkdf_sha256(self.token.encode("utf-8"), protocol.KEY_SALT, protocol.KEY_INFO + sender + receiver)
+                key = _hkdf_sha256(self.token.encode("utf-8"), v5_link.KEY_SALT, v5_link.KEY_INFO + sender + receiver)
                 counter, sealed = _frame_parts(frame["frame_hex"])
                 self.assertEqual(struct.unpack(">I", counter)[0], frame["counter"])
                 plaintext = json.dumps(frame["plaintext"]).encode("utf-8")
@@ -159,8 +164,8 @@ class FrameVectorTests(unittest.TestCase):
         self.assertEqual(side_b.open(bytearray(body)), self.frames[0]["plaintext"])
 
     def test_a_frame_sealed_under_another_token_is_refused(self):
-        stranger = protocol.SecureSession("another token", prefix=self.prefix_a)
-        stranger.accept_preamble(protocol.SecureSession("another token", prefix=self.prefix_b).preamble())
+        stranger = v5_link.SecureSession("another token", prefix=self.prefix_a)
+        stranger.accept_preamble(v5_link.SecureSession("another token", prefix=self.prefix_b).preamble())
         _, side_b = self._pair()
         self._refused(side_b, stranger.seal(self.frames[0]["plaintext"])[protocol.HEADER_SIZE:])
 
@@ -171,8 +176,8 @@ class FrameVectorTests(unittest.TestCase):
 
     def test_a_connection_recorded_under_other_prefixes_is_refused(self):
         _, side_b = self._pair()
-        replayer = protocol.SecureSession(self.token, prefix=self.prefix_a)
-        replayer.accept_preamble(protocol.SecureSession(self.token, prefix=bytes(8)).preamble())
+        replayer = v5_link.SecureSession(self.token, prefix=self.prefix_a)
+        replayer.accept_preamble(v5_link.SecureSession(self.token, prefix=bytes(8)).preamble())
         self._refused(side_b, replayer.seal(self.frames[0]["plaintext"])[protocol.HEADER_SIZE:])
 
 
@@ -180,7 +185,7 @@ class PairingShareVectorTests(unittest.TestCase):
     """Pairing moved to libsodium in 1.4.3; its low-order shares, from the same file."""
 
     def test_low_order_and_all_zero_shares_are_refused(self):
-        low = VECTORS["pairing"]["low_order_shares"]
+        low = PAIRING["low_order_shares"]
         scalar = bytes.fromhex(low["scalar_hex"])
         self.assertIn(bytes(32).hex(), low["must_refuse"])
         for share in low["must_refuse"]:

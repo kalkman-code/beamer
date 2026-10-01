@@ -15,6 +15,7 @@ from __future__ import annotations
 import ctypes
 import logging
 import math
+import sys
 import time
 
 from PySide6.QtCore import QPointF, QRect, QRectF, Qt, QTimer
@@ -178,6 +179,8 @@ def union_bounds(pens, pad: float = 0.0):
 
 def system_reduced_motion() -> bool:
     """Windows' "Show animations in Windows" switched off."""
+    if sys.platform != "win32":
+        return False
     SPI_GETCLIENTAREAANIMATION = 0x1042
     value = ctypes.c_int(1)
     try:

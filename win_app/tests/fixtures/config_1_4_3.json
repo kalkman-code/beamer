@@ -1,0 +1,44 @@
+{
+  "host": "192.0.2.20",
+  "port": 24820,
+  "auth_token": "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8",
+  "reconnect_interval_s": 2.0,
+  "edge_glow": true,
+  "glow_style": "beam",
+  "glow_colour": "sunset",
+  "shortcut_arrival": true,
+  "shortcut_arrival_style": "match",
+  "effect_length": "normal",
+  "paired_with": "MacBook Pro",
+  "allow_mac_to_drive": true,
+  "check_updates": true,
+  "hide_addresses": false,
+  "pointer_speed": 1.5,
+  "scroll_speed": 1.0,
+  "reverse_scroll": false,
+  "send_to_mac": true,
+  "crossing_methods": [
+    "edge",
+    "corner",
+    "shortcut"
+  ],
+  "crossing_corner": "top_right",
+  "crossing_edge_parts": [
+    "start",
+    "end"
+  ],
+  "crossing_resistance_px": 150,
+  "trigger_key": "cmd_r",
+  "trigger_style": "double_tap",
+  "double_tap_ms": 300,
+  "modifier_style": "positional",
+  "mac_hardware_address": "aa:bb:cc:dd:ee:ff",
+  "mac_host": "192.0.2.10",
+  "mac_return_edge": "left",
+  "arrangement_set_at": 1790000000,
+  "mac_resistance_px": 90,
+  "ignored_inputs": [
+    "button:back"
+  ],
+  "appearance": "dark"
+}

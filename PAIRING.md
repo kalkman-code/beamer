@@ -202,10 +202,13 @@ keeps every one.
   spoken any more, in either direction.
 - The link's wire protocol is not changed by it. Machines paired by an earlier Beamer stay
   paired, and the two can be updated one at a time; both need 1.4.3 to pair afresh.
+- Pairing version 3, in 1.5.0, is this exchange with machine ids, platform and port bound in,
+  the `known` and `full` refusals, pairing over TCP and the QR's second secret: WIRE.md
+  section 6. Versions 2 and 3 never pair.
 
 ## The vectors
 
-`mac_app/tests/pairing_vectors.json`, with an identical copy in `win_app/tests`:
+`core/tests/pairing_vectors.json`:
 
 - `cpace_draft`: the draft's own X25519 vector, so the core is proved against the IETF's
   numbers before anything of Beamer's is added;
@@ -216,5 +219,5 @@ keeps every one.
 - `wrong_code`: an answer made under another code, which the requester must refuse and abort;
 - `name_cut`: a 60 code point name and the 48 it is cut to.
 
-No vector covers retransmission, expiry, or rules 2 and 3; `mac_app/tests/test_pairing_cpace.py`
+No vector covers retransmission, expiry, or rules 2 and 3; `core/tests/test_pairing_cpace.py`
 and the loopback tests in `mac_app/tests/test_pairing.py` do.

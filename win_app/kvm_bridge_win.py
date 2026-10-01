@@ -1,6 +1,7 @@
 import argparse
 import ctypes
 from dataclasses import replace
+import functools
 import logging
 from logging.handlers import RotatingFileHandler
 import os
@@ -40,6 +41,7 @@ import app_config
 from app_config import (
     Config,
     ConfigError,
+    SettingsFileError,
     TRIGGER_KEYS,
     TRIGGER_VKS,
     UNRECORDABLE_TRIGGER_VKS,
@@ -48,27 +50,28 @@ from app_config import (
     load_config,
     save_config,
 )
-import autostart_win
-import capture_win
-import desktop_win
 from core import effects
 from diagram import ArrangementDiagram, PushStrip
 from edge_glow import EdgeGlow, PreviewLoop
 from effect_overlay import EffectOverlay, logical_point
 from effect_previews import EffectStill, SwitchStill, TileHover
-import firewall_win
 from core import ignored
 import motion
 from core import pairing
-from core.pairing import PAIRING_PORT, Announcer, local_address_towards
+from core import peerlist
+from core.pairing import PAIRING_PORT, PairingService, local_address_towards
+import machines_win
 import pages_win
+import hardware_win
+import peers_view
+import platform_parts
+import qr_code
 from core import protocol
 from core import receiver
-from core.receiver import ReceiverServer, ServerState
+from core.receiver import LinkResponder, ServerState
 from core import return_edge
-import sender
 from core import settings_sync
-from sender import MacSender
+from sender import LinkSender
 import theme
 import tokens
 from core import updates
@@ -85,13 +88,10 @@ except OSError:
 HOME_PAGE = "https://kalkmancode.co.uk/beamer"
 HOME_PAGE_TEXT = "Beamer's website"
 
-IDLE_CODE = "––– –––"
-PAIR_HINT = "Type this code into Beamer on the Mac."
-
 STATUS_TITLES = {
     ServerState.STOPPED: "Receiver stopped",
-    ServerState.WAITING: "Waiting for your Mac",
-    ServerState.CONNECTED: "Mac connected",
+    ServerState.WAITING: "Waiting for a machine",
+    ServerState.CONNECTED: "Machine connected",
     ServerState.ERROR: "Receiver needs attention",
 }
 
@@ -140,6 +140,13 @@ def asset_path(name: str) -> Path:
 
 
 ICON_PATH = asset_path("Beamer.ico")
+
+# The OS parts keep their Windows names so the code and its tests read as before; on Linux they are
+# linux_stand_ins' (platform_parts).
+autostart_win = platform_parts.autostart
+capture_win = platform_parts.capture
+desktop_win = platform_parts.desktop
+firewall_win = platform_parts.firewall
 
 
 # Where configure_logging put the log, for the tray's Open log folder.
@@ -199,18 +206,25 @@ class StatusBridge(QObject):
     # (method, edge, x, y): the pointer landed on this PC at desktop pixel (x, y).
     arrived = Signal(str, str, float, float)
     firewall = Signal(object)
-    paired = Signal(str, str, str)
+    # A pairing this PC hosted finished and was stored: the new peer entry.
+    paired = Signal(object)
+    # A pairing this PC requested ended: (the entry stored or None, the error or None).
+    pair_finished = Signal(object, object)
     # The other direction: this PC's own input going to the Mac.
     sending = Signal(bool, str)
     redirecting = Signal(bool)
-    focus = Signal(str)
-    learned = Signal(str, object, object)
-    # Either link, telling us the two machines' arrangement changed at the other end.
-    arrangement = Signal(str, int)
-    # Either link, carrying the Mac's Same on both machines state.
-    settings = Signal(object)
+    # A peer began or stopped driving this PC: its id as base64, "" when none does.
+    owner = Signal(str)
+    # A link learnt something about a peer and saved it, or came up or went down.
+    peers_changed = Signal()
+    # Either link, telling us a peer's side of the arrangement changed at its end: (peer id, the
+    # peer's edge that faces this PC, stamp, the machine that made the change).
+    arrangement = Signal(str, str, int, str)
+    # Either link, carrying a peer's Same on all machines state: (peer id, data).
+    settings = Signal(str, object)
     alert = Signal(str, str)
-    mac_learned = Signal(str)
+    # A sentence for the user from the link layer: a first link, a folded pairing.
+    notice = Signal(str)
     # (version, url) when a newer Beamer is out, else None.
     update = Signal(object)
     # The firewall rules are in place (or could not be), so the sockets may open.
@@ -234,21 +248,27 @@ class WindowsApplication(QWidget):
         self.bridge.arrived.connect(self._on_arrival)
         self.bridge.firewall.connect(self._on_firewall)
         self.bridge.paired.connect(self._on_paired)
+        self.bridge.pair_finished.connect(self._on_pair_finished)
         self.bridge.sending.connect(self._on_sending)
         self.bridge.redirecting.connect(self._on_redirecting)
-        self.bridge.focus.connect(self._on_focus)
-        self.bridge.learned.connect(self._on_learned)
+        self.bridge.owner.connect(self._on_owner)
+        self.bridge.peers_changed.connect(self._on_peers_changed)
         self.bridge.arrangement.connect(self._on_arrangement)
         self.bridge.settings.connect(self._on_settings)
+        self.bridge.notice.connect(self._on_alert_text)
         self.bridge.update.connect(self._on_update)
         self.bridge.rules_ready.connect(self._listen)
         self._update = None
         self._effects_failed = False
-        # Announces this PC from launch, configured or not: pairing is how a fresh install
-        # gets its token, so it cannot wait for the receiver to be listening.
-        self.announcer = Announcer(self._announced_port, self.bridge.paired.emit, logger=LOGGER)
         self._code_shown = False
-        self._code_addresses: list = []
+        self._code_address = ""
+        self._qr_cache = (None, None)
+        self._pairing_open = False
+        self._pairing_machine = None
+        self._pairing_target = ""
+        self._peer_entries: list = []
+        self._labels_by_id: dict = {}
+        self._peers_tick = 0
         self._firewall_advice: Optional[firewall_win.Advice] = None
         self._firewall_status: Optional[firewall_win.FirewallStatus] = None
         self._firewall_tone: Optional[str] = None
@@ -257,64 +277,112 @@ class WindowsApplication(QWidget):
         self._firewall_auto_repaired = False
         self._host = default_config().host
         self._last_seen_state: Optional[ServerState] = None
+        self._receiver_port: Optional[int] = None
         self.glow: Optional[EdgeGlow] = None
         self.effects: Optional[EffectOverlay] = None
-        self.server = ReceiverServer(
-            self._set_status,
+        # The peers as the link layer reads and writes them, over settings.json and its lock.
+        self.book = app_config.ReadFallbackPeerBook(
+            lambda: app_config.load_settings(self.config_path),
+            lambda settings: app_config.write_settings(self.config_path, settings),
+            app_config.SETTINGS_LOCK,
+        )
+        self.server = LinkResponder(
+            self.book,
+            self._identity,
+            status_callback=self._set_status,
             pressure_callback=lambda edge, pressure, crossed, part=None: self.bridge.pressure.emit(edge, pressure, crossed, part),
             # The Mac's notch crossing lands on this PC's bottom edge, and that is the only
-            # arrival an effect draws differently. No edge is the Mac's shortcut or menu.
+            # arrival an effect draws differently. No edge is a peer's shortcut or menu.
             arrival_callback=lambda edge, x, y: self.bridge.arrived.emit(
                 "switch" if edge is None else "notch" if edge == "bottom" else "edge", edge or "", float(x), float(y)
             ),
-            focus_callback=self.bridge.focus.emit,
-            peer_callback=self.bridge.learned.emit,
-            arrangement_callback=self.bridge.arrangement.emit,
+            owner_callback=lambda peer: self.bridge.owner.emit(protocol.id_text(peer) if peer else ""),
+            arrangement_callback=lambda peer, read: self.bridge.arrangement.emit(
+                protocol.id_text(peer), read["edge"], read["set_at"], protocol.id_text(read["by"])
+            ),
+            settings_callback=lambda peer, data: self.bridge.settings.emit(protocol.id_text(peer), data),
+            paired_callback=self._store_paired,
+            notice_callback=self.bridge.notice.emit,
+            link_callback=lambda peer, up: self.bridge.peers_changed.emit(),
+            announce=self._announce,
+            away=lambda: self.sender.redirecting,
+            zones=self._zones,
+            clipboard=platform_parts.clipboard,
+            unlock=platform_parts.unlock,
+            hardware=hardware_win.hardware_address_towards,
+            desktop=platform_parts.desktop,
+            injector=platform_parts.injector,
         )
-        # The second link, outwards: this PC's keyboard and mouse on the Mac.
-        self.sender = MacSender(
+        # The links outwards: this PC's keyboard and mouse on its peers.
+        self.sender = LinkSender(
+            self.book,
+            self._identity,
+            hardware=hardware_win.hardware_address_towards,
+            zones=self._zones,
             status_callback=self.bridge.sending.emit,
             redirect_callback=self.bridge.redirecting.emit,
             pressure_callback=self.bridge.pressure.emit,
-            arrangement_callback=self.bridge.arrangement.emit,
             arrival_callback=lambda edge, x, y: self.bridge.arrived.emit(
                 "switch" if edge is None else "edge", edge or "", float(x), float(y)
             ),
+            desktop=platform_parts.desktop,
+            clipboard=platform_parts.clipboard,
         )
+        self.sender.driven = lambda: self.server.driven
         self.sender.send_peer_home = self.server.send_home
-        # Same on both machines, over either link: applied on the GUI thread, and announced with
-        # this PC's own arrangement the moment either link comes up.
-        for link in (self.server, self.sender):
-            link.settings_callback = self.bridge.settings.emit
-            link.announce = self._announce
+        # Same on all machines, over either link: applied on the GUI thread, and announced with
+        # this PC's own arrangement the moment a link comes up.
+        self.sender.settings_callback = lambda peer, data: self.bridge.settings.emit(protocol.id_text(peer), data)
+        self.sender.arrangement_callback = lambda peer, read: self.bridge.arrangement.emit(
+            protocol.id_text(peer), read["edge"], read["set_at"], protocol.id_text(read["by"])
+        )
+        self.sender.link_callback = lambda peer, up: self.bridge.peers_changed.emit()
+        self.sender.notice_callback = self.bridge.notice.emit
+        self.sender.paired_callback = self._store_paired
+        self.sender.hw_learned = self._learn_peer_hardware
+        self.sender.announce = self._announce
         self.scope_labels: dict = {}
         self.own_notes: list = []
         self._same_seen = None
-        # Pause crossing and the full-screen hold are about this screen: the Mac's pointer does
+        # Pause crossing and the full-screen hold are about this screen: a peer's pointer does
         # not go home through a held edge either.
         self.server.edges_held = lambda: self.sender.edges_held
-        self.server.return_model = self._return_model
         self.sender.on_alert = self.bridge.alert.emit
-        self.sender.on_mac_learned = self.bridge.mac_learned.emit
         self.bridge.alert.connect(self._on_alert)
-        self.bridge.mac_learned.connect(self._on_mac_learned)
-        self.hooks = capture_win.Hooks(self._on_hook_key, self.sender.on_mouse, self.sender.on_motion)
+        self.hooks = capture_win.Hooks(self._on_hook_key, self._on_hook_mouse, self.sender.on_motion)
         self._trigger = capture_win.Trigger()
-        self._sending_detail = "Not connected to the Mac"
+        self._sending_detail = "Not connected"
         self.update_checker = updates.Checker(
             VERSION, lambda: self._config is None or self._config.check_updates, self.bridge.update.emit, logger=LOGGER
         )
+        self._paired = False
         try:
-            self._config = load_config(config_path)
+            # With nothing paired the window still has this PC's own settings to show and keep.
+            self._config = load_config(config_path, unpaired_ok=True)
             self._same_seen = self._same_fields()
             self._apply_input_scale(self._config)
             self._host = self._config.host
-            self._status = ServerState.WAITING
-            self._status_detail = f"Ready on TCP port {self._config.port}"
+            self._paired = bool(self.book.peers())
+            if self._paired:
+                self._status = ServerState.WAITING
+                self._status_detail = f"Ready on TCP port {self._config.port}"
+            else:
+                self._status = ServerState.ERROR
+                self._status_detail = "Not paired yet: press Pair a machine on Overview"
         except ConfigError as exc:
             LOGGER.info("Configuration is not ready: %s", exc)
             self._status = ServerState.ERROR
-            self._status_detail = "Not paired yet: press Pair a Mac on Overview"
+            self._status_detail = (
+                "Settings could not be read: see the log" if isinstance(exc, SettingsFileError)
+                else "Not paired yet: press Pair a machine on Overview"
+            )
+
+        # Announces this PC from launch, configured or not: pairing is how a fresh install gets its
+        # first peer, so it cannot wait for the receiver to be listening. Without a readable
+        # settings file there is no machine id to pair under, and so no service.
+        self._settings_port, self._kept_hide = self._read_kept()
+        self.pairing = self._make_pairing()
+        self.sender.machines = self.pairing.machines if self.pairing is not None else (lambda: [])
 
         # Before any widget is built: every control takes its colours from the palette in use.
         appearance = self._config.appearance if self._config is not None else "system"
@@ -439,18 +507,23 @@ class WindowsApplication(QWidget):
     # -- Overview ---------------------------------------------------------------------------
 
     def _overview_page(self, layout, current) -> None:
-        # Pairing leads until there is a Mac, since nothing else here works without one; once
-        # paired it moves down beside the other once-only settings (_place_pairing).
-        self.overview_layout = layout
+        self.machines = machines_win.MachinesModule(
+            self._set_peer_send, self._set_peer_allow, self._remove_peer, self._toggle_pairing_sheet
+        )
+        layout.addWidget(self.machines)
+        self.sheet = machines_win.PairingSheet(
+            self._show_code, self._cancel_code, self._pair_clicked, self._pick_machine
+        )
+        self.sheet.setVisible(False)
+        layout.addWidget(self.sheet)
         self.link_module = self._link_module()
         layout.addWidget(self.link_module)
         layout.addWidget(self._input_module())
-        layout.addWidget(self._directions_module(current))
         layout.addWidget(self._same_module(current))
         self.sign_in_module = self._sign_in_module()
         layout.addWidget(self.sign_in_module)
         layout.addWidget(self._updates_module(current))
-        self._pairing_block(layout, current)
+        self._refresh_peers()
 
     def _updates_module(self, current: Config) -> QWidget:
         module = widgets.Module("Updates")
@@ -509,8 +582,6 @@ class WindowsApplication(QWidget):
         module.body.addLayout(heading_row)
         self.status_detail = widgets.label("", "note", wrap=True)
         module.body.addWidget(self.status_detail)
-        self.outward_line = widgets.label("", "note", wrap=True)
-        module.body.addWidget(self.outward_line)
         where_row = QHBoxLayout()
         where_row.setSpacing(6)
         where_row.addWidget(widgets.label("Input:", "note"))
@@ -531,19 +602,22 @@ class WindowsApplication(QWidget):
         return module
 
     def _input_module(self) -> QWidget:
-        """The Mac's two everyday buttons: send input across without the shortcut or an edge, and
-        hold the edges for a while."""
+        """The everyday buttons: send input across without the shortcut or an edge, and hold the
+        edges for a while."""
         module = widgets.Module("Keyboard and mouse")
-        self.redirect_button = QPushButton("Send input to your Mac")
+        self.redirect_button = QPushButton("Send input across")
         self.redirect_button.setProperty("vernier", "primary")
         self.redirect_button.setCursor(Qt.CursorShape.PointingHandCursor)
         self.redirect_button.clicked.connect(self.toggle_redirect)
         module.body.addWidget(self.redirect_button)
         # Why the button above is dimmed, while it is.
-        self.redirect_note = widgets.label("Switch on This PC drives your Mac, below, to send input from here.",
+        self.redirect_note = widgets.label("Switch on This PC drives it for a machine above to send input from here.",
                                            "note", wrap=True)
         self.redirect_note.setVisible(False)
         module.body.addWidget(self.redirect_note)
+        self.send_hint = widgets.label("", "note", wrap=True)
+        self.send_hint.setVisible(False)
+        module.body.addWidget(self.send_hint)
         self.pause_button = QPushButton("Pause crossing")
         self.pause_button.setCursor(Qt.CursorShape.PointingHandCursor)
         self.pause_button.clicked.connect(self.toggle_pause)
@@ -558,9 +632,13 @@ class WindowsApplication(QWidget):
         module.body.addWidget(self.hold_switch)
         module.body.addWidget(self._own_note())
         module.body.addWidget(widgets.label(
-            "Off, your pointer can leave a full-screen game or video, and the Mac's pointer can come home "
-            "through this PC's edge. Useful if your keyboard has no key for the shortcut.", "note", wrap=True))
+            "Off, your pointer can leave a full-screen game or video, and another machine's pointer can come "
+            "home through this PC's edge. Useful if your keyboard has no key for the shortcut.", "note", wrap=True))
         return module
+
+    def _redirect_text(self) -> str:
+        sendable = [entry for entry in self._peer_entries if entry.get("send")]
+        return f"Send input to {self._shown(peerlist.labels(self._peer_entries)[sendable[0]['token']])}" if len(sendable) == 1 else "Send input across"
 
     def toggle_redirect(self) -> None:
         self.sender.toggle()
@@ -570,13 +648,17 @@ class WindowsApplication(QWidget):
         self._refresh_window()
 
     def _crossing_state_args(self) -> tuple:
-        config = self._config
-        methods = set(config.crossing_methods) if config is not None else set()
+        entries = self._peer_entries
+        methods = set(self._config.crossing_methods) if self._config is not None else set()
         return (
-            config is not None, bool(config and config.mac_host), bool(config and config.send_to_mac),
-            self.sender.connected, bool(methods & {"edge", "part", "corner"}),
-            self.sender.crossing_paused, self.sender.full_screen_app,
+            bool(entries), any(entry.get("host") for entry in entries), self._any_send(),
+            bool(self.sender.peers_up()), bool(methods & {"edge", "part", "corner"}),
+            self.sender.crossing_paused, self.sender.full_screen_app, self._machines_name(),
         )
+
+    def _machines_name(self) -> str:
+        entries = self._peer_entries
+        return self._shown(peerlist.labels(entries)[entries[0]["token"]]) if len(entries) == 1 else "your machines"
 
     def _crossing_state_sentence(self) -> str:
         return pages_win.crossing_state_sentence(*self._crossing_state_args())
@@ -598,32 +680,8 @@ class WindowsApplication(QWidget):
             QApplication.beep()
         self.tray.showMessage(title, self._shown(message), QIcon(str(ICON_PATH)), 4000)
 
-    def _on_mac_learned(self, address: str) -> None:
-        if self._config is None or self._config.mac_hardware_address == address:
-            return
-        self._config.mac_hardware_address = address
-        self._persist()
-
-    def _directions_module(self, current: Config) -> QWidget:
-        module = widgets.Module("Directions")
-        # The tray's words, so the two never disagree.
-        self.allow_switch = widgets.Switch("Your Mac drives this PC")
-        self.allow_switch.setFont(theme.font(theme.TYPE["body"]))
-        self.allow_switch.setChecked(current.allow_mac_to_drive)
-        self.allow_switch.toggled.connect(self._set_allow_drive)
-        module.body.addWidget(self.allow_switch)
-        self.send_switch = widgets.Switch("This PC drives your Mac")
-        self.send_switch.setFont(theme.font(theme.TYPE["body"]))
-        self.send_switch.setChecked(current.send_to_mac)
-        self.send_switch.toggled.connect(self._toggle_sending)
-        module.body.addWidget(self.send_switch)
-        self.send_hint = widgets.label("", "note", wrap=True)
-        self.send_hint.setVisible(False)
-        module.body.addWidget(self.send_hint)
-        if self._config is None:
-            self.allow_switch.setEnabled(False)
-            self.send_switch.setEnabled(False)
-        return module
+    def _on_alert_text(self, message: str) -> None:
+        self._on_alert("Beamer", message)
 
     def _same_module(self, current: Config) -> QWidget:
         module = widgets.Module("Settings")
@@ -634,7 +692,7 @@ class WindowsApplication(QWidget):
         module.body.addWidget(self.same_switch)
         self.same_note = widgets.label("", "note", wrap=True)
         module.body.addWidget(self.same_note)
-        if self._config is None:
+        if self._config is None or not self._paired:
             self.same_switch.setEnabled(False)
         return module
 
@@ -645,27 +703,21 @@ class WindowsApplication(QWidget):
         self.own_notes.append(note)
         return note
 
-    def _peer_too_old(self) -> bool:
-        """Whether a link is up to a Mac whose Beamer does not keep settings in step."""
-        with self._status_lock:
-            receiving = self._status == ServerState.CONNECTED
-        links = ((receiving, self.server.peer_settings), (self.sender.connected, self.sender.peer_settings))
-        return any(up and known is False for up, known in links)
-
     def _show_same(self) -> None:
         if self._config is None:
             return
-        old = self._peer_too_old()
-        on = self._config.same_on_both and not old
+        old = False
+        on = self._config.same_on_both
         if self.same_switch.isChecked() != on:
             self.same_switch.blockSignals(True)
             self.same_switch.setChecked(on)
             self.same_switch.blockSignals(False)
-        self.same_switch.setEnabled(not old)
-        self.same_note.setText(settings_sync.switch_note("Mac", self._config.same_on_both, old))
+        self.same_switch.setEnabled(self._paired and not old)
+        who = settings_sync.who([self._shown(label) for label in peerlist.labels(self._peer_entries).values()])
+        self.same_note.setText(settings_sync.switch_note(who, self._config.same_on_both, old))
         widgets.set_role(self.same_note, "note-amber" if old else "note")
         for key, label in self.scope_labels.items():
-            text = settings_sync.scope(key, "Mac", on, pages_win.SCOPE.get(key))
+            text = settings_sync.scope(key, who, on, pages_win.SCOPE.get(key))
             if label.text() != text:
                 label.setText(text)
         for note in self.own_notes:
@@ -673,29 +725,77 @@ class WindowsApplication(QWidget):
                 motion.set_shown(note, on)
 
     def _same_fields(self) -> tuple:
-        return tuple(getattr(self._config, field) if not isinstance(getattr(self._config, field), list)
-                     else tuple(getattr(self._config, field)) for field in settings_sync.PC_FIELDS.values())
+        return tuple(settings_sync.pc_values(self._config).values())
 
     def _same_state(self) -> dict:
         config = self._config
-        return settings_sync.message_data(config.same_on_both, config.same_set_at, settings_sync.pc_values(config))
+        return settings_sync.message_data(
+            config.same_on_both, config.same_set_at, settings_sync.pc_values(config), by=config.same_by
+        )
 
-    def _send_same(self) -> None:
-        data = self._same_state()
-        self.sender.send_settings(data)
-        self.server.send_settings(data)
+    def _send_same(self, source: Optional[bytes] = None, data: Optional[dict] = None) -> None:
+        """This PC's state, or `data` unchanged when a newer one arrived and goes on (section 10), to
+        every peer that takes it but the one it came from: on the link this PC opened when that is
+        up, else on the one the peer opened."""
+        message = protocol.settings_msg(data if data is not None else self._same_state())
+        for peer, caps in self._peer_caps().items():
+            if peer != source and "settings" in caps:
+                self._send_to(peer, message)
 
-    def _announce(self) -> list:
-        """What this PC tells the Mac on every new link: its arrangement, only once chosen here
-        (one a hello filled in is the Mac's to name), and its settings state. On the link's thread."""
+    def _peer_caps(self) -> dict:
+        """{peer id: capabilities} for every peer with a link up, in either direction."""
+        caps = {peer: self.sender.links.caps(peer) for peer in self.sender.peers_up()}
+        for peer in self.server.links():
+            caps.setdefault(peer, self.server.caps_of(peer) or frozenset())
+        return caps
+
+    def _send_to(self, peer: bytes, message: dict) -> bool:
+        return self.sender.send_to(peer, message) or self.server.send(peer, message)
+
+    def _announce(self, peer: bytes) -> list:
+        """What this PC tells a peer on every new link (section 3): the side it holds for the peer,
+        once one has been set; the peers it may send to, when it may send to this one; and its
+        Same on all machines state. On the link's thread."""
         config = self._config
         if config is None:
             return []
+        try:
+            peers = self.book.peers()
+        except Exception:
+            LOGGER.exception("The peers could not be read for an announcement")
+            return []
+        entry = next((item for item in peers if protocol.read_id(item.get("id")) == peer), None)
+        if entry is None:
+            return []
         messages = []
-        if config.mac_return_edge in return_edge.OPPOSITE and config.arrangement_set_at:
-            messages.append(protocol.arrangement_msg(return_edge.OPPOSITE[config.mac_return_edge], config.arrangement_set_at))
-        messages.append(protocol.settings_msg(self._same_state()))
+        author = protocol.read_id(entry.get("side_by")) or protocol.read_id(config.machine_id)
+        if entry.get("side") in return_edge.EDGES and entry.get("side_set_at") and author is not None:
+            messages.append(protocol.arrangement_v6(entry["side"], entry["side_set_at"], author))
+        if entry.get("send"):
+            others = [protocol.read_id(item.get("id")) for item in peers if protocol.read_id(item.get("id")) not in (None, peer)]
+            messages.append(protocol.paired_msg(others[: protocol.MAX_PEERS]))
+        if "settings" in self._peer_caps().get(peer, ()):
+            messages.append(protocol.settings_msg(self._same_state()))
         return messages
+
+    def _identity(self) -> dict:
+        """This machine as a `hello` and a `welcome` say it (section 2)."""
+        config = self._config or default_config()
+        name = (config.name or pairing.machine_name())[: protocol.MAX_NAME_CHARS]
+        return {
+            "id": protocol.read_id(config.machine_id) or b"",
+            "name": name,
+            "platform": "windows",
+            "app": VERSION[:32] if VERSION.isascii() and VERSION.isprintable() else "dev",
+            "caps": ["clipboard", "clipboard_image", "gestures", "media_keys", "text", "settings"],
+            "port": self._settings_port,
+        }
+
+    def _zones(self) -> list:
+        try:
+            return self.book.zones()
+        except (ConfigError, OSError):
+            return []
 
     def _set_same(self, on: bool) -> None:
         """Turning it on carries this PC's Crossing and Design across; off, each end keeps what it
@@ -704,17 +804,20 @@ class WindowsApplication(QWidget):
             return
         self._config.same_on_both = bool(on)
         self._config.same_set_at = settings_sync.next_stamp(self._config.same_set_at, time.time())
+        self._config.same_by = self._config.machine_id
         self._persist()
         self._send_same()
         self._show_same()
 
-    def _on_settings(self, data) -> None:
-        """The Mac's settings message, over either link. Its state stands only when it is newer
-        than this PC's; then its values replace the shared ones here."""
+    def _on_settings(self, peer: str, data) -> None:
+        """A peer's settings message, over either link. Its state stands only when it is newer than
+        this PC's; then its values replace the shared ones here, and it goes on to every other peer
+        that takes it, which stops the first time it meets a copy it already holds."""
         if self._config is None:
             return
-        held = (self._config.same_on_both, settings_sync.pc_values(self._config))
-        taken = settings_sync.arrived(data, self._config.same_set_at, TRIGGER_KEYS, held)
+        taken = settings_sync.arrived(
+            data, self._config.same_set_at, TRIGGER_KEYS, by_here=self._config.same_by
+        )
         if taken is None:
             return
         on, set_at, values = taken
@@ -722,22 +825,24 @@ class WindowsApplication(QWidget):
                          crossing_edge_parts=list(self._config.crossing_edge_parts))
         config.same_on_both = on
         config.same_set_at = set_at
+        config.same_by = data.get("by", "") if isinstance(data.get("by"), str) else ""
         if on:
             settings_sync.apply_pc(config, values)
         try:
             app_config.validate_config(config)
         except ConfigError:
-            LOGGER.exception("Settings from the Mac could not be applied")
+            LOGGER.exception("Settings from a peer could not be applied")
             return
         self._config = config
         self._same_seen = self._same_fields()
         if not self._persist():
             return
-        LOGGER.info("Settings from the Mac applied (same on both machines %s)", "on" if on else "off")
+        LOGGER.info("Settings from a peer applied (same on all machines %s)", "on" if on else "off")
         self.sender.update_config(config)
         self._configure_trigger(config)
         self._reflect_config(config)
         self._show_same()
+        self._send_same(source=protocol.read_id(peer), data=data)
 
     def _sign_in_module(self) -> QWidget:
         module = widgets.Module("At sign-in")
@@ -759,22 +864,6 @@ class WindowsApplication(QWidget):
         module.body.addWidget(self.logon_hint)
         return module
 
-    def _set_allow_drive(self, enabled: bool) -> None:
-        """Starts or stops the receiver. There is no separate Start/Stop button: this switch is
-        what persists."""
-        if self._config is None:
-            return
-        self._config.allow_mac_to_drive = bool(enabled)
-        self._persist()
-        try:
-            if enabled:
-                self.server.start(self._config)
-            else:
-                self.server.stop()
-        except Exception as exc:
-            LOGGER.exception("Receiver action failed")
-            self._set_status(ServerState.ERROR, f"Receiver failed: {exc}")
-
     def _set_start_at_logon(self, enabled: bool) -> None:
         exe = autostart_win.installed_exe()
         if exe is None:
@@ -789,21 +878,6 @@ class WindowsApplication(QWidget):
             self.logon_hint.setText(f"Windows refused: {exc}")
             return
         self.logon_hint.setText("In the tray, with no window.")
-
-    def _toggle_sending(self, enabled: bool) -> None:
-        """Takes effect at once: it decides whether this PC's own keyboard is being
-        watched, which is not something to leave a person guessing about."""
-        if self._config is None:
-            return
-        self._config.send_to_mac = bool(enabled)
-        self._persist()
-        if enabled:
-            self._start_sending(self._config)
-        else:
-            # Input comes home by this switch and shows where the pointer is, as any switch does;
-            # stopping would bring it home too, silently, as it does for a reload or quitting.
-            self.sender.set_redirecting(False)
-            self._stop_sending()
 
     # -- Crossing -----------------------------------------------------------------------------
 
@@ -899,16 +973,6 @@ class WindowsApplication(QWidget):
         for key in ("edge", "parts", "corner", "dragging"):
             module.body.addWidget(self.crossing_rows[key])
 
-        now_row = QHBoxLayout()
-        now_row.setSpacing(6)
-        # The Mac's half of the border -- the edge and push it asks for when it is the one
-        # sending. Hidden until the Mac has said, rather than reading "not set yet".
-        now_row.addWidget(widgets.label("Coming back from your Mac:", "note"))
-        self.return_readout = widgets.label("", "readout", wrap=True)
-        now_row.addWidget(self.return_readout, 1)
-        self.return_row = self._row(now_row)
-        self.return_row.setVisible(False)
-        module.body.addWidget(self.return_row)
         return module
 
     def _ways_changed(self, way: str, on: bool) -> None:
@@ -973,11 +1037,12 @@ class WindowsApplication(QWidget):
         if self._config is None or pc_edge == self._config.mac_return_edge:
             return
         self._config.mac_return_edge = pc_edge
-        self._config.arrangement_set_at = int(time.time())
+        self._config.arrangement_set_at = settings_sync.next_stamp(self._config.arrangement_set_at, time.time())
         self._persist()
-        mac_edge = return_edge.OPPOSITE[pc_edge]
-        self.sender.send_arrangement(mac_edge, self._config.arrangement_set_at)
-        self.server.send_arrangement(mac_edge, self._config.arrangement_set_at)
+        peer = self._first_peer()
+        own = protocol.read_id(self._config.machine_id)
+        if peer is not None and own is not None:
+            self._send_to(peer, protocol.arrangement_v6(pc_edge, self._config.arrangement_set_at, own))
         self.sender.update_config(self._config)
         self._reflect_look()
         self._reflect_ways()
@@ -1004,23 +1069,46 @@ class WindowsApplication(QWidget):
         self.sender.update_config(self._config)
         self._reflect_ways()
 
-    def _on_arrangement(self, mac_edge: str, set_at: int) -> None:
-        """The Mac changed the arrangement, over either link. `mac_edge` is always the edge of
-        the MAC that leads here; an arrival older than what this end already holds is ignored."""
+    def _first_peer(self) -> Optional[bytes]:
+        """The peer the window shows (`peers[0]`), once it has an id."""
+        try:
+            peers = self.book.peers()
+        except Exception:
+            return None
+        return protocol.read_id(peers[0].get("id")) if peers else None
+
+    def _on_arrangement(self, peer: str, edge: str, set_at: int, by: str) -> None:
+        """A peer changed the arrangement, over either link. `edge` is the edge of the PEER that
+        faces this PC; one older than what this end holds, by stamp and then by id, is ignored. A
+        side that makes two zones cover one stretch turns the peer's clashing zones off."""
         if self._config is None:
             return
-        pc_edge = return_edge.OPPOSITE.get(mac_edge)
-        if pc_edge is None or pc_edge == self._config.mac_return_edge:
-            # One change on the Mac reaches this PC over both links, so the second copy finds it applied.
+        try:
+            changed, notices = app_config.apply_arrangement(self.config_path, peer, edge, set_at, by)
+        except (ConfigError, OSError):
+            LOGGER.exception("An arrangement could not be saved")
             return
-        if self._config.arrangement_set_at and not protocol.arrangement_wins(set_at, self._config.arrangement_set_at):
-            LOGGER.info("Ignoring an arrangement from the Mac that is no newer than this PC's (%s vs %s)", set_at, self._config.arrangement_set_at)
+        if not changed:
             return
-        self._config.mac_return_edge = pc_edge
-        self._config.arrangement_set_at = int(set_at)
-        self._persist()
+        for notice in notices:
+            self._on_alert("Beamer", notice)
+        self._pull_peer_fields()
+        self.sender.refresh()
+        self.server.peers_changed()
+
+    def _pull_peer_fields(self) -> None:
+        """What links and arrangements wrote into the first peer, into the window's flat view."""
+        if self._config is None:
+            return
+        try:
+            learned = app_config.learned_fields(self.config_path)
+        except (ConfigError, OSError):
+            LOGGER.exception("The peers could not be read")
+            return
+        for name, value in learned.items():
+            setattr(self._config, name, value)
         self.sender.update_config(self._config)
-        self.edge_choice.set_value(pc_edge)
+        self.edge_choice.set_value(self._config.mac_return_edge)
         self._reflect_look()
         self._reflect_ways()
 
@@ -1574,11 +1662,22 @@ class WindowsApplication(QWidget):
         self._same_seen = fields
         if shared:
             self._config.same_set_at = settings_sync.next_stamp(self._config.same_set_at, time.time())
+            self._config.same_by = self._config.machine_id
         try:
-            save_config(self.config_path, self._config)
-            # A change on the Crossing page reaches the Mac's pointer while it is here, not at its
-            # next crossing: the way home is built from these settings when it arrives.
-            self.server.rearm_return()
+            with app_config.SETTINGS_LOCK:
+                # What links wrote since this was loaded (an address, a hardware address, a name)
+                # is not this window's to overwrite with what it last read.
+                learned = app_config.learned_fields(self.config_path)
+                # A fold or a new pairing made another entry the first: the flat view follows it
+                # whole, or this save would put the old one back.
+                names = app_config.LEARNED if learned["auth_token"] != self._config.auth_token else app_config.LINK_WRITTEN
+                for name in names:
+                    setattr(self._config, name, learned[name])
+                save_config(self.config_path, self._config)
+            # A change on the Crossing page reaches a peer's pointer while it is here, not at its
+            # next crossing: its way on is built from these settings when it arrives.
+            self.server.peers_changed()
+            self.sender.refresh()
             if shared:
                 self._send_same()
             return True
@@ -1586,188 +1685,349 @@ class WindowsApplication(QWidget):
             LOGGER.exception("Setting could not be saved")
             return False
 
-    # -- Pairing --------------------------------------------------------------------------
+    # -- Machines and pairing ---------------------------------------------------------------
 
-    def _pairing_block(self, layout, current: Config) -> None:
-        module = widgets.Module("Your Mac")
-        self.mac_module = module
-        self.paired_heading = widgets.label("", "tile-name", wrap=True)
-        module.body.addWidget(self.paired_heading)
-        self.pair_intro = widgets.label(
-            "Press Pair a Mac, then on your Mac choose this PC and type the six-digit code shown here. "
-            "You only do this once.",
-            "note",
-            wrap=True,
+    def _read_kept(self) -> tuple:
+        """This PC's port and Hide addresses as settings.json keeps them, which hold with no machine paired."""
+        try:
+            settings = app_config.load_settings(self.config_path)
+        except (ConfigError, OSError):
+            return default_config().port, False
+        return settings["port"], bool(settings.get("hide_addresses"))
+
+    def _hide_addresses(self) -> bool:
+        return self._config.hide_addresses if self._config is not None else self._kept_hide
+
+    def _make_pairing(self) -> Optional[PairingService]:
+        try:
+            settings = app_config.load_settings(self.config_path)
+        except (ConfigError, OSError):
+            LOGGER.exception("Pairing is unavailable: the settings could not be read")
+            return None
+        identity = protocol.read_id(settings["machine_id"])
+        if identity is None:
+            return None
+        name = settings.get("name") or pairing.machine_name()
+        return PairingService(
+            name, identity, "windows", self._announced_port, self.book.peers, self._store_peer,
+            on_paired=self.bridge.paired.emit, logger=LOGGER,
         )
-        module.body.addWidget(self.pair_intro)
-        # The last pairing's outcome; takes no room while there is none.
-        self.pair_note = widgets.label("", "note", wrap=True)
-        self.pair_note.setVisible(False)
-        module.body.addWidget(self.pair_note)
-        self.pair_button = QPushButton()
-        self.pair_button.setProperty("vernier", "primary")
-        self.pair_button.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.pair_button.clicked.connect(self._toggle_pairing)
-        module.body.addWidget(self.pair_button, 0, Qt.AlignmentFlag.AlignLeft)
-        layout.addWidget(module)
 
-        self.code_module = widgets.Module("Pairing code")
-        code_row = QHBoxLayout()
-        code_row.setSpacing(18)
-        self.code_label = widgets.label(IDLE_CODE, "code-idle")
-        self.code_label.setFont(theme.mono_font(theme.PAIRING_CODE))
-        # Reachable by Tab and read out digit by digit, so a screen reader user can type it.
-        self.code_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByKeyboard
-                                                | Qt.TextInteractionFlag.TextSelectableByMouse)
-        self.code_label.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
-        self.code_label.setAccessibleName("Pairing code")
-        # The digits have no descenders, so the line box can be trimmed to the ink.
-        self.code_label.setFixedHeight(round(theme.PAIRING_CODE))
-        code_row.addWidget(self.code_label, 1, Qt.AlignmentFlag.AlignVCenter)
-        self.count_label = widgets.label("1:00", "count-idle")
-        self.count_label.setFont(theme.mono_font(theme.COUNT))
-        self.count_label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-        self.count_label.setAccessibleName("Time left")
-        code_row.addWidget(self.count_label, 0, Qt.AlignmentFlag.AlignVCenter)
-        self.code_module.body.addLayout(code_row)
-        self.drain = widgets.Drain()
-        self.code_module.body.addWidget(self.drain)
-        self.code_module.body.addWidget(widgets.label(PAIR_HINT, "note", wrap=True))
-        # Pairing by address, for a network whose broadcasts never reach the Mac.
-        self.address_note = widgets.label("", "note", wrap=True)
-        self.address_note.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-        self.code_module.body.addWidget(self.address_note)
-        self.code_module.setVisible(False)
-        layout.addWidget(self.code_module)
-        self._show_paired(current.paired_with)
+    def _store_peer(self, entry: dict, replaced) -> None:
+        """PairingService's write, on a socket thread with the service's lock held: the new peer takes
+        the place of the entry it replaces (WIRE.md section 6, item 5). It must never wait on the GUI
+        thread, and nothing here may call the service."""
+        with app_config.SETTINGS_LOCK:
+            settings = app_config.load_settings(self.config_path)
+            if replaced is not None:
+                # `replaced` was read before this lock: a link may have learnt the migrated entry's
+                # id or linked it since, or it may be gone (WIRE.md section 6, item 4).
+                held = next((peer for peer in settings["peers"] if peer.get("token") == replaced.get("token")), None)
+                if held is None or held.get("id") != replaced.get("id") or held.get("linked") != replaced.get("linked"):
+                    raise ConfigError("the machine being replaced changed while pairing")
+            peerlist.add_peer(settings, entry, replaced)
+            app_config.write_settings(self.config_path, settings)
 
-    def _show_paired(self, name: str) -> None:
-        self.paired_heading.setText(f"Paired with {name}" if name else "Not paired yet")
-        self.pair_intro.setVisible(not name)
-        if self.announcer.code is None:
-            self.pair_button.setText("Pair a different Mac" if name else "Pair a Mac")
-        self._place_pairing(bool(name))
+    def _peer_items(self, peers: list) -> list:
+        """(entry, label, state, where) for every paired machine, from what the links know of it now."""
+        labels = peerlist.labels(peers)
+        hide = self._hide_addresses()
+        driver, here, live = self.server.owner, self.sender.owner, self.server.links()
+        items = []
+        self._labels_by_id = {}
+        for entry in peers:
+            peer = protocol.read_id(entry.get("id"))
+            token = entry["token"]
+            labels[token] = self._shown(labels[token])
+            if peer is not None:
+                self._labels_by_id[peer] = labels[token]
+            state = peers_view.describe(
+                entry, labels[token],
+                up=peer is not None and (self.sender.links.up(peer) or peer in live),
+                driving=peer is not None and peer == driver,
+                input_there=peer is not None and peer == here,
+                kind=self.sender.links.kind(token), status=self.sender.links.status(token),
+                waking=peer is not None and self.sender.is_waking(peer),
+            )
+            state = replace(state, detail=self._shown(state.detail))
+            where = f"{peers_view.platform_name(entry)} · {peers_view.address_line(entry, hide)}"
+            items.append((entry, labels[token], state, where))
+        return items
 
-    def _place_pairing(self, paired: bool) -> None:
-        """First of Overview's modules until a Mac is paired, then just above At sign-in. The page's
-        title and purpose sit in the same layout, above the modules."""
-        layout = getattr(self, "overview_layout", None)
-        if layout is None or not hasattr(self, "code_module"):
+    def _refresh_peers(self) -> None:
+        try:
+            peers = self.book.peers()
+        except (ConfigError, OSError):
+            LOGGER.exception("The peers could not be read")
+            peers = []
+        self._peer_entries = peers
+        self.machines.set_peers(self._peer_items(peers))
+
+    def _refresh_peer_states(self) -> None:
+        """The rows' states again from the peers last read: the links move faster than the file does."""
+        self.machines.set_peers(self._peer_items(self._peer_entries))
+
+    def _any_send(self) -> bool:
+        return any(entry.get("send") and protocol.is_paired_token(entry.get("token")) for entry in self._peer_entries)
+
+    def _label_of(self, peer: Optional[bytes]) -> str:
+        return self._labels_by_id.get(peer, "the other machine") if peer is not None else ""
+
+    def _edit_peer(self, token: str, **fields) -> bool:
+        try:
+            with app_config.SETTINGS_LOCK:
+                settings = app_config.load_settings(self.config_path)
+                entry = next((item for item in settings["peers"] if item.get("token") == token), None)
+                if entry is None:
+                    return False
+                entry.update(fields)
+                app_config.write_settings(self.config_path, settings)
+        except (ConfigError, OSError):
+            LOGGER.exception("A machine's setting could not be saved")
+            return False
+        return True
+
+    def _set_peer_send(self, token: str, enabled: bool) -> None:
+        """This PC's input may go to that machine or not. Takes effect at once: the hooks that watch this
+        PC's own keyboard are in only while some machine can be sent to."""
+        # Home before the save: the links read `send` from the settings themselves, and one that read
+        # it first would end with input still on its machine. Home after a failed save is harmless.
+        if not enabled and self._input_is_on(token):
+            self.sender.set_redirecting(False)
+        if self._edit_peer(token, send=bool(enabled)):
+            self._after_peers_edit()
+
+    def _input_is_on(self, token: str) -> bool:
+        """Whether this PC's input is on the machine paired under `token`."""
+        on = self.sender.owner
+        return on is not None and any(
+            protocol.read_id(entry.get("id")) == on for entry in self._peer_entries if entry.get("token") == token
+        )
+
+    def _set_peer_allow(self, token: str, enabled: bool) -> None:
+        """That machine may drive this PC or not. The listener stays up either way, since arrangements and
+        settings still travel on its link; off ends its ownership and tells it (section 4)."""
+        if self._edit_peer(token, allow_drive=bool(enabled)):
+            self._after_peers_edit()
+
+    def _set_every_peer(self, field: str, enabled: bool) -> None:
+        """The tray's two ticks: one direction for every paired machine at once."""
+        if field == "send" and not enabled and self.sender.owner is not None:
+            # Home first, as _set_peer_send does: before the save the links read `send` from.
+            self.sender.set_redirecting(False)
+        try:
+            with app_config.SETTINGS_LOCK:
+                settings = app_config.load_settings(self.config_path)
+                for entry in settings["peers"]:
+                    entry[field] = bool(enabled)
+                app_config.write_settings(self.config_path, settings)
+        except (ConfigError, OSError):
+            LOGGER.exception("The machines' settings could not be saved")
             return
-        for widget in (self.mac_module, self.code_module):
-            layout.removeWidget(widget)
-        at = layout.indexOf(self.sign_in_module if paired else self.link_module)
-        layout.insertWidget(at, self.mac_module)
-        layout.insertWidget(at + 1, self.code_module)
+        self._after_peers_edit()
 
-    def _toggle_pairing(self) -> None:
-        if self.announcer.code is not None:
-            self.announcer.cancel_pairing()
+    def _refresh_tray_directions(self) -> None:
+        """The tray's ticks name who they cover and show whether every machine has the direction on."""
+        entries = self._peer_entries
+        labels = peerlist.labels(entries)
+        who = self._shown(labels[entries[0]["token"]]) if len(entries) == 1 else "machines"
+        for action, field, text in (
+            (self.drive_action, "allow_drive", f"{who} drives this PC" if len(entries) == 1 else "Machines drive this PC"),
+            (self.send_action, "send", f"This PC drives {who}"),
+        ):
+            action.setEnabled(bool(entries))
+            if action.text() != text:
+                action.setText(text)
+            on = bool(entries) and all(entry.get(field) for entry in entries)
+            if action.isChecked() != on:
+                action.setChecked(on)
+
+    def _after_peers_edit(self) -> None:
+        """Whatever changed the peers list: the flat view and the links follow, and the machines are listed again."""
+        if self._config is not None and not self._paired:
+            try:
+                config = load_config(self.config_path)
+            except (ConfigError, OSError):
+                config = None
+            if config is not None:
+                self._paired = True
+                self._host = config.host
+                self._apply_config(config)
+                self._configure_trigger(config)
+                self._reflect_config(config)
+        elif self._config is not None:
+            self._pull_peer_fields()
+        self.sender.refresh()
+        self.server.peers_changed()
+        self._send_paired()
+        self._refresh_peers()
+        self._sync_sending()
+
+    def _sync_sending(self) -> None:
+        """The links and the hooks that feed them run while some machine can be sent to, whatever changed the list."""
+        if self._config is None:
             return
-        if self.announcer.error:
-            self._say_pairing(f"Pairing is not available: {self.announcer.error}", "note-fault")
+        if self._any_send():
+            self._start_sending(self._config)
+        else:
+            self.sender.set_redirecting(False)
+            self._stop_sending()
+
+    def _remove_peer(self, token: str) -> None:
+        try:
+            with app_config.SETTINGS_LOCK:
+                settings = app_config.load_settings(self.config_path)
+                removed = peerlist.remove_peer(settings, token)
+                if removed is None:
+                    return
+                app_config.write_settings(self.config_path, settings)
+                remaining = bool(settings["peers"])
+        except (ConfigError, OSError):
+            LOGGER.exception("A machine could not be removed")
+            self._on_alert("Beamer", "Beamer could not save the removal. Try again in a moment.")
             return
-        self._say_pairing("", "note")
-        self.announcer.begin_pairing()
+        LOGGER.info("Removed %s from the paired machines", removed.get("name") or "a machine")
+        if remaining:
+            self._after_peers_edit()
+            return
+        self.sender.set_redirecting(False)
+        self._stop_sending()
+        self._paired = False
+        try:
+            self._config = load_config(self.config_path, unpaired_ok=True)
+        except (ConfigError, OSError):
+            self._config = None
+        self._same_seen = self._same_fields() if self._config is not None else None
+        self.sender.update_config(self._config)
+        if self._config is not None:
+            self._reflect_config(self._config)
+        self.server.peers_changed()
+        self.sender.refresh()
+        self.same_switch.setEnabled(False)
+        self._refresh_peers()
+
+    def _toggle_pairing_sheet(self) -> None:
+        self._pairing_open = not self._pairing_open
+        if not self._pairing_open and self.pairing is not None:
+            self.pairing.cancel_pairing()
+        self.sheet.setVisible(self._pairing_open)
+        self.machines.set_pairing_open(self._pairing_open)
         self._refresh_pairing()
 
-    def _pairing_addresses(self) -> list:
-        """The one address worth typing on the Mac: this PC's on the network that reaches the Mac
-        it last knew, else on the default route. Every adapter's address, virtual switches and
-        the hotspot included, only when neither can be found."""
-        mac = self._config.mac_host if self._config is not None else ""
-        # Connecting a UDP socket only picks the interface; nothing is sent to either address.
-        for target in (mac, "192.0.2.1"):
-            if not target:
-                continue
+    def _show_code(self) -> None:
+        if self.pairing is None:
+            self.sheet.say_host("Pairing is not available: this PC's settings could not be read.", "note-fault")
+            return
+        if self.pairing.error:
+            self.sheet.say_host(f"Pairing is not available: {self.pairing.error}", "note-fault")
+            return
+        self.sheet.say_host("", "note")
+        try:
+            self.pairing.begin_pairing()
+        except pairing.PairingError as exc:
+            text = peerlist.host_outcome_text("full", None) if str(exc) == pairing.ERROR_FULL else f"Pairing is not available: {exc}"
+            self.sheet.say_host(text, "note-fault")
+            return
+        self._code_address = self._pairing_address()
+        self._refresh_pairing()
+
+    def _cancel_code(self) -> None:
+        if self.pairing is not None:
+            self.pairing.cancel_pairing()
+        self._refresh_pairing()
+
+    def _pairing_address(self) -> str:
+        """The one address worth typing on another machine: this PC's on the network that reaches the
+        machine it last knew, else on the default route (WIRE.md section 6)."""
+        for peer in self._peer_entries:
             try:
-                address = local_address_towards(target)
+                address = local_address_towards(peer.get("host") or "192.0.2.1")
             except OSError:
                 continue
             if address and not address.startswith(("127.", "0.")):
-                return [address]
-        return pairing._local_ipv4_addresses()
+                return address
+        return pairing.pairing_address() or ""
 
     def _refresh_pairing(self) -> None:
-        code = self.announcer.code
+        service = self.pairing
+        if service is None:
+            return
+        if self._pairing_open:
+            self.sheet.set_machines(service.machines())
+        code = service.code
         if code is not None:
-            seconds = self.announcer.seconds_left
-            shown = f"{code[:3]} {code[3:]}"
-            if self.code_label.text() != shown:
-                self.code_label.setText(shown)
-                self.code_label.setAccessibleName(f"Pairing code {' '.join(code)}")
-            widgets.set_role(self.code_label, "code")
-            self.count_label.setText(f"{seconds // 60}:{seconds % 60:02d}")
-            widgets.set_role(self.count_label, "count")
-            self.drain.set_remaining(seconds)
-            self.pair_button.setText("Cancel")
-            if not self._code_shown:
-                self._code_addresses = self._pairing_addresses()
-                self.address_note.setVisible(bool(self._code_addresses))
-                motion.set_shown(self.code_module, True)
-            # Every tick, so switching Hide addresses while a code is up applies at once.
-            note = self._shown(
-                f"Not listed on the Mac? Type this PC's address there: {', '.join(self._code_addresses)}"
-            ) if self._code_addresses else ""
-            if self.address_note.text() != note:
-                self.address_note.setText(note)
+            hide = self._hide_addresses()
+            address = getattr(self, "_code_address", "") if self._code_shown else self._pairing_address()
+            self._code_address = address
+            rows, note = None, ""
+            if hide:
+                note = "The QR holds this PC's address, so it is not shown while Hide addresses is on."
+            else:
+                text = service.qr_text(address) if address else None
+                if text is not None:
+                    if self._qr_cache[0] != text:
+                        self._qr_cache = (text, qr_code.modules(text))
+                    rows = self._qr_cache[1]
+            where = f"This PC's address: {address} · port {service.tcp_port}" if address else ""
+            self.sheet.show_code(code, service.seconds_left, self._shown(where), rows, note)
             self._code_shown = True
             return
         if not self._code_shown:
             return
         self._code_shown = False
-        motion.set_shown(self.code_module, False)
-        self.code_label.setAccessibleName("Pairing code")
-        self.drain.set_remaining(0)
-        self._show_paired(self._config.paired_with if self._config is not None else "")
-        outcome = self.announcer.outcome
-        if outcome == "refused":
-            self._say_pairing("A wrong code was entered, so that code is cancelled. Pair again for a fresh one.", "note-fault")
-        elif outcome == "version":
-            self._say_pairing("The Mac runs a different version of Beamer. Update Beamer on both machines, then pair again.", "note-fault")
-        elif outcome == "expired":
-            self._say_pairing("The code expired. Pair again for a fresh one.", "note-amber")
-        elif outcome is None:
-            self._say_pairing("Pairing cancelled.", "note")
-
-    def _say_pairing(self, text: str, tone: str) -> None:
-        if text != self.pair_note.text():
-            self.pair_note.setText(text)
-        self.pair_note.setVisible(bool(text))
-        widgets.set_role(self.pair_note, tone)
-
-    def _on_paired(self, token: str, mac_name: str, mac_address: str) -> None:
-        current = self._config or default_config()
-        host = self.host_entry.text().strip() or self._host
-        if not host:
-            # A fresh install knows no address of its own; the one facing the Mac is the one
-            # to show.
-            try:
-                host = local_address_towards(mac_address)
-            except OSError:
-                pass
-        try:
-            candidate = replace(
-                current,
-                host=host,
-                port=int(self.port_entry.text().strip() or current.port),
-                auth_token=token,
-                paired_with=mac_name,
-            )
-            save_config(self.config_path, candidate)
-            self._apply_config(candidate)
-        except (ConfigError, TypeError, ValueError, OSError) as exc:
-            LOGGER.exception("Paired token could not be saved")
-            self._say_pairing(f"Paired, but the token could not be saved: {exc}", "note-fault")
+        self.sheet.hide_code()
+        outcome = service.outcome
+        if outcome == "paired":
             return
-        self._host = candidate.host
-        self.host_entry.setText(candidate.host)
-        self.token_entry.setText(token)
-        self._refresh_pairing()
-        who = mac_name or "your Mac"
-        self._show_paired(candidate.paired_with)
-        self._say_pairing("Paired. The receiver restarted with the new token.", "note-live")
-        LOGGER.info("Paired with %s", who)
+        text = self._shown(peerlist.host_outcome_text(outcome, service.known))
+        self.sheet.say_host(text, "note-amber" if outcome == "expired" else "note-fault")
+
+    def _pick_machine(self, machine: Optional[dict]) -> None:
+        self._pairing_machine = machine
+        if machine is not None and machine.get("pairing") != pairing.PAIRING_V3:
+            self.sheet.say_pair(peerlist.pairing_error_text(pairing.PairingError(pairing.ERROR_VERSION), machine["name"]), "note-fault")
+        else:
+            self.sheet.say_pair("", "note")
+
+    def _pair_clicked(self, machine: Optional[dict], address: str, code: str) -> None:
+        service = self.pairing
+        if service is None:
+            self.sheet.say_pair("Pairing is not available: this PC's settings could not be read.", "note-fault")
+            return
+        self._pairing_target = machine["name"] if machine is not None else address
+        self.sheet.say_pair("", "note")
+        self.sheet.busy(True)
+
+        def work() -> None:
+            try:
+                entry = service.pair(machine, code) if machine is not None else service.pair_by_address(address, code)
+            except Exception as exc:
+                if not isinstance(exc, pairing.PairingError):
+                    LOGGER.exception("Pairing failed")
+                self.bridge.pair_finished.emit(None, exc)
+                return
+            self.bridge.pair_finished.emit(entry, None)
+
+        threading.Thread(target=work, name="Beamer-pair", daemon=True).start()
+
+    def _on_pair_finished(self, entry, error) -> None:
+        if self._closing:
+            return
+        self.sheet.busy(False)
+        if error is not None:
+            self.sheet.say_pair(self._shown(peerlist.pairing_error_text(error, self._pairing_target or "That machine")), "note-fault")
+            return
+        self.sheet.clear_code()
+        self.sheet.say_pair(self._shown(f"Paired with {entry['name']}."), "note-live")
+        LOGGER.info("Paired with %s", entry["name"])
+        self._after_peers_edit()
+
+    def _on_paired(self, entry) -> None:
+        """A machine paired with the code this PC was showing, and its entry is stored."""
+        if self._closing:
+            return
+        self.sheet.say_host(self._shown(peerlist.host_outcome_text("paired", entry)), "note-live")
+        self._after_peers_edit()
 
     # -- Connection -------------------------------------------------------------------------
 
@@ -1776,7 +2036,7 @@ class WindowsApplication(QWidget):
         privacy = widgets.Module("Addresses")
         self.hide_switch = widgets.Switch("Hide addresses")
         self.hide_switch.setFont(theme.font(theme.TYPE["body"]))
-        self.hide_switch.setChecked(current.hide_addresses)
+        self.hide_switch.setChecked(self._hide_addresses())
         self.hide_switch.toggled.connect(self._set_hide_addresses)
         privacy.body.addWidget(self.hide_switch)
         privacy.body.addWidget(widgets.label(
@@ -1800,33 +2060,17 @@ class WindowsApplication(QWidget):
             fields.addWidget(key, row, 0)
             fields.addWidget(entry, row, 1, 1, span)
 
-        # The address the Mac connects to. Pairing fills it in; a hand set-up copies it from here.
-        self.host_entry = QLineEdit(self._host)
-        field(0, "This PC's address", self.host_entry)
+        # Read-only: the address that faces the machines this PC knows, which is what another machine
+        # types to pair by address.
+        self.host_readout = widgets.label(self._shown(self._host) or "Not known yet", "readout", wrap=True)
+        self.host_readout.setAccessibleName("This PC's address")
+        key = widgets.label("This PC's address", "key")
+        key.setBuddy(self.host_readout)
+        fields.addWidget(key, 0, 0)
+        fields.addWidget(self.host_readout, 0, 1, 1, 2)
         self.port_entry = QLineEdit(str(current.port))
         field(1, "Port", self.port_entry)
-        self.token_entry = QLineEdit(current.auth_token)
-        self.token_entry.setEchoMode(QLineEdit.EchoMode.Password)
-        self.token_entry.setMinimumWidth(80)
-        field(2, "Shared token", self.token_entry, span=1)
-        self.show_token = QPushButton("Show")
-        self.show_token.setProperty("vernier", "small")
-        self.show_token.setCheckable(True)
-        self.show_token.setMinimumHeight(widgets.MIN_TARGET)
-        self.show_token.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.show_token.setToolTip("Show the shared token in this window")
-        self.show_token.setAccessibleName("Show the shared token")
-        self.show_token.toggled.connect(self._update_token_visibility)
-        fields.addWidget(self.show_token, 2, 2)
         module.body.addLayout(fields)
-        mac_row = QHBoxLayout()
-        mac_row.setSpacing(6)
-        mac_row.addWidget(widgets.label("Your Mac's IP address:", "note"))
-        self.mac_host_readout = widgets.label(self._shown(current.mac_host) or "Not learned yet", "readout", wrap=True)
-        self.mac_host_readout.setAccessibleName("Your Mac's IP address")
-        mac_row.addWidget(self.mac_host_readout, 1)
-        module.body.addLayout(mac_row)
-        self._show_host_entry()
         self.save_message = widgets.label("", "note", wrap=True)
         self.save_message.setVisible(False)
         module.body.addWidget(self.save_message)
@@ -1839,74 +2083,72 @@ class WindowsApplication(QWidget):
 
     def _shown(self, text: str) -> str:
         """`text` as the window may show it: with Hide addresses on, no address in it."""
-        return pages_win.redact(text, bool(self._config is not None and self._config.hide_addresses))
+        return pages_win.redact(text, self._hide_addresses())
 
     def _set_hide_addresses(self, enabled: bool) -> None:
         if self._config is None:
-            return
-        self._config.hide_addresses = bool(enabled)
-        self._persist()
-        self._show_host_entry()
-        self.mac_host_readout.setText(self._shown(self._config.mac_host) or "Not learned yet")
+            self._kept_hide = bool(enabled)
+            try:
+                app_config.set_own(self.config_path, hide_addresses=self._kept_hide)
+            except (ConfigError, OSError):
+                LOGGER.exception("Hide addresses could not be saved")
+        else:
+            self._config.hide_addresses = bool(enabled)
+            self._persist()
+        self.host_readout.setText(self._shown(self._host) or "Not known yet")
+        self._refresh_peers()
         self._refresh_pairing()
         self._refresh_window()
         self.tray.setToolTip(self._title())
         self.status_action.setText(self._title())
 
-    def _show_host_entry(self) -> None:
-        """The address field as dots while addresses are hidden, still editable."""
-        hide = bool(self._config is not None and self._config.hide_addresses)
-        self.host_entry.setEchoMode(QLineEdit.EchoMode.Password if hide else QLineEdit.EchoMode.Normal)
-
-    def _update_token_visibility(self, checked: bool) -> None:
-        self.token_entry.setEchoMode(QLineEdit.EchoMode.Normal if checked else QLineEdit.EchoMode.Password)
-        self.show_token.setText("Hide" if checked else "Show")
-        self.show_token.setAccessibleName("Hide the shared token" if checked else "Show the shared token")
-
     def save(self) -> None:
-        current = self._config or default_config()
+        """The Connection page's one setting is this PC's own port. It never touches a peer's entry, whose
+        port is that machine's own, and it works with nothing paired."""
         try:
-            candidate = replace(
-                current,
-                host=self.host_entry.text().strip() or self._host,
-                port=int(self.port_entry.text().strip()),
-                auth_token=self.token_entry.text(),
-            )
-            save_config(self.config_path, candidate)
-            self._apply_config(candidate)
-        except (ConfigError, TypeError, ValueError) as exc:
-            self.save_message.setText(str(exc))
+            port = int(self.port_entry.text().strip())
+            if not 1 <= port <= 65535:
+                raise ValueError
+            app_config.set_own(self.config_path, port=port)
+        except (TypeError, ValueError):
+            self.save_message.setText("port must be an integer from 1 to 65535")
             self.save_message.setVisible(True)
             widgets.set_role(self.save_message, "note-fault")
             return
-        except OSError as exc:
+        except (ConfigError, OSError) as exc:
             LOGGER.exception("Configuration could not be saved")
             QMessageBox.critical(self, "Save failed", str(exc))
             return
+        self._settings_port = port
+        if self._config is not None:
+            config = replace(self._config, port=port)
+            if self._paired:
+                self._apply_config(config)
+            else:
+                self._config = config
         self.save_message.setText("Saved.")
         self.save_message.setVisible(True)
         widgets.set_role(self.save_message, "note-live")
 
     def _apply_config(self, config: Config) -> None:
-        if self.server.listening:
-            self.server.stop()
         self._config = config
+        self._settings_port = config.port
         self._same_seen = self._same_fields()
         self._apply_input_scale(config)
         if not config.edge_glow:
             self._hide_crossing()
-        self.allow_switch.setEnabled(True)
-        self.allow_switch.setChecked(config.allow_mac_to_drive)
-        if config.allow_mac_to_drive:
-            self.server.start(config)
-        self.send_switch.setEnabled(True)
-        self.send_switch.setChecked(config.send_to_mac)
-        if config.send_to_mac:
-            self.sender.update_config(config)
+        self.same_switch.setEnabled(self._paired)
+        if self._paired:
+            self._start_receiver(config)
+        self.server.peers_changed()
+        self._send_paired()
+        self.sender.update_config(config)
+        self._refresh_peers()
+        if self._any_send():
             self._start_sending(config)
         else:
             self._stop_sending()
-        self.mac_host_readout.setText(self._shown(config.mac_host) or "Not learned yet")
+        self.host_readout.setText(self._shown(config.host) or "Not known yet")
 
     # -- Firewall, on Connection --------------------------------------------------------------
 
@@ -2012,8 +2254,7 @@ class WindowsApplication(QWidget):
         if (
             advice.action == "repair"
             and status.elevated
-            and not status.allowed
-            and not status.blocked
+            and firewall_win.missing_rule(status)
             and not self._firewall_auto_repaired
         ):
             self._firewall_auto_repaired = True
@@ -2071,23 +2312,19 @@ class WindowsApplication(QWidget):
         self.open_action.triggered.connect(self.show_window)
         self.status_action = menu.addAction(self._title())
         self.status_action.setEnabled(False)
-        self.redirect_action = menu.addAction("Send input to your Mac")
+        self.redirect_action = menu.addAction("Send input across")
         self.redirect_action.triggered.connect(self.toggle_redirect)
         self.pause_action = menu.addAction("Pause crossing")
         self.pause_action.triggered.connect(self.toggle_pause)
         menu.addSeparator()
         # One tick per direction, each the same switch the Overview page shows, so either
         # direction can be turned off while the other keeps working and the two never disagree.
-        self.drive_action = menu.addAction("Your Mac drives this PC")
+        self.drive_action = menu.addAction("Machines drive this PC")
         self.drive_action.setCheckable(True)
-        self.drive_action.toggled.connect(self.allow_switch.setChecked)
-        self.allow_switch.toggled.connect(self.drive_action.setChecked)
-        self.send_action = menu.addAction("This PC drives your Mac")
+        self.drive_action.triggered.connect(lambda on: self._set_every_peer("allow_drive", on))
+        self.send_action = menu.addAction("This PC drives machines")
         self.send_action.setCheckable(True)
-        self.send_action.toggled.connect(self.send_switch.setChecked)
-        self.send_switch.toggled.connect(self.send_action.setChecked)
-        self.drive_action.setChecked(self.allow_switch.isChecked())
-        self.send_action.setChecked(self.send_switch.isChecked())
+        self.send_action.triggered.connect(lambda on: self._set_every_peer("send", on))
         menu.addSeparator()
         menu.addAction("Reload configuration").triggered.connect(self.reload_config)
         menu.addAction("Open log folder").triggered.connect(self.open_log_folder)
@@ -2101,14 +2338,15 @@ class WindowsApplication(QWidget):
         self.tray.show()
 
     def reload_config(self) -> None:
-        """Re-reads config.json, for the times it was edited outside the window, and shows it."""
+        """Re-reads settings.json, for the times it was edited outside the window, and shows it."""
         try:
-            config = load_config(self.config_path)
+            config = load_config(self.config_path, unpaired_ok=True)
         except (ConfigError, OSError) as exc:
             LOGGER.warning("Configuration not reloaded: %s", exc)
             self._on_alert("Beamer", f"Could not reload the configuration: {exc}")
             return
         self._host = config.host
+        self._paired = bool(self.book.peers())
         self._apply_config(config)
         self._configure_trigger(config)
         self._reflect_config(config)
@@ -2164,18 +2402,20 @@ class WindowsApplication(QWidget):
             switch.blockSignals(True)
             switch.setChecked(value)
             switch.blockSignals(False)
-        self.host_entry.setText(config.host)
-        # The switch above was set with its signal blocked, so its handler never ran.
-        self._show_host_entry()
+        self.host_readout.setText(self._shown(config.host) or "Not known yet")
         self.port_entry.setText(str(config.port))
-        self.token_entry.setText(config.auth_token)
-        self._show_paired(config.paired_with)
+        self._refresh_peers()
 
     def _on_tray_activated(self, reason) -> None:
         if reason in (QSystemTrayIcon.ActivationReason.Trigger, QSystemTrayIcon.ActivationReason.DoubleClick):
             self.show_window()
 
     def start(self) -> None:
+        if platform_parts.NOT_YET:
+            # Nothing listens, announces or checks for updates: the parts behind them are not built.
+            self._set_status(ServerState.STOPPED, platform_parts.NOT_YET)
+            self._on_firewall(platform_parts.firewall.status("", self._config.port if self._config else protocol.DEFAULT_PORT))
+            return
         self.update_checker.start()
         if getattr(sys, "frozen", False) and firewall_win.is_elevated():
             # Beamer's own rules before any socket opens: a listener Windows has no rule for makes
@@ -2189,7 +2429,7 @@ class WindowsApplication(QWidget):
         try:
             exe, port = self._firewall_target()
             status = firewall_win.status(exe, port)
-            if not status.error and not status.allowed and not status.blocked:
+            if firewall_win.missing_rule(status):
                 LOGGER.info("Adding this PC's firewall rules before listening")
                 firewall_win.repair(exe, port, ("Private",))
         except Exception:
@@ -2199,9 +2439,10 @@ class WindowsApplication(QWidget):
     def _listen(self) -> None:
         if self._closing:
             return
-        self.announcer.start()
-        if self._config is not None:
-            self.server.start(self._config)
+        if self.pairing is not None:
+            self.pairing.start()
+        if self._config is not None and self._paired:
+            self._start_receiver(self._config)
             self._start_sending(self._config)
         # After the rules, so the firewall module reads what start() just wrote, and with no config
         # the receiver never starts, so nothing else would ever read it.
@@ -2210,12 +2451,20 @@ class WindowsApplication(QWidget):
     def _configure_trigger(self, config: Config) -> None:
         self._trigger.configure(config.trigger_key, config.trigger_style, config.double_tap_ms)
 
+    def _start_receiver(self, config: Config) -> None:
+        if platform_parts.NOT_YET:
+            return
+        if self.server.listening and self._receiver_port != config.port:
+            self.server.stop()
+        self._receiver_port = config.port
+        self.server.start(config.port)
+
     def _start_sending(self, config: Config) -> None:
         """The outward link and the hooks that feed it. The hooks go in only
         when sending is on: they are the one part of Beamer that can take this
         PC's own keyboard away, so an install that never sends never installs
         them."""
-        if not config.send_to_mac:
+        if not self._any_send() or platform_parts.NOT_YET:
             return
         self._configure_trigger(config)
         try:
@@ -2225,6 +2474,18 @@ class WindowsApplication(QWidget):
             self._sending_detail = f"This PC's keyboard could not be captured: {exc}"
             return
         self.sender.start(config)
+
+    def _on_hook_mouse(self, message: int, x: int, y: int, mouse_data: int) -> bool:
+        """Every mouse message, on the hook thread: what Windows said becomes the sender's neutral
+        call. True when the event belongs to a peer and Windows must not see it."""
+        event = capture_win.mouse_event(message, mouse_data)
+        if event is None:
+            return False
+        if event[0] == "button":
+            return self.sender.on_button(event[1], event[2])
+        if event[0] == "wheel":
+            return self.sender.on_wheel(event[1], event[2])
+        return self.sender.on_pointer_move()
 
     def _on_hook_key(self, name: str, down: bool, vk: Optional[int] = None, us: Optional[str] = None) -> bool:
         """Every key, on the hook thread. The trigger is swallowed as it
@@ -2245,62 +2506,58 @@ class WindowsApplication(QWidget):
             return True
         return self.sender.on_key(name, down, vk, us)
 
-    def _on_focus(self, target: str) -> None:
-        """The Mac took input on this PC, or gave it back. Either way the
-        outward edge follows: one of the two links owns the keyboard at a
-        time, never both."""
-        self.sender.set_receiving(target == "windows")
+    def _store_paired(self, peer: bytes, ids: list) -> None:
+        """The machines a peer says it is paired with, for the Crossing page, on the link's thread."""
+        try:
+            self.book.store_paired(protocol.id_text(peer), [protocol.id_text(item) for item in ids])
+        except (ConfigError, OSError):
+            LOGGER.exception("The peers a peer is paired with could not be saved")
 
-    def _on_learned(self, host, edge, resistance) -> None:
-        """The Mac's address and the way home it named in its hello. Saved, so
-        this PC can open its own link to the Mac before the Mac has crossed --
-        or at all, if the Mac is asleep when Beamer starts here."""
-        if self._config is None:
+    def _send_paired(self) -> None:
+        """Every peer this PC may send to is told the others it has, when the list changes."""
+        try:
+            peers = self.book.peers()
+        except Exception:
             return
-        if sender.is_this_machine(host):
-            # The Mac reached this PC through the macOS 27 localhost tunnel,
-            # so its "address" is this PC's own. Saving it would point the
-            # outward link at this PC's own receiver.
-            LOGGER.info("Ignoring %s as the Mac's address: that is this PC", host)
-            host = None
-        changed = False
-        if host and host != self._config.mac_host and self._config.mac_hardware_address:
-            # A different Mac: the old one's hardware address would wake the wrong machine.
-            self._config.mac_hardware_address = ""
-            changed = True
-        # The hello's way home only fills an edge this PC does not hold yet: one chosen here, or
-        # one the Mac's stamped arrangement set, stands, and the Mac announces its arrangement on
-        # every new link anyway.
-        if self._config.mac_return_edge:
-            edge = None
-        for name, value in (("mac_host", host), ("mac_return_edge", edge or ""), ("mac_resistance_px", resistance)):
-            if value in (None, "") or getattr(self._config, name) == value:
-                continue
-            setattr(self._config, name, value)
-            changed = True
-        if not changed:
+        ids = [protocol.read_id(item.get("id")) for item in peers]
+        for item, peer in zip(peers, ids):
+            if peer is not None and item.get("send"):
+                self._send_to(peer, protocol.paired_msg([other for other in ids if other not in (None, peer)][: protocol.MAX_PEERS]))
+
+    def _learn_peer_hardware(self, peer: bytes, address: str) -> None:
+        """A peer's hardware address from the ARP table, off the GUI thread."""
+        try:
+            changed = app_config.set_peer_hardware_address(self.config_path, protocol.id_text(peer), address)
+        except (ConfigError, OSError):
+            LOGGER.exception("A hardware address could not be saved")
             return
-        LOGGER.info("Learned the Mac at %s, coming home through the %s edge", self._config.mac_host, self._config.mac_return_edge)
-        if not self._persist():
+        if changed:
+            self.bridge.peers_changed.emit()
+
+    def _on_owner(self, peer: str) -> None:
+        """A peer took input on this PC, or gave it back. Either way the outward edge follows:
+        this PC's input is never here and elsewhere at once."""
+        self.sender.set_receiving(bool(peer))
+
+    def _on_peers_changed(self) -> None:
+        """A link learnt something about a peer (an address, an id, a name, a hardware address) and
+        saved it, or came up or went down: the window's flat view follows, and so do the links."""
+        if self._config is None or self._closing:
             return
-        self.sender.update_config(self._config)
-        self._start_sending(self._config)
-        shown = pages_win.redact(self._config.mac_host, self._config.hide_addresses)
-        self.mac_host_readout.setText(shown or "Not learned yet")
-        self.edge_choice.set_value(self._config.mac_return_edge)
-        self._reflect_look()
-        self._reflect_ways()
+        self._pull_peer_fields()
+        self.sender.refresh()
+        self._refresh_peers()
 
     def _on_sending(self, connected: bool, detail: str) -> None:
         self._sending_detail = detail
 
     def _on_redirecting(self, redirecting: bool) -> None:
         self._sending_detail = (
-            "This PC's keyboard and mouse are on the Mac" if redirecting else self.sender.status
+            f"This PC's keyboard and mouse are on {self._label_of(self.sender.owner)}" if redirecting else self.sender.status
         )
 
     def _announced_port(self) -> int:
-        return self._config.port if self._config is not None else default_config().port
+        return self._settings_port
 
     def show_window(self) -> None:
         self.showNormal()
@@ -2347,7 +2604,8 @@ class WindowsApplication(QWidget):
         self._closing = True
         self.refresh_timer.stop()
         self.update_checker.stop()
-        self.announcer.stop()
+        if self.pairing is not None:
+            self.pairing.stop()
         self.server.stop()
         self._stop_sending()
         self._hide_crossing()
@@ -2435,24 +2693,6 @@ class WindowsApplication(QWidget):
             return None
         return self.effects
 
-    def _return_model(self, edge: str, resistance: int):
-        """The way home for the Mac's pointer through `edge` of this screen, from this PC's own
-        ways in, as for this PC's own mouse: only the chosen thirds, the whole edge, the corner
-        when it sits on that edge, else none (the Mac's shortcut still switches). On the
-        receiver's session thread."""
-        config = self._config
-        if config is None:
-            return return_edge.ReturnEdge(edge, resistance)
-        methods = set(config.crossing_methods)
-        if "part" in methods:
-            return return_edge.PartEdge(edge, config.crossing_edge_parts, resistance)
-        if "edge" in methods:
-            return return_edge.ReturnEdge(edge, resistance)
-        corner = config.crossing_corner
-        if "corner" in methods and edge in corner.split("_"):
-            return return_edge.CornerPush(corner, edge, resistance)
-        return None
-
     def _on_effects_failed(self) -> None:
         """The overlay turned the effects off for the run; the Design page says so."""
         self._effects_failed = True
@@ -2495,11 +2735,8 @@ class WindowsApplication(QWidget):
             detail = self._status_detail
         tone = theme.state_tone(state.value.lower())
         self.led.set_tone(tone)
-        # The Mac's name goes in the detail, not the heading: a long name wrapped the heading onto
+        # The machines' names go in the detail, not the heading: a long name wrapped the heading onto
         # two lines at 640 wide and made the window scroll.
-        if state is ServerState.CONNECTED and detail.startswith("Connected to "):
-            who = (self._config.paired_with if self._config is not None else "") or "Your Mac"
-            detail = f"{who} at {detail[len('Connected to '):]}"
         detail = self._shown(detail)
         heading = STATUS_TITLES[state]
         if heading != self.status_heading.text():
@@ -2512,7 +2749,7 @@ class WindowsApplication(QWidget):
         if detail != self.status_detail.text():
             self.status_detail.setText(detail)
         widgets.set_role(self.status_detail, "note-fault" if state is ServerState.ERROR else "note")
-        location = "On your Mac" if self.sender.redirecting else "On this PC"
+        location = f"On {self._label_of(self.sender.owner)}" if self.sender.redirecting else "On this PC"
         if location != self.location_readout.text():
             self.location_readout.setText(location)
         trip = self.sender.round_trip_ms
@@ -2520,14 +2757,14 @@ class WindowsApplication(QWidget):
         if trip_text != self.round_trip_readout.text():
             self.round_trip_readout.setText(trip_text)
             self.round_trip_row.setVisible(trip is not None)
-        redirect_text = "Bring input back to this PC" if self.sender.redirecting else "Send input to your Mac"
+        redirect_text = "Bring input back to this PC" if self.sender.redirecting else self._redirect_text()
         if redirect_text != self.redirect_button.text():
             self.redirect_button.setText(redirect_text)
             self.redirect_action.setText(redirect_text)
-        sending = self._config is not None and self._config.send_to_mac
+        sending = self._config is not None and self._any_send()
         self.redirect_button.setEnabled(sending)
         self.redirect_action.setEnabled(sending)
-        self.redirect_note.setVisible(not sending and self._config is not None)
+        self.redirect_note.setVisible(not sending and self._paired)
         pause_text = "Resume crossing" if self.sender.crossing_paused else "Pause crossing"
         if pause_text != self.pause_button.text():
             self.pause_button.setText(pause_text)
@@ -2542,30 +2779,24 @@ class WindowsApplication(QWidget):
         armed = args[4]
         self.pause_button.setVisible(armed)
         motion.set_shown(self.pause_row, armed or pages_win.crossing_state_blocked(*args[:4]))
-        outward = pages_win.outward_link_line(self.sender.connected)
-        if outward != self.outward_line.text():
-            shot = motion.snapshot(self.outward_line)
-            self.outward_line.setText(outward)
-            motion.fade_from(self.outward_line, shot)
-        # "On your Mac" above already says this while redirecting; the hint is for the rest --
+        # "On <machine>" above already says this while redirecting; the hint is for the rest --
         # not connected, or the hooks failing to install -- and stays quiet in the boring case.
         send_hint = "" if self.sender.redirecting or self._sending_detail in (
-            "Off", "Not connected to the Mac"
+            "Off", "Not connected"
         ) else self._shown(self._sending_detail)
         if send_hint != self.send_hint.text():
             self.send_hint.setText(send_hint)
             # Hidden while empty, or its spacing leaves a gap between the two switches.
             self.send_hint.setVisible(bool(send_hint))
         self.sidebar.set_link(tone, SIDEBAR_LINK_WORDS.get(state, "Unknown"))
-        self.sidebar.set_dots(pages_win.dots(self._config is None, self._firewall_tone))
+        self.sidebar.set_dots(pages_win.dots(self._config is None or not self._paired, self._firewall_tone))
+        self._peers_tick += 1
+        if self._peers_tick % 4 == 0:
+            self._refresh_peers()
+        else:
+            self._refresh_peer_states()
+        self._refresh_tray_directions()
         self._refresh_pairing()
-        edge = self.server.return_edge
-        resistance = self.server.return_resistance
-        known = bool(edge) and resistance is not None
-        text = f"{edge} edge · {resistance} px" if known else ""
-        if text != self.return_readout.text():
-            self.return_readout.setText(text)
-        motion.set_shown(self.return_row, known)
 
     def _title(self) -> str:
         with self._status_lock:
@@ -2574,43 +2805,64 @@ class WindowsApplication(QWidget):
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Beamer Windows receiver")
-    parser.add_argument("--config", type=Path, default=default_config_path(), help="path to config.json")
+    parser.add_argument("--config", type=Path, default=default_config_path(), help="path to settings.json")
     parser.add_argument("--hidden", action="store_true", help="start in the tray without showing the window")
     return parser.parse_args()
 
 
-def main() -> None:
-    if sys.platform != "win32":
-        raise SystemExit("Beamer Windows receiver must run on Windows")
-    # use_last_error, then ctypes.get_last_error(): a plain GetLastError() call
-    # through windll can read an error ctypes' own marshalling set in between,
-    # and 183 (already exists) is the whole single-instance check.
+@functools.lru_cache(maxsize=None)
+def _windows_kernel32():
     kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
     kernel32.CreateMutexW.restype = ctypes.c_void_p
     kernel32.CreateMutexW.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_wchar_p]
     kernel32.CloseHandle.argtypes = [ctypes.c_void_p]
-    mutex = kernel32.CreateMutexW(None, False, "Local\\Beamer.Receiver")
-    already_running = ctypes.get_last_error() == 183
-    if not mutex:
-        raise OSError("Beamer could not create its single-instance lock")
-    if already_running:
-        kernel32.CloseHandle(mutex)
+    kernel32.GetCurrentProcess.restype = ctypes.c_void_p
+    kernel32.SetPriorityClass.argtypes = [ctypes.c_void_p, ctypes.c_ulong]
+    return kernel32
+
+
+def _claim_instance():
+    """The single-instance lock: the function that gives it back, or None when another Beamer
+    already holds it."""
+    if sys.platform == "win32":
+        # use_last_error, then ctypes.get_last_error(): a plain GetLastError() call
+        # through windll can read an error ctypes' own marshalling set in between,
+        # and 183 (already exists) is the whole single-instance check.
+        kernel32 = _windows_kernel32()
+        mutex = kernel32.CreateMutexW(None, False, "Local\\Beamer.Receiver")
+        already_running = ctypes.get_last_error() == 183
+        if not mutex:
+            raise OSError("Beamer could not create its single-instance lock")
+        if already_running:
+            kernel32.CloseHandle(mutex)
+            return None
+        return lambda: kernel32.CloseHandle(mutex)
+    from PySide6.QtCore import QLockFile
+
+    lock = QLockFile(str(Path(tempfile.gettempdir()) / f"Beamer.Receiver.{os.getuid()}.lock"))
+    lock.setStaleLockTime(0)
+    return lock.unlock if lock.tryLock(0) else None
+
+
+def main() -> None:
+    release = _claim_instance()
+    if release is None:
         return
     arguments = parse_args()
     log_path = configure_logging()
     LOGGER.info("Starting Beamer Windows receiver")
     if log_path is not None:
         LOGGER.info("Logging to %s", log_path)
-    # Above normal, so a busy machine cannot starve the hooks: Windows removes a
-    # low-level hook whose callback misses its timeout, silently and for good,
-    # and every Beamer thread must win the CPU for the hook thread to get the
-    # GIL. Beamer idles near 0%, so the class costs the rest of the machine
-    # nothing (for example, a video pipeline holding half the CPU once left
-    # the PC's mouse stranded on the Mac).
-    kernel32.GetCurrentProcess.restype = ctypes.c_void_p
-    kernel32.SetPriorityClass.argtypes = [ctypes.c_void_p, ctypes.c_ulong]
-    if not kernel32.SetPriorityClass(kernel32.GetCurrentProcess(), 0x8000):  # ABOVE_NORMAL_PRIORITY_CLASS
-        LOGGER.warning("Could not raise Beamer's priority: %s", ctypes.WinError(ctypes.get_last_error()))
+    if sys.platform == "win32":
+        # Above normal, so a busy machine cannot starve the hooks: Windows removes a
+        # low-level hook whose callback misses its timeout, silently and for good,
+        # and every Beamer thread must win the CPU for the hook thread to get the
+        # GIL. Beamer idles near 0%, so the class costs the rest of the machine
+        # nothing (for example, a video pipeline holding half the CPU once left
+        # the PC's mouse stranded on the Mac).
+        kernel32 = _windows_kernel32()
+        if not kernel32.SetPriorityClass(kernel32.GetCurrentProcess(), 0x8000):  # ABOVE_NORMAL_PRIORITY_CLASS
+            LOGGER.warning("Could not raise Beamer's priority: %s", ctypes.WinError(ctypes.get_last_error()))
     try:
         app = QApplication(sys.argv)
         app.setApplicationName("Beamer")
@@ -2623,7 +2875,7 @@ def main() -> None:
         application.start()
         sys.exit(app.exec())
     finally:
-        kernel32.CloseHandle(mutex)
+        release()
 
 
 def import_probe(out_path: str, names: list) -> int:

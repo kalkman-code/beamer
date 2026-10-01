@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import copy
 import ctypes
+import sys
 import time
 
 from PySide6.QtCore import QRect, QRectF, Qt, QTimer
@@ -117,6 +118,8 @@ class GlowState:
 
 def system_dark() -> bool:
     """Apps in dark mode. The overlay cannot see the wallpaper, so this is the best it has."""
+    if sys.platform != "win32":
+        return theme.system_dark()
     try:
         import winreg
 
@@ -157,6 +160,8 @@ def keep_on_top(widget: QWidget) -> None:
     """Puts `widget`'s window back at the top of the topmost windows. The taskbar is topmost too and
     raises itself whenever it is hovered or clicked, and a push into a corner or along its edge is
     right over it, so the topmost flag Qt sets once at creation leaves the light under it."""
+    if sys.platform != "win32":
+        return
     try:
         ctypes.windll.user32.SetWindowPos(int(widget.winId()), HWND_TOPMOST, 0, 0, 0, 0,
                                           SWP_NOSIZE | SWP_NOMOVE | SWP_NOACTIVATE | SWP_NOOWNERZORDER)

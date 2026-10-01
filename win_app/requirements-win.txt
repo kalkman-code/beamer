@@ -2,3 +2,4 @@ PySide6-Essentials>=6.11.1
 pyinstaller>=6.0
 pyinstaller-hooks-contrib>=2024.1
 PyNaCl>=1.6
+segno>=1.6

@@ -32,6 +32,13 @@ try:
 except ImportError:  # pragma: no cover - exercised only off macOS
     Quartz = None
 
+try:
+    import AppKit
+except ImportError:  # pragma: no cover - exercised only off macOS
+    AppKit = None
+
+from core import protocol
+
 LOGGER = logging.getLogger("Beamer")
 
 # Stamped into every injected event's kCGEventSourceUserData. Any non-zero
@@ -65,11 +72,60 @@ DOUBLE_CLICK_SLOP_PX = 5
 # the knob to turn if a mouse wheel feels wrong on the Mac.
 LINES_PER_NOTCH = 1.0
 
+# Media keys are not key events on a Mac: they arrive as NSSystemDefined events of subtype 8, the
+# reverse of media_keys.decode. The NX key codes are IOKit's ev_keymap.h. There is no stop key on
+# a Mac, and mapping it to play/pause would start playback that was paused, so it is dropped.
+NX_SUBTYPE_AUX_CONTROL_BUTTONS = 8
+NX_SYSDEFINED_EVENT_TYPE = 14
+MEDIA_NX_KEYS = {
+    "volume_up": 0,
+    "volume_down": 1,
+    "volume_mute": 7,
+    "media_play_pause": 16,
+    "media_next": 17,
+    "media_prev": 18,
+}
+_MEDIA_STATE_DOWN = 0x0A
+_MEDIA_STATE_UP = 0x0B
+
+# Keys a PC has and a Mac keyboard does not, at the place an Apple extended keyboard puts them:
+# F13, F14 and F15 are Print Screen, Scroll Lock and Pause, and the keypad's Clear is Num Lock.
+WINDOWS_ONLY_KEY_CODES = {
+    "print_screen": 0x69,
+    "scroll_lock": 0x6B,
+    "pause": 0x71,
+    "num_lock": 0x47,
+}
+# The PC's browser back and forward keys, as the shortcut every Mac browser and Finder answers to.
+BROWSER_KEY_CHORDS = {"browser_back": "[", "browser_forward": "]"}
+
+# What each system gesture becomes: the shortcuts System Settings ships for them. Fingers moving
+# left reveal the Space on the right, so swipe_left is Control+Right. Pinch was Launchpad, which
+# macOS 26 removed along with its shortcut, so it has nothing to press.
+GESTURE_CHORDS = {
+    protocol.GESTURE_SWIPE_UP: ("ctrl", "up"),
+    protocol.GESTURE_SWIPE_DOWN: ("ctrl", "down"),
+    protocol.GESTURE_SWIPE_LEFT: ("ctrl", "right"),
+    protocol.GESTURE_SWIPE_RIGHT: ("ctrl", "left"),
+    protocol.GESTURE_SPREAD: ("f11",),
+}
+
+# A real arrow, function key, Home, End, Page Up, Page Down or forward delete event carries the Fn
+# flag, and the arrows the numeric-pad flag too; system shortcuts (Control+arrows for Spaces, F11
+# for Show Desktop) match on it, and a keyboard event made from nothing does not have it.
+_ARROW_CODES = {KEY_NAME_TO_CODE[name] for name in ("left", "right", "up", "down")}
+_FN_CODES = _ARROW_CODES | {KEY_NAME_TO_CODE[name] for name in ("home", "end", "page_up", "page_down", "delete")}
+_FN_CODES |= {KEY_NAME_TO_CODE[f"f{number}"] for number in range(1, 21)}
+
 _mods_down: Set[str] = set()
 _held_codes: Dict[str, int] = {}
 _buttons_down: Set[str] = set()
 _last_click: Dict[str, Tuple[float, int, int, int]] = {}
 _warned_names: Set[str] = set()
+# The fraction of a wheel step not yet posted, per unit and axis (vertical, horizontal): a wheel
+# event carries whole numbers only, so a scroll speed under one, or a trackpad's small deltas,
+# would otherwise round to nothing every time.
+_scroll_remainders: Dict[str, List[float]] = {"line": [0.0, 0.0], "pixel": [0.0, 0.0]}
 # One lock over the held-key bookkeeping and the post it describes: a session
 # thread injecting while a reconnect's release_all snapshots and clears would
 # otherwise press a key that nothing then remembers to release.
@@ -98,6 +154,16 @@ def current_flags(mods_down: Set[str]) -> int:
         attribute = MODIFIER_FLAG_NAMES.get(name)
         if attribute is not None:
             flags |= getattr(quartz, attribute)
+    return flags
+
+
+def key_flags(key_code: int) -> int:
+    quartz = _require()
+    flags = 0
+    if key_code in _FN_CODES:
+        flags |= quartz.kCGEventFlagMaskSecondaryFn
+    if key_code in _ARROW_CODES:
+        flags |= quartz.kCGEventFlagMaskNumericPad
     return flags
 
 
@@ -139,6 +205,8 @@ def plan_key_event(name: str, down: bool, mods_down: Set[str], held: Optional[Di
         else:
             mods_down.discard(lowered)
     key_code = KEY_NAME_TO_CODE.get(lowered)
+    if key_code is None:
+        key_code = WINDOWS_ONLY_KEY_CODES.get(lowered)
     if key_code is not None:
         return key_code, None
     if len(name) != 1:
@@ -170,9 +238,59 @@ def plan_key_event(name: str, down: bool, mods_down: Set[str], held: Optional[Di
     return 0, name
 
 
+def handles_key(name: str) -> bool:
+    """Whether `name` is a key this module posts by some route other than a key code."""
+    lowered = name.lower()
+    return lowered in MEDIA_NX_KEYS or lowered in BROWSER_KEY_CHORDS
+
+
+def _inject_media_key(nx_key: int, down: bool) -> None:
+    if AppKit is None:
+        raise RuntimeError("Media keys need AppKit, which is only available on macOS")
+    state = _MEDIA_STATE_DOWN if down else _MEDIA_STATE_UP
+    ns_event = AppKit.NSEvent.otherEventWithType_location_modifierFlags_timestamp_windowNumber_context_subtype_data1_data2_(
+        NX_SYSDEFINED_EVENT_TYPE,
+        (0, 0),
+        state << 8,
+        0,
+        0,
+        None,
+        NX_SUBTYPE_AUX_CONTROL_BUTTONS,
+        (nx_key << 16) | (state << 8),
+        -1,
+    )
+    event = None if ns_event is None else ns_event.CGEvent()
+    if event is None:
+        raise RuntimeError(f"NSEvent failed for media key {nx_key}")
+    _post(event)
+
+
+def _inject_browser_key(character: str) -> None:
+    quartz = _require()
+    # The US key, not this layout's: a German or French layout has no unshifted bracket, and its
+    # plan would be key code 0, which under Command is Select All.
+    code = US_KEY_CODES[character]
+    flags = current_flags(_mods_down) | quartz.kCGEventFlagMaskCommand
+    for down in (True, False):
+        event = quartz.CGEventCreateKeyboardEvent(None, code, down)
+        if event is None:
+            raise RuntimeError(f"CGEventCreateKeyboardEvent failed for {character!r}")
+        quartz.CGEventSetFlags(event, flags)
+        _post(event)
+
+
 @_locked
 def inject_key(name: str, down: bool, us: Optional[str] = None) -> None:
     quartz = _require()
+    lowered = name.lower()
+    if lowered in MEDIA_NX_KEYS:
+        _inject_media_key(MEDIA_NX_KEYS[lowered], bool(down))
+        return
+    if lowered in BROWSER_KEY_CHORDS:
+        # One shortcut per press: the release has nothing left to let go of.
+        if down:
+            _inject_browser_key(BROWSER_KEY_CHORDS[lowered])
+        return
     plan = plan_key_event(name, down, _mods_down, _held_codes, us)
     if plan is None:
         return
@@ -181,7 +299,7 @@ def inject_key(name: str, down: bool, us: Optional[str] = None) -> None:
     if event is None:
         raise RuntimeError(f"CGEventCreateKeyboardEvent failed for {name!r}")
     if text is None:
-        quartz.CGEventSetFlags(event, current_flags(_mods_down))
+        quartz.CGEventSetFlags(event, current_flags(_mods_down) | key_flags(key_code))
     else:
         quartz.CGEventKeyboardSetUnicodeString(event, len(text), text)
         # Flags are deliberately cleared: the string says what to type, and
@@ -244,6 +362,41 @@ BUTTON_EVENTS = {
     "back": ("kCGEventOtherMouseDown", "kCGEventOtherMouseUp", 3),
     "forward": ("kCGEventOtherMouseDown", "kCGEventOtherMouseUp", 4),
 }
+
+
+# CGEventKeyboardSetUnicodeString carries a short string; longer text goes as several events.
+TEXT_CHUNK_UNITS = 16
+
+
+def text_chunks(text: str) -> List[str]:
+    """`text` cut so that no chunk is longer than TEXT_CHUNK_UNITS UTF-16 units and a character
+    outside the BMP, which takes two, is never split."""
+    chunks, current, units = [], [], 0
+    for char in text:
+        size = 2 if ord(char) > 0xFFFF else 1
+        if units + size > TEXT_CHUNK_UNITS:
+            chunks.append("".join(current))
+            current, units = [], 0
+        current.append(char)
+        units += size
+    if current:
+        chunks.append("".join(current))
+    return chunks
+
+
+@_locked
+def inject_text(text: str) -> None:
+    """Type `text` as characters rather than keys (WIRE.md section 10): each chunk is a key event
+    that carries its string, with no flags so a held modifier cannot turn it into a shortcut."""
+    quartz = _require()
+    for chunk in text_chunks(text):
+        for down in (True, False):
+            event = quartz.CGEventCreateKeyboardEvent(None, 0, down)
+            if event is None:
+                raise RuntimeError("CGEventCreateKeyboardEvent failed for text")
+            quartz.CGEventKeyboardSetUnicodeString(event, len(chunk.encode("utf-16-le")) // 2, chunk)
+            quartz.CGEventSetFlags(event, 0)
+            _post(event)
 
 
 def _held_button() -> Optional[str]:
@@ -314,15 +467,28 @@ def inject_mouse_button(button: str, down: bool) -> None:
     _post(event)
 
 
-def inject_scroll(dy, dx=0.0, mode: str = "line") -> None:
+def plan_scroll_units(dy, dx, mode: str, remainders: Dict[str, List[float]]) -> Tuple[int, int, int]:
+    """Pure planning: (unit, whole vertical steps, whole horizontal steps) for one scroll, the
+    fraction not yet whole kept in `remainders` for the next. The same arithmetic the PC's
+    plan_scroll_units does, truncating toward zero so a remainder never reverses direction."""
     quartz = _require()
     if mode == "pixel":
-        unit = quartz.kCGScrollEventUnitPixel
-        wheel_y, wheel_x = int(round(float(dy))), int(round(float(dx)))
+        unit, key, scale = quartz.kCGScrollEventUnitPixel, "pixel", 1.0
     else:
-        unit = quartz.kCGScrollEventUnitLine
-        wheel_y = int(round(float(dy) * LINES_PER_NOTCH))
-        wheel_x = int(round(float(dx) * LINES_PER_NOTCH))
+        unit, key, scale = quartz.kCGScrollEventUnitLine, "line", LINES_PER_NOTCH
+    accum = remainders[key]
+    accum[0] += float(dy) * scale
+    accum[1] += float(dx) * scale
+    whole_y, whole_x = int(accum[0]), int(accum[1])
+    accum[0] -= whole_y
+    accum[1] -= whole_x
+    return unit, whole_y, whole_x
+
+
+@_locked
+def inject_scroll(dy, dx=0.0, mode: str = "line") -> None:
+    quartz = _require()
+    unit, wheel_y, wheel_x = plan_scroll_units(dy, dx, mode, _scroll_remainders)
     if not wheel_y and not wheel_x:
         return
     event = quartz.CGEventCreateScrollWheelEvent(None, unit, 2, wheel_y, wheel_x)
@@ -332,11 +498,28 @@ def inject_scroll(dy, dx=0.0, mode: str = "line") -> None:
     _post(event)
 
 
+def reset_scroll_remainders() -> None:
+    for accum in _scroll_remainders.values():
+        accum[0] = accum[1] = 0.0
+
+
+@_locked
 def inject_gesture(name: str) -> None:
-    """Windows sends no gestures -- there is no trackpad event it could
-    classify -- so this exists only to keep the injector interface the same
-    on both machines."""
-    LOGGER.warning("Gesture %r ignored: Beamer does not inject gestures on the Mac", name)
+    """A system gesture the sender classified, pressed as the shortcut System Settings binds to
+    it, so this Mac's own choices in Trackpad and Keyboard Shortcuts apply. A gesture with no
+    shortcut is logged once and dropped."""
+    chord = GESTURE_CHORDS.get(name)
+    if chord is None:
+        if name not in _warned_names:
+            LOGGER.warning("Gesture %r has no shortcut on this Mac and is ignored", name)
+            _warned_names.add(name)
+        return
+    # A modifier the sender is already holding is part of the chord and stays down after it.
+    pressed = [key for key in chord if key not in _mods_down]
+    for key in pressed:
+        inject_key(key, down=True)
+    for key in reversed(pressed):
+        inject_key(key, down=False)
 
 
 @_locked
@@ -357,3 +540,4 @@ def release_all() -> None:
     _mods_down.clear()
     _held_codes.clear()
     _buttons_down.clear()
+    reset_scroll_remainders()

@@ -6,23 +6,23 @@ initiator bytes in order: the preamble, the hello and every input frame after it
 replay inside a connection was always refused; this is the whole stream again, into a fresh
 responder, and it must fail the tag rather than type what was recorded."""
 
+import functools
 import socket
 import time
 import unittest
-import os
-import sys
 
-sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+from links_rig import make_config
 
+import sender
 from core import protocol
 from core import receiver
-import sender
-from app_config import Config
-from fakes import FakeClipboard, FakeDesktop, FakeInjector, wait_for_calls
+from core.link import OutboundLink
 from core.return_edge import Rect
-from test_sender import NoUnlock, free_port, make_config, wait_for
+from core.tests import responder_harness as harness
+from core.tests.responder_harness import B, HERE, TOKENS, Machine, entry, wait_for
 
 MONITORS = [Rect(0, 0, 1920, 1080)]
+PREAMBLE = protocol.LINK_PREAMBLE_SIZE
 
 
 class Recording:
@@ -60,14 +60,14 @@ def replay(port, data):
         # The responder's preamble is read before the frames go: on Windows a socket closed with
         # bytes still unread resets the connection, and the reset throws away whatever this end
         # had not read yet, so sending everything at once lost the preamble about a run in five.
-        attacker.sendall(data[:protocol.PREAMBLE_SIZE])
-        while len(reply) < protocol.PREAMBLE_SIZE:
-            chunk = attacker.recv(protocol.PREAMBLE_SIZE - len(reply))
+        attacker.sendall(data[:PREAMBLE])
+        while len(reply) < PREAMBLE:
+            chunk = attacker.recv(PREAMBLE - len(reply))
             if not chunk:
                 return bytes(reply)
             reply += chunk
         try:
-            attacker.sendall(data[protocol.PREAMBLE_SIZE:])
+            attacker.sendall(data[PREAMBLE:])
             attacker.shutdown(socket.SHUT_WR)
         except (ConnectionResetError, ConnectionAbortedError):
             return bytes(reply)
@@ -83,50 +83,46 @@ def replay(port, data):
 
 
 class WholeConnectionReplayTests(unittest.TestCase):
-    def test_the_pcs_recorded_keystrokes_replayed_into_the_mac_are_refused(self):
-        injector = FakeInjector()
-        server = receiver.ReceiverServer(
-            status_callback=lambda state, detail: None,
-            clipboard=FakeClipboard(),
-            unlock=NoUnlock(),
-            desktop=FakeDesktop(MONITORS, cursor=(900, 500)),
-            injector=injector,
-            self_name="Mac",
-            peer_name="PC",
-            self_target="mac",
-            peer_target="windows",
-        )
-        port = free_port()
-        server.start(Config(host="127.0.0.1", port=port, auth_token="shared-token"))
-        self.addCleanup(server.stop)
+    def test_the_pcs_recorded_keystrokes_replayed_into_the_peer_are_refused(self):
+        far = Machine([entry(B, "Near", platform="windows")]).start()
+        self.addCleanup(far.stop)
         recordings = []
 
-        def connect(address, timeout):
+        def connect(address, timeout=None):
             recordings.append(Recording(socket.create_connection(address, timeout)))
             return recordings[-1]
 
-        link = sender.MacSender(
-            desktop=FakeDesktop(MONITORS, cursor=(0, 500)),
-            clipboard=FakeClipboard(),
+        peer = entry(HERE, "Far", token=TOKENS[B], host="127.0.0.1", port=far.port, side="left")
+        settings = harness.Settings([peer], [{"peer": protocol.id_text(HERE), "kind": "edge"}])
+        link = sender.LinkSender(
+            receiver.PeerBook(settings.load, settings.save),
+            lambda: {"id": B, "name": "Near", "platform": "windows", "app": "1.5.0", "caps": list(harness.CAPS), "port": 24820},
+            zones=lambda: settings.data["zones"],
+            desktop=harness.FakeDesktop(MONITORS, (0, 500)),
+            clipboard=harness.FakeClipboard(),
             is_local=lambda host: False,
-            socket_factory=connect,
+            links=lambda owner: sender.LinkSet(
+                owner, lambda host: False, functools.partial(OutboundLink, socket_factory=connect)
+            ),
         )
-        link.start(make_config(port=port))
-        self.assertTrue(wait_for(lambda: link.connected), f"never connected: {link.status}")
-        link.set_redirecting(True, arrival_edge="right", offset=0.5)
-        link.on_key("a", True)
-        link.on_key("a", False)
-        wait_for_calls(injector.calls, 2)
+        link.start(make_config(machine_id=protocol.id_text(B)))
+        self.addCleanup(link.stop)
+        self.assertTrue(wait_for(lambda: link.connected, 5), f"never connected: {link.status}")
+        link.set_redirecting(True)
+        self.assertTrue(wait_for(lambda: far.owners and far.owners[-1] == B))
+        link.on_key("a", True, 0x41, "a")
+        link.on_key("a", False, 0x41, "a")
+        self.assertTrue(wait_for(lambda: len([call for call in far.injected() if call[0] == "key"]) == 2))
+        typed = [call for call in far.injected() if call[0] == "key"]
         link.stop()
-        typed = [call for call in injector.calls if call[0] == "key"]
-        self.assertEqual(typed, [("key", ("a", True)), ("key", ("a", False))])
+        self.assertEqual(typed, [("key", "a", True), ("key", "a", False)])
         self.assertEqual(len(recordings), 1)
 
-        reply = replay(port, recordings[0].sent)
+        reply = replay(far.port, recordings[0].sent)
         time.sleep(0.2)
 
-        self.assertEqual([call for call in injector.calls if call[0] == "key"], typed, "replayed keys reached the Mac")
-        self.assertEqual(len(reply), protocol.PREAMBLE_SIZE, "the Mac answered past its preamble")
+        self.assertEqual([call for call in far.injected() if call[0] == "key"], typed, "replayed keys reached the peer")
+        self.assertEqual(len(reply), PREAMBLE, "the peer answered past its preamble")
 
 
 if __name__ == "__main__":

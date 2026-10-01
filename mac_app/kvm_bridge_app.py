@@ -5,6 +5,7 @@ import logging
 import logging.handlers
 import os
 import re
+import socket
 import subprocess
 import sys
 import threading
@@ -21,6 +22,7 @@ from PyObjCTools import AppHelper
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+import bridge
 import config as config_module
 import crossing
 from core import return_edge
@@ -28,6 +30,7 @@ import desktop_mac
 from core import effects
 import effects_overlay
 import gestures
+import hardware_mac
 import ignored_titles
 import keyboard_layout
 import notch_beam
@@ -39,11 +42,13 @@ from notch_island import NotchIsland
 from bridge import _GestureEventView
 from key_codes import KEY_NAME_TO_CODE
 import link_state
+import machines_panel
 import login_item
 import pages
 from core import updates
 from core import protocol
 from core import pairing
+from core import peerlist
 from core import settings_sync
 from settings_store import (
     SettingsError,
@@ -74,7 +79,7 @@ WIDE_WIDTH = 600.0
 MENU_BAR_STATES = {
     "local": "Input on this Mac",
     "held": "Input held on this Mac; crossing is off",
-    "windows": "Input on Windows",
+    "windows": "Input on another machine",
 }
 
 
@@ -935,19 +940,16 @@ class ControlWindow(AppKit.NSObject):
         # Set by TrayApp once it exists: the listener for the PC's input, and
         # the second way an arrangement changed here can reach the PC.
         self.windows_input = None
-        # Set by TrayApp: saves one direction's switch, as its menu ticks do.
+        # Set by TrayApp: saves one machine's direction switch (token, send= or allow_drive=).
         self.direction_handler = None
         self.last_capture_attempt = 0.0
         # macOS passes keys only to a process started after Input Monitoring is granted, so a grant
         # made during this run needs a relaunch before the keyboard crosses, however ready the tap looks.
         self.granted_at_launch = accessibility_granted() and input_monitoring_granted()
-        # Set by TrayApp: the beacon listener whose PCs the Pair module lists.
-        self.discovery = None
         self.update_checker = None
-        self._pcs = []
-        self._pcs_key = None
-        self.chosen_pc = None
-        self._pairing = False
+        # The list of paired machines and the pairing sheet; TrayApp gives it the pairing service.
+        self.panel = machines_panel.MachinesPanel(controller, settings_store, logger, self)
+        self._machines_first = None
         self._preview_flashes = 0
         self.latency = collections.deque(maxlen=widgets.Spark.SAMPLES)
         self.wide = None
@@ -1067,7 +1069,7 @@ class ControlWindow(AppKit.NSObject):
 
     @objc.python_method
     def _apply_width(self, width):
-        """Two layouts, not a continuous reflow. Wide, Pairing puts the PC list beside the code;
+        """Two layouts, not a continuous reflow. Wide, Pairing puts the machine list beside the code;
         narrow, it stacks and the large figures step down a size."""
         wide = width >= WIDE_WIDTH
         if wide == self.wide:
@@ -1089,15 +1091,17 @@ class ControlWindow(AppKit.NSObject):
         # Stacked, each half takes the full width; side by side, FillEqually shares it. The
         # distribution runs along the orientation, so stacked it must go back to Fill.
         self._show_peer()
-        AppKit.NSLayoutConstraint.deactivateConstraints_(self.pair_stacked)
-        self.pair_grid.setOrientation_(
+        panel = self.panel
+        panel.wide = wide
+        AppKit.NSLayoutConstraint.deactivateConstraints_(panel.pair_stacked)
+        panel.pair_grid.setOrientation_(
             AppKit.NSUserInterfaceLayoutOrientationHorizontal if wide else AppKit.NSUserInterfaceLayoutOrientationVertical
         )
-        self.pair_grid.setDistribution_(
+        panel.pair_grid.setDistribution_(
             AppKit.NSStackViewDistributionFillEqually if wide else AppKit.NSStackViewDistributionFill
         )
         if narrow:
-            AppKit.NSLayoutConstraint.activateConstraints_(self.pair_stacked)
+            AppKit.NSLayoutConstraint.activateConstraints_(panel.pair_stacked)
 
     @objc.python_method
     def _select_page(self, key):
@@ -1140,9 +1144,6 @@ class ControlWindow(AppKit.NSObject):
         self.host_secret.setStringValue_(str(raw["host"]))
         self._show_host_field()
         self.port_field.setStringValue_(str(raw["port"]))
-        self.token_field.setStringValue_(str(raw["auth_token"]))
-        self.token_plain.setStringValue_(str(raw["auth_token"]))
-        self._say_pairing("Choose a PC, then type the code it shows.")
         self.ignored_entries = list(raw["ignored_inputs"])
         self._render_ignored()
         self.pointer_ruler.value = round(raw["pointer_speed"] * 100)
@@ -1309,7 +1310,7 @@ class ControlWindow(AppKit.NSObject):
         self.modifier_note.set({
             "semantic": "Command arrives on Windows as Control, so Command-C copies there too, and Control arrives as the Windows key.",
             "positional": "Each key arrives as the key in its place, so Command arrives as the Windows key.",
-        }.get(self.modifier_select.value, "Custom: the key map in config.json is kept as it is."))
+        }.get(self.modifier_select.value, "Custom: the key map in settings.json is kept as it is."))
 
     @objc.python_method
     def _show_arrangement(self, methods):
@@ -1339,13 +1340,72 @@ class ControlWindow(AppKit.NSObject):
 
     @objc.python_method
     def _show_peer(self):
-        cfg = self.controller.cfg
-        self.peer.value.set(self._shown(link_state.peer_name(cfg)))
-        if not cfg.host:
+        """The machine input is on, else the first one paired: its name and address."""
+        entry = self._focus_entry()
+        if entry is None:
+            self.peer.value.set("—")
             self.peer_footer.set("Not paired")
+            return
+        self.peer.value.set(self._shown(self._machine_label()))
+        host, port = entry.get("host"), entry.get("port")
+        if not host:
+            self.peer_footer.set("No address")
         else:
             # The port does not fit a third of the status module at the narrow grid.
-            self.peer_footer.set(self._shown(f"{cfg.host}:{cfg.port}" if self.wide else cfg.host))
+            self.peer_footer.set(self._shown(f"{host}:{port}" if self.wide else host))
+
+    @objc.python_method
+    def _first_label(self):
+        return self.controller.peer_label or "the other machine"
+
+    @objc.python_method
+    def _focus_entry(self):
+        peers = self.controller.book.peers()
+        on = self.controller.owner.on
+        return next((peer for peer in peers if on is not None and peer.get("id") == on), peers[0] if peers else None)
+
+    @objc.python_method
+    def _machine_label(self):
+        """What the window calls the machine its status is about: where input is, else the first."""
+        controller = self.controller
+        return controller.on_label or controller.peer_label or link_state.peer_name(controller.cfg)
+
+    @objc.python_method
+    def inbound_ids(self):
+        """The ids of the machines that have a link up to this Mac."""
+        windows_input = self.windows_input
+        if windows_input is None:
+            return set()
+        return {protocol.id_text(peer) for peer in windows_input.server.links()}
+
+    @objc.python_method
+    def _follow_first_peer(self):
+        """A pairing stored from the pairing service's thread can change which machine the flat
+        settings read; until the controller has them, a save from this window would write the old
+        first machine back over it."""
+        peers = self.controller.book.peers()
+        first = peers[0]["token"] if peers else ""
+        if first != (self.controller.cfg.auth_token or ""):
+            self.peers_changed()
+
+    @objc.python_method
+    def peers_changed(self):
+        """A machine was paired or removed: the controller reads the settings again (without
+        `update_config`, which would bring input home), the links follow the peers, and the
+        address fields show the first machine."""
+        try:
+            cfg = self.settings_store.load()
+        except SettingsError as exc:
+            self.logger.warning("settings not read after the peers changed: %s", exc)
+            return
+        # The links first: apply_settings tells the primary link where this Mac's edge is, and that
+        # must be the new first machine's link, not one that is about to be removed.
+        self.controller.peers_changed()
+        self.controller.apply_settings(cfg)
+        if self.windows_input is not None:
+            self.windows_input.sync(cfg)
+        self._load(config_to_raw(cfg))
+        self.refresh()
 
     @objc.python_method
     def _shown(self, text):
@@ -1411,6 +1471,8 @@ class ControlWindow(AppKit.NSObject):
     def windowWillClose_(self, _notification):
         self.key_recorder.cancel()
         self.ignored_recorder.cancel()
+        # A code that stays up with nobody watching would still accept a pairing.
+        self.panel.stop_showing()
         if self.previews is not None:
             self.tile_hover.stop()
             self.previews.stop()
@@ -1489,46 +1551,32 @@ class ControlWindow(AppKit.NSObject):
 
     @objc.python_method
     def _overview_page(self, body):
-        # Pairing leads until there is a PC, since nothing else here works without one; once
-        # paired it is a quiet block further down with the one way to change it.
-        widgets.add(body, self._pair_module().view)
+        # The machines and the pairing sheet lead until there is one, since nothing else here works
+        # without it; once paired they sit under the controls (see _place_machines).
+        self.overview_body = body
         widgets.add(body, self._status_module().view)
         widgets.add(body, self._keyboard_module().view)
-        widgets.add(body, self._directions_module().view)
+        widgets.add(body, self.panel.machines_module.view)
+        widgets.add(body, self.panel.sheet.view)
         widgets.add(body, self._same_module().view)
-        widgets.add(body, self._paired_module().view)
         widgets.add(body, self._login_module().view)
         widgets.add(body, self._updates_module().view)
 
     @objc.python_method
-    def _directions_module(self):
-        """The menu bar's two ticks, here too, as the PC has them on its Overview: either
-        direction can be switched off while the other keeps working."""
-        module = widgets.Module(spacing=10)
-        module.add(widgets.eyebrow("Directions"))
-        self.send_switch = widgets.Switch(
-            "This Mac drives Windows", on_change=lambda on: self._set_direction(send_to_windows=on)
-        )
-        module.add(self.send_switch.view)
-        self.receive_switch = widgets.Switch(
-            "Windows drives this Mac", on_change=lambda on: self._set_direction(allow_windows_to_drive=on)
-        )
-        module.add(self.receive_switch.view)
-        self._show_directions()
-        return module
-
-    @objc.python_method
-    def _set_direction(self, **change):
-        if self.direction_handler is not None:
-            self.direction_handler(**change)
-        self._show_directions()
-
-    @objc.python_method
-    def _show_directions(self):
-        cfg = self.controller.cfg
-        for switch, value in ((self.send_switch, cfg.send_to_windows), (self.receive_switch, cfg.allow_windows_to_drive)):
-            if switch.value != bool(value):
-                switch.value = value
+    def _place_machines(self, first):
+        """The machines list and the pairing sheet at the top of Overview while nothing is paired,
+        under Keyboard and pointer once something is."""
+        if first == self._machines_first:
+            return
+        self._machines_first = first
+        body = self.overview_body
+        views = (self.panel.machines_module.view, self.panel.sheet.view)
+        for view in views:
+            body.removeArrangedSubview_(view)
+        # Under the page's title block, which is the first view; after Keyboard and pointer otherwise.
+        at = 1 if first else 3
+        for offset, view in enumerate(views):
+            body.insertArrangedSubview_atIndex_(view, at + offset)
 
     @objc.python_method
     def _same_module(self):
@@ -1553,7 +1601,7 @@ class ControlWindow(AppKit.NSObject):
         """Whether a link is up to a PC whose Beamer does not keep settings in step."""
         links = [(self.controller.connected, getattr(self.controller, "peer_settings", None))]
         if self.windows_input is not None:
-            links.append((self.windows_input.state == ServerState.CONNECTED, self.windows_input.server.peer_settings))
+            links.append((self.windows_input.state == ServerState.CONNECTED, self.windows_input.peer_settings))
         return any(up and known is False for up, known in links)
 
     @objc.python_method
@@ -1564,9 +1612,10 @@ class ControlWindow(AppKit.NSObject):
         if self.same_switch.value != on:
             self.same_switch.value = on
         self.same_switch.set_enabled(not old)
-        self.same_note.set(settings_sync.switch_note("PC", cfg.same_on_both, old), ink="amber" if old else "ink_2")
+        who = settings_sync.who(list(peerlist.labels(self.controller.book.peers()).values()))
+        self.same_note.set(settings_sync.switch_note(who, cfg.same_on_both, old), ink="amber" if old else "ink_2")
         for key, label in self.scope_labels.items():
-            text = settings_sync.scope(key, "PC", on, pages.SCOPE.get(key))
+            text = settings_sync.scope(key, who, on, pages.SCOPE.get(key))
             if label.text != text:
                 label.set(text)
         for note in self.own_notes:
@@ -1580,6 +1629,7 @@ class ControlWindow(AppKit.NSObject):
         raw = config_to_raw(self.controller.cfg)
         raw["same_on_both"] = bool(on)
         raw["same_set_at"] = settings_sync.next_stamp(raw["same_set_at"], time.time())
+        raw["same_by"] = self.own_id()
         try:
             cfg = self.settings_store.save(raw)
         except SettingsError as exc:
@@ -1595,27 +1645,36 @@ class ControlWindow(AppKit.NSObject):
         from the links' threads as well, so it reads the settings once."""
         cfg = self.controller.cfg
         return settings_sync.message_data(cfg.same_on_both, cfg.same_set_at,
-                                          settings_sync.mac_values(config_to_raw(cfg)))
+                                          settings_sync.mac_values(config_to_raw(cfg)), by=cfg.same_by or self.own_id())
 
     @objc.python_method
-    def _send_same(self):
-        data = self.same_state()
-        self.controller.send_settings(data)
+    def own_id(self):
+        """This machine's id as a b64 text: who made a change to what is kept in step."""
+        return self.settings_store.current()["machine_id"]
+
+    @objc.python_method
+    def _send_same(self, data=None, source=None):
+        """This Mac's state to every machine that keeps it, or a newer state taken from `source`
+        passed on, unchanged, to all the others."""
+        data = data if data is not None else self.same_state()
+        self.controller.send_settings(data, source=source)
         if self.windows_input is not None:
-            self.windows_input.server.send_settings(data)
+            self.windows_input.send_settings(data, source=source)
 
     @objc.python_method
-    def apply_same(self, data):
-        """The PC's settings message, over either link, on the main thread. Its state stands only
-        when it is newer than this Mac's; then its values replace the shared ones here."""
+    def apply_same(self, data, peer=None):
+        """A peer's settings message, over either link, on the main thread. Its state stands only
+        when it is newer than this Mac's; then its values replace the shared ones here, and it is
+        sent on, unchanged, to every other machine that keeps it."""
         cfg = self.controller.cfg
-        taken = settings_sync.arrived(data, cfg.same_set_at, KEY_NAME_TO_CODE)
+        taken = settings_sync.arrived(data, cfg.same_set_at, KEY_NAME_TO_CODE, by_here=cfg.same_by)
         if taken is None:
             return
         on, set_at, values = taken
         raw = config_to_raw(cfg)
         raw["same_on_both"] = on
         raw["same_set_at"] = set_at
+        raw["same_by"] = data.get("by", "")
         if on:
             raw = settings_sync.apply_mac(raw, values)
         try:
@@ -1624,6 +1683,7 @@ class ControlWindow(AppKit.NSObject):
             self.logger.exception("could not save the settings the PC sent")
             return
         self.controller.apply_settings(cfg)
+        self._send_same(data, source=peer)
         if self.previews is not None:
             self.previews.repaint()
         self.logger.info("settings from the PC applied (same on both machines %s)", "on" if on else "off")
@@ -1841,7 +1901,7 @@ class ControlWindow(AppKit.NSObject):
         self.round_trip = widgets.Readout("Delay", "ms", self.spark)
         self.peer_footer = widgets.Label("", theme.TYPE["small"], mono=True, ink="ink_3")
         widgets.squeeze(self.peer_footer.view)
-        self.peer = widgets.Readout("PC", "", self.peer_footer.view, sizes=(theme.PEER_SIZE, theme.PEER_SIZE_NARROW))
+        self.peer = widgets.Readout("Machine", "", self.peer_footer.view, sizes=(theme.PEER_SIZE, theme.PEER_SIZE_NARROW))
         module.add(widgets.grid([self.round_trip.view, self.peer.view], 2))
         return module
 
@@ -1852,7 +1912,7 @@ class ControlWindow(AppKit.NSObject):
         module = widgets.Module(spacing=12)
         module.add(widgets.eyebrow("Keyboard and pointer"))
         self.toggle_button = widgets.Button(
-            "Send input to Windows", self, "toggleRedirect:", style="primary", scale="big", full_width=True
+            "Send input", self, "toggleRedirect:", style="primary", scale="big", full_width=True
         )
         module.add(self.toggle_button.view)
         self.pause_row = widgets.stack(spacing=8)
@@ -2295,92 +2355,11 @@ class ControlWindow(AppKit.NSObject):
         return module
 
     @objc.python_method
-    def _paired_module(self):
-        """What the page leads with once a PC is paired: which one, where, and the one way to change
-        it. The PC list and code boxes stay hidden until they are wanted, or they read as an
-        invitation to pair a Mac that already is."""
-        module = widgets.Module()
-        module.add(widgets.eyebrow("Paired with"))
-        self.paired_name = widgets.Label("", theme.TYPE["readout"], 400, mono=True)
-        module.add(self.paired_name.view)
-        self.paired_address = widgets.Label("", theme.TYPE["small"], mono=True, ink="ink_3")
-        module.add(self.paired_address.view)
-        line = widgets.stack(vertical=False, spacing=10)
-        line.setAlignment_(AppKit.NSLayoutAttributeCenterY)
-        self.paired_note = widgets.note()
-        line.addArrangedSubview_(self.paired_note.view)
-        self.repair_button = widgets.Button("Pair a different PC", self, "togglePairing:", scale="small")
-        line.addArrangedSubview_(self.repair_button.view)
-        module.add(line)
-        self.paired_module = module
-        return module
-
-    @objc.python_method
-    def _pair_module(self):
-        module = widgets.Module()
-        module.add(widgets.eyebrow("Pair with your PC"))
-        module.add(widgets.note(
-            "Open Beamer on the PC and press Pair a Mac. Then choose the PC here and type the "
-            "six-digit code it shows. You only do this once."
-        ).view)
-        self.pair_grid = widgets.stack(spacing=20)
-        self.pair_grid.setAlignment_(AppKit.NSLayoutAttributeTop)
-        found = widgets.stack(spacing=8)
-        widgets.add(found, widgets.eyebrow("On this network"))
-        self.pc_list = widgets.stack(spacing=1)
-        self.pc_frame = widgets.box("rule")
-        self.pc_frame.addSubview_(self.pc_list)
-        widgets.pin(self.pc_list, self.pc_frame, (1, 1, 1, 1))
-        widgets.add(found, self.pc_frame)
-        self.pc_empty = widgets.note()
-        widgets.add(found, self.pc_empty.view)
-        # For a PC no broadcast reaches: asked by its address, it answers with its beacon and
-        # joins the list above, and pairing carries on with its code as usual.
-        # As dots while addresses are hidden, as the PC's address on Connection is.
-        find_box, self.find_field = widgets.field()
-        find_secret_box, self.find_secret = widgets.field(secure=True)
-        find_secret_box.setHidden_(True)
-        self.find_boxes = (find_box, find_secret_box)
-        for control in (self.find_field, self.find_secret):
-            control.setPlaceholderAttributedString_(widgets.attributed("PC's address", theme.TYPE["small"], ink="ink_3", mono=True))
-            control.setAccessibilityLabel_("Address of a PC that is not listed")
-            control.setTarget_(self)
-            control.setAction_("findPC:")
-        find_line = widgets.stack(vertical=False, spacing=8)
-        for box in self.find_boxes:
-            find_line.addArrangedSubview_(widgets.hug(box, AppKit.NSLayoutPriorityDefaultLow))
-        find_line.addArrangedSubview_(widgets.Button("Find", self, "findPC:").view)
-        find_caption = widgets.label("PC not listed? Type its address.", theme.TYPE["note"], ink="ink_2")
-        widgets.add(found, find_caption)
-        found.setCustomSpacing_afterView_(14, self.pc_empty.view)
-        found.setCustomSpacing_afterView_(14, self.pc_frame)
-        widgets.add(found, find_line)
-        self.find_status = widgets.note()
-        widgets.add(found, self.find_status.view)
-        self.find_status.view.setHidden_(True)
-        code = widgets.stack(spacing=8)
-        widgets.add(code, widgets.eyebrow("Code shown on the PC"))
-        self.code_boxes = widgets.CodeBoxes(pairing.CODE_DIGITS, self.confirmPair_)
-        widgets.add(code, self.code_boxes.view)
-        line = widgets.stack(vertical=False, spacing=10)
-        line.setAlignment_(AppKit.NSLayoutAttributeTop)
-        self.pair_status = widgets.note()
-        line.addArrangedSubview_(self.pair_status.view)
-        self.confirm_button = widgets.Button("Pair", self, "confirmPair:", style="primary")
-        line.addArrangedSubview_(self.confirm_button.view)
-        widgets.add(code, line)
-        self.pair_grid.addArrangedSubview_(found)
-        self.pair_grid.addArrangedSubview_(code)
-        module.add(self.pair_grid)
-        self.pair_stacked = [
-            view.widthAnchor().constraintEqualToAnchor_(self.pair_grid.widthAnchor()) for view in (found, code)
-        ]
-        self.pair_module = module
-        return module
-
-    @objc.python_method
     def _connection_module(self):
         module = widgets.Module(spacing=10)
+        # The page edits the first machine paired; any other is changed by pairing it again.
+        self.connection_note = widgets.note()
+        module.add(self.connection_note.view)
         self.hide_switch = widgets.Switch("Hide addresses", on_change=self._set_hide_addresses)
         module.add(self.hide_switch.view)
         module.add(widgets.note(
@@ -2394,33 +2373,19 @@ class ControlWindow(AppKit.NSObject):
         for box in self.host_boxes:
             host_line.addArrangedSubview_(box)
             widgets.hug(box, AppKit.NSLayoutPriorityDefaultLow)
-        module.add(widgets.field_row("PC's address", host_line)[0])
+        module.add(widgets.field_row("Address", host_line)[0])
         for control in (self.host_field, self.host_secret):
-            control.setAccessibilityLabel_("PC's address")
+            control.setAccessibilityLabel_("Address")
         port_box, self.port_field = widgets.field()
         module.add(widgets.field_row("Port", port_box)[0])
         self.port_field.setAccessibilityLabel_("Port")
-        token_box, self.token_field = widgets.field(secure=True)
-        plain_box, self.token_plain = widgets.field()
-        plain_box.setHidden_(True)
-        self.token_boxes = (token_box, plain_box)
-        self.show_button = widgets.Button("Show", self, "showToken:", scale="small")
-        token_line = widgets.stack(vertical=False, spacing=6)
-        token_line.addArrangedSubview_(token_box)
-        token_line.addArrangedSubview_(plain_box)
-        token_line.addArrangedSubview_(self.show_button.view)
-        for box in self.token_boxes:
-            widgets.hug(box, AppKit.NSLayoutPriorityDefaultLow)
-        module.add(widgets.field_row("Shared token", token_line)[0])
-        for control in (self.token_field, self.token_plain):
-            control.setAccessibilityLabel_("Shared token")
         self.wake_state = widgets.Label("", theme.TYPE["small"], mono=True)
         module.add(widgets.field_row("Wake-on-LAN", self.wake_state.view)[0])
         self.wake_hint = widgets.note()
         module.add(self.wake_hint.view)
         module.add(widgets.hairline())
         line = widgets.stack(vertical=False, spacing=12)
-        line.addArrangedSubview_(widgets.note("A new address, port or token takes effect when you connect.").view)
+        line.addArrangedSubview_(widgets.note("A new address or port takes effect when you connect.").view)
         line.addArrangedSubview_(widgets.Button("Connect", self, "connect:", style="primary").view)
         module.add(line)
         return module
@@ -2513,10 +2478,6 @@ class ControlWindow(AppKit.NSObject):
         self._run_previews()
 
     @objc.python_method
-    def _token(self):
-        return (self.token_plain if self.token_boxes[0].isHidden() else self.token_field).stringValue()
-
-    @objc.python_method
     def _set_hide_addresses(self, on):
         try:
             cfg = self.settings_store.save(config_to_raw(replace(self.controller.cfg, hide_addresses=bool(on))))
@@ -2533,7 +2494,7 @@ class ControlWindow(AppKit.NSObject):
         """The address fields as dots while addresses are hidden, still editable."""
         hide = self.controller.cfg.hide_addresses
         for (plain_box, secret_box), plain, secret in ((self.host_boxes, self.host_field, self.host_secret),
-                                                       (self.find_boxes, self.find_field, self.find_secret)):
+                                                       (self.panel.find_boxes, self.panel.find_field, self.panel.find_secret)):
             if hide == plain_box.isHidden():
                 continue
             if hide:
@@ -2549,17 +2510,6 @@ class ControlWindow(AppKit.NSObject):
     def _host_text(self):
         return (self.host_secret if self.controller.cfg.hide_addresses else self.host_field).stringValue()
 
-    def showToken_(self, _sender):
-        secure_box, plain_box = self.token_boxes
-        showing = plain_box.isHidden()
-        if showing:
-            self.token_plain.setStringValue_(self.token_field.stringValue())
-        else:
-            self.token_field.setStringValue_(self.token_plain.stringValue())
-        secure_box.setHidden_(showing)
-        plain_box.setHidden_(not showing)
-        self.show_button.set_title("Hide" if showing else "Show")
-
     def connect_(self, _sender):
         """The Connection page's own commit: a new address, port or token has to reconnect, so it
         waits for the button rather than applying as it is typed."""
@@ -2567,7 +2517,6 @@ class ControlWindow(AppKit.NSObject):
         try:
             raw["host"] = self._host_text().strip()
             raw["port"] = int(self.port_field.stringValue().strip())
-            raw["auth_token"] = self._token()
             if raw["host"] != self.controller.cfg.host:
                 # What was learned belonged to the old address.
                 raw["pc_name"] = ""
@@ -2620,13 +2569,14 @@ class ControlWindow(AppKit.NSObject):
                 settings_sync.mac_values(config_to_raw(self.controller.cfg)), settings_sync.mac_values(raw))
             if shared:
                 raw["same_set_at"] = settings_sync.next_stamp(self.controller.cfg.same_set_at, time.time())
+                raw["same_by"] = self.own_id()
             moved = raw["crossing"]["edge"] != self.controller.cfg.crossing.get("edge")
             if moved:
                 # The edge is half of a value Windows holds too, so a change
                 # here is stamped with the moment it was made. When the two
                 # ends meet holding different answers -- one changed while the
                 # other was asleep -- the newer stamp is the one that stands.
-                raw["crossing"]["arrangement_set_at"] = int(time.time())
+                raw["crossing"]["arrangement_set_at"] = settings_sync.next_stamp(self.controller.cfg.crossing.get("arrangement_set_at", 0), time.time())
             cfg = self.settings_store.save(raw)
         except (SettingsError, TypeError, ValueError) as exc:
             self._say(str(exc), "fault")
@@ -2647,21 +2597,26 @@ class ControlWindow(AppKit.NSObject):
         self._say("Saved. Changes apply as you make them.", "ink_2")
 
     @objc.python_method
-    def apply_arrangement(self, mac_edge, set_at):
-        """Windows changed which edge of this Mac leads to it. Applied here
+    def apply_arrangement(self, mac_edge, set_at, by=None):
+        """The peer changed which edge of this Mac leads to it. Applied here
         rather than at either link, because this is the side that owns the
-        settings file. An arrangement older than this Mac's own is ignored:
-        both ends stamp their changes, and the newer one stands."""
-        if mac_edge == self.controller.cfg.crossing.get("edge"):
-            return
+        settings file. An arrangement that is not newer than this Mac's own is ignored:
+        both ends stamp their changes, and the newer one stands, a tie going to the
+        larger `by` (WIRE.md section 8)."""
+        held = self.settings_store.current()["peers"]
+        held_by = protocol.read_id(held[0].get("side_by")) if held else None
+        theirs = protocol.read_id(by) if by else None
         mine = self.controller.cfg.crossing.get("arrangement_set_at", 0)
-        if mine and not protocol.arrangement_wins(set_at, mine):
-            self.logger.info("ignoring an older arrangement from the PC (%s vs %s)", set_at, mine)
+        if mac_edge == self.controller.cfg.crossing.get("edge") and set_at == mine:
+            return
+        newer = set_at > mine or (set_at == mine and (theirs or b"") > (held_by or b""))
+        if not newer:
+            self.logger.info("ignoring an older arrangement from the peer (%s vs %s)", set_at, mine)
             return
         raw = config_to_raw(self.controller.cfg)
         raw["crossing"] = {**raw["crossing"], "edge": mac_edge, "arrangement_set_at": int(set_at)}
         try:
-            cfg = self.settings_store.save(raw)
+            cfg = self.settings_store.save(raw, side_by=by)
         except (SettingsError, TypeError, ValueError):
             self.logger.exception("could not save the arrangement the PC sent")
             return
@@ -2705,7 +2660,7 @@ class ControlWindow(AppKit.NSObject):
             return
         if not self.controller.redirecting and self.controller.can_wake:
             self.controller.wake()
-            self._say("Waking Windows. It connects on its own once it is up.", "ink_2")
+            self._say(f"Waking {self._first_label()}. It connects on its own once it is up.", "ink_2")
         elif not self.controller.set_redirecting(not self.controller.redirecting):
             self._say(self.controller.connection_status, "fault")
         self.refresh()
@@ -2713,227 +2668,6 @@ class ControlWindow(AppKit.NSObject):
     def togglePause_(self, _sender):
         self.controller.crossing_paused = not self.controller.crossing_paused
         self.refresh()
-
-    def togglePairing_(self, _sender):
-        self._repairing = not getattr(self, "_repairing", False)
-        if not self._repairing:
-            self.code_boxes.clear()
-            self.chosen_pc = None
-            self._pcs_key = None
-        self._say_pairing("Choose a PC, then type the code it shows.")
-        self.refresh()
-
-    @objc.python_method
-    def _refresh_paired(self, state):
-        cfg = self.controller.cfg
-        paired = bool(cfg.auth_token)
-        refused = state.key == "token"
-        repairing = getattr(self, "_repairing", False)
-        peer = self._shown(link_state.peer_name(cfg))
-        motion.set_hidden(self.paired_module.view, not paired)
-        motion.set_hidden(self.pair_module.view, paired and not refused and not repairing)
-        self.paired_name.set(peer)
-        self.paired_address.set(self._shown(f"{cfg.host}  ·  port {cfg.port}"))
-        if refused:
-            self.paired_note.set(f"{peer} refused this Mac's token. Pair again below with the code it shows.", ink="fault")
-        elif state.key in ("mac", "windows", "paused", "full_screen", "unlocking"):
-            self.paired_note.set("Connected now.", ink="signal")
-        else:
-            self.paired_note.set("Beamer connects to it on its own whenever both are running.", ink="ink_2")
-        self.repair_button.set_title("Cancel" if repairing else "Pair a different PC")
-        self.repair_button.view.setHidden_(refused)
-
-    @objc.python_method
-    def _say_pairing(self, message, ink="ink_2"):
-        self._pair_ink = ink
-        self.pair_status.set(message, ink=ink)
-
-    @objc.python_method
-    def _refresh_pcs(self):
-        """Rebuilds the PC rows only when what they would show has changed; the timer that
-        drives this ticks several times a second."""
-        discovery = self.discovery
-        pcs = discovery.pcs() if discovery is not None else []
-        chosen = self.chosen_pc["address"] if self.chosen_pc is not None else None
-        key = (chosen, tuple(tuple(sorted(pc.items())) for pc in pcs))
-        if key == self._pcs_key:
-            return
-        self._pcs_key = key
-        self._pcs = pcs
-        # The chosen row is the PC's beacon at the moment of the click; a PC that starts,
-        # renews or stops its code after that must move the hint with it, not leave it stale.
-        current = next((pc for pc in pcs if pc["address"] == chosen), None)
-        if current is not None and current != self.chosen_pc:
-            showed = self.chosen_pc["pair_id"]
-            self.chosen_pc = current
-            # A refusal or a failed save stays up until the PC offers a fresh code.
-            fault = getattr(self, "_pair_ink", None) == "fault"
-            if current["pair_id"] != showed and not self._pairing and (current["pair_id"] or not fault):
-                self._say_choice()
-        self._find_answered(pcs)
-        for view in list(self.pc_list.arrangedSubviews()):
-            self.pc_list.removeArrangedSubview_(view)
-            view.removeFromSuperview()
-        for index, pc in enumerate(pcs):
-            picked = pc["address"] == chosen
-            row = widgets.pressable(lambda index=index: self._choose_pc(index), "well" if picked else "ground",
-                                    role=AppKit.NSAccessibilityRadioButtonRole)
-            row.ring_inset = 1.0
-            showing = pc["pair_id"] is not None
-            row.setAccessibilityLabel_(self._shown(f"{pc['name']}, {pc['address']}") + (", showing a code" if showing else ""))
-            row.setToolTip_(f"Port {pc['port']}" + (", showing a code" if showing else ""))
-            line = widgets.stack(vertical=False, spacing=9)
-            led = widgets.LED()
-            led.set("signal" if showing else "off")
-            line.addArrangedSubview_(led.view)
-            name = widgets.Label(pc["name"], theme.TYPE["note"], 600 if picked else 400)
-            line.addArrangedSubview_(widgets.hug(widgets.squeeze(name.view), AppKit.NSLayoutPriorityDefaultLow))
-            line.addArrangedSubview_(widgets.Label(self._shown(pc["address"]), theme.TYPE["small"], mono=True, ink="ink_3").view)
-            row.addSubview_(line)
-            widgets.pin(line, row, (7, 10, 7, 10))
-            widgets.add(self.pc_list, row)
-        if discovery is not None and discovery.error:
-            self.pc_empty.set(f"Beamer cannot look for PCs: {discovery.error}", ink="fault")
-        else:
-            self.pc_empty.set(
-                "Looking for PCs running Beamer. Open it on the PC and it appears here; across a VPN or "
-                "on guest Wi-Fi it may not, so type its address below.",
-                ink="ink_2",
-            )
-        self.pc_frame.setHidden_(not pcs)
-        self.pc_empty.view.setHidden_(bool(pcs))
-        if chosen is not None and chosen not in {pc["address"] for pc in pcs}:
-            self.chosen_pc = None
-            self._pcs_key = None
-        self.confirm_button.set_enabled(self.chosen_pc is not None and not self._pairing)
-
-    @objc.python_method
-    def _choose_pc(self, index):
-        if not 0 <= index < len(self._pcs):
-            return
-        self.chosen_pc = self._pcs[index]
-        self.code_boxes.clear()
-        self.code_boxes.view.setAccessibilityLabel_(f"Code shown on {self.chosen_pc['name']}")
-        self._say_choice()
-        self._refresh_pcs()
-        self.code_boxes.focus(self.window)
-
-    @objc.python_method
-    def _say_choice(self):
-        if self.chosen_pc["pair_id"] is None:
-            self._say_pairing(f"{self.chosen_pc['name']} is not showing a code yet. Start pairing in Beamer on it first.")
-        else:
-            self._say_pairing("Six digits, as shown on the PC.")
-
-    def findPC_(self, _sender):
-        host = (self.find_secret if self.controller.cfg.hide_addresses else self.find_field).stringValue().strip()
-        if self.discovery is None:
-            return
-        self.discovery.find(host)
-        self._find_serial = getattr(self, "_find_serial", 0) + 1
-        serial = self._find_serial
-        # Discovery only logs an address it cannot resolve, so the page watches for the PC
-        # itself: a PC new to the list since the ask, or one at the typed address, is the answer.
-        self._finding = {"host": host, "known": {pc["address"] for pc in self._pcs}, "serial": serial} if host else None
-        self._said_find(self._shown(f"Asking {host}…") if host else "")
-        if host:
-            AppHelper.callLater(6.0, lambda: self._find_timed_out(serial))
-
-    @objc.python_method
-    def _said_find(self, message, ink="ink_2"):
-        self.find_status.set(message, ink=ink)
-        motion.set_hidden(self.find_status.view, not message)
-
-    @objc.python_method
-    def _find_answered(self, pcs):
-        finding = getattr(self, "_finding", None)
-        if finding is None:
-            return
-        found = next((pc for pc in pcs if pc["address"] == finding["host"] or pc["address"] not in finding["known"]), None)
-        if found is not None:
-            self._finding = None
-            self._said_find(f"Found {found['name']}. Choose it in the list.", "signal")
-
-    @objc.python_method
-    def _find_timed_out(self, serial):
-        finding = getattr(self, "_finding", None)
-        if finding is not None and finding["serial"] == serial:
-            self._said_find(
-                self._shown(f"No answer from {finding['host']} yet. Check the address, and that Beamer is open on the PC; "
-                            "this Mac keeps asking."),
-                "amber",
-            )
-
-    def confirmPair_(self, _sender):
-        pc = self.chosen_pc
-        if pc is None or self._pairing or self.discovery is None:
-            return
-        code = re.sub(r"\D", "", self.code_boxes.value)
-        if len(code) != pairing.CODE_DIGITS:
-            self._say_pairing(f"The code is {pairing.CODE_DIGITS} digits.", "fault")
-            return
-        # The list may have refreshed since the row was chosen; pair with the PC's latest beacon.
-        current = next((entry for entry in self._pcs if entry["address"] == pc["address"]), pc)
-        if current["pair_id"] is None:
-            self._say_pairing(f"{current['name']} is not showing a code. Start pairing in Beamer on it, then try again.", "fault")
-            return
-        self._pairing = True
-        self.confirm_button.set_enabled(False)
-        self._say_pairing(f"Pairing with {current['name']}…")
-        discovery = self.discovery
-
-        def work():
-            try:
-                result = discovery.pair(current, code)
-            except pairing.PairingError as exc:
-                result = exc
-            except Exception as exc:
-                self.logger.exception("pairing failed")
-                result = pairing.PairingError(str(exc))
-            AppHelper.callAfter(self._pairing_finished, current, result)
-
-        threading.Thread(target=work, name="pair", daemon=True).start()
-
-    @objc.python_method
-    def _pairing_finished(self, pc, result):
-        self._pairing = False
-        self.confirm_button.set_enabled(self.chosen_pc is not None)
-        name = pc["name"]
-        if isinstance(result, pairing.PairingError):
-            reason = str(result)
-            if reason == pairing.ERROR_NOT_PAIRING:
-                self._say_pairing(f"{name} is not showing a code. Start pairing in Beamer on it, then try again.", "fault")
-            elif reason == pairing.ERROR_REFUSED:
-                self._say_pairing("That code was not accepted, and the PC has cancelled it. Start pairing there again for a fresh one.", "fault")
-            elif reason == pairing.ERROR_VERSION:
-                self._say_pairing("The PC runs a different version of Beamer. Update Beamer on both machines, then pair again.", "fault")
-            elif reason == "no_answer":
-                self._say_pairing(f"{name} did not answer. Check both machines are on the same network, then try again.", "fault")
-            else:
-                self._say_pairing(f"Pairing failed: {reason}", "fault")
-            return
-        # The name the exchange proved, not the one the beacon claimed.
-        token, name = result
-        raw = config_to_raw(self.controller.cfg)
-        raw["host"] = pc["address"]
-        raw["port"] = pc["port"]
-        raw["auth_token"] = token
-        raw["pc_name"] = name
-        # The Mac has just exchanged packets with the PC, so its ARP entry is fresh.
-        raw["mac_address"] = lookup_mac(pc["address"]) or ""
-        try:
-            cfg = self.settings_store.save(raw)
-        except SettingsError as exc:
-            self._say_pairing(f"Paired, but the settings could not be saved: {exc}", "fault")
-            return
-        self.code_boxes.clear()
-        self.chosen_pc = None
-        self._pcs_key = None
-        self._repairing = False
-        self._load(config_to_raw(cfg))
-        self.controller.update_config(cfg)
-        self._say("Paired with " + name + ". Connecting…", "signal")
-        self.logger.info("paired with %s at %s", name, pc["address"])
 
     @objc.python_method
     def _persist_mac(self, _mac):
@@ -2981,7 +2715,7 @@ class ControlWindow(AppKit.NSObject):
     @objc.python_method
     def refresh(self):
         controller = self.controller
-        self._show_directions()
+        self._follow_first_peer()
         self._show_same()
         access = accessibility_granted()
         listening = input_monitoring_granted()
@@ -3007,14 +2741,16 @@ class ControlWindow(AppKit.NSObject):
         sentence = self._ways_in_sentence()
         self.ways_note.set(sentence + "." if sentence else "No way in is switched on. Choose one below.")
         state = link_state.describe(controller)
-        self._refresh_paired(state)
-        self.sidebar.set_link(state, self._shown(link_state.peer_name(controller.cfg)))
-        self.sidebar.set_dots(pages.dots(access, listening, state.key))
+        rows = self.panel.rows()
+        self._place_machines(not rows)
+        refused = any(row.state.key == "token" for row in rows)
+        self.sidebar.set_link(replace(state, word=self._shown(state.word)), self._shown(self._machine_label()) if rows else "—")
+        self.sidebar.set_dots(pages.dots(access, listening, "token" if refused else state.key))
         self.link_led.set(state.led, state.blink)
         self.link_tag.set(state.tag)
-        if (state.word, state.tone) != (self.state_word.text, self.state_word.ink):
+        if (self._shown(state.word), state.tone) != (self.state_word.text, self.state_word.ink):
             motion.cross_fade(self.state_word.view)
-        self.state_word.set(state.word, ink=state.tone)
+        self.state_word.set(self._shown(state.word), ink=state.tone)
         self.state_detail.set(self._shown(state.detail))
 
         round_trip = controller.round_trip_ms
@@ -3030,6 +2766,10 @@ class ControlWindow(AppKit.NSObject):
         self.spark.setNeedsDisplay_(True)
         cfg = controller.cfg
         self._show_peer()
+        first = controller.peer_label
+        self.connection_note.set(self._shown(
+            f"The address and port of {first}, the first machine paired. Another machine is changed by pairing it again."
+            if first else "Nothing is paired yet. Pairing fills the address and port in."))
 
         self.pause_button.set_title("Resume crossing" if controller.crossing_paused else "Pause crossing")
         self.pause_button.set_style("primary" if controller.crossing_paused else "plain")
@@ -3049,11 +2789,12 @@ class ControlWindow(AppKit.NSObject):
         if controller.redirecting:
             self.toggle_button.set_title("Return input to Mac")
         elif controller.waking:
-            self.toggle_button.set_title("Waking Windows…")
+            self.toggle_button.set_title(self._shown(f"Waking {self._first_label()}…"))
         elif controller.can_wake:
-            self.toggle_button.set_title("Wake Windows")
+            self.toggle_button.set_title(self._shown(f"Wake {self._first_label()}"))
         else:
-            self.toggle_button.set_title("Send input to Windows")
+            self.toggle_button.set_title(
+                self._shown(f"Send input to {self._first_label()}") if controller.peer_label else "Send input")
         self.toggle_button.set_style("live" if controller.redirecting or controller.windows_locked else "primary")
         self.toggle_button.set_enabled(
             controller.input_ready
@@ -3067,7 +2808,7 @@ class ControlWindow(AppKit.NSObject):
             if mac
             else "Read from the network the first time this Mac connects; nothing to type."
         )
-        self._refresh_pcs()
+        self.panel.refresh()
 
 
 class StatusItemClick(AppKit.NSObject):
@@ -3157,16 +2898,22 @@ class TrayApp(rumps.App):
         self.control_window.windows_input = self.windows_input
         # Same on both machines, over either link: applied on the main thread, and announced
         # with the arrangement the moment either link comes up.
-        for link in (self.windows_input.server, controller):
-            link.announce = self._announce
-        self.windows_input.server.settings_callback = self._settings
+        controller.announce = self._announce
+        self.windows_input.settings_callback = self._settings
         controller.on_settings = self._settings
         self.windows_input.sync(controller.cfg)
-        self.discovery = pairing.Discovery(logger=logger)
-        self.control_window.discovery = self.discovery
-        self.discovery.start()
-        # A PC that changed address is followed by its beacon; bridge sets cfg.host, this saves it.
-        controller.discovery = self.discovery
+        # Pairing, both ways: this Mac shows a code or enters one. `peers` and `store` run on the
+        # service's socket threads under its lock, so they read and write through the settings
+        # store's own lock and never wait on the main thread.
+        identity = controller.identity()
+        self.pairing = pairing.PairingService(
+            identity["name"], bytes(identity["id"]), identity["platform"], lambda: controller.own_port,
+            controller.book.peers, settings_store.add_peer, on_paired=self._hosted_pairing, logger=logger,
+        )
+        self.control_window.panel.service = self.pairing
+        self.pairing.start()
+        # A machine that changed address is followed by its beacon; bridge sets cfg.host, this saves it.
+        controller.discovery = self.pairing
         controller.on_host_learned = lambda host: AppHelper.callAfter(self.control_window._persist_mac, None)
         self.update_checker = updates.Checker(
             VERSION, lambda: self.controller.cfg.check_updates,
@@ -3177,11 +2924,11 @@ class TrayApp(rumps.App):
         self.header_item = header = rumps.MenuItem(f"Beamer {VERSION}", callback=None)
         self.update_url = None
         self.status_item = rumps.MenuItem("Starting", callback=None)
-        self.toggle_item = rumps.MenuItem("Send input to Windows", callback=self.toggle_redirect)
+        self.toggle_item = rumps.MenuItem("Send input", callback=self.toggle_redirect)
         self.pause_item = rumps.MenuItem("Pause crossing", callback=self.toggle_pause)
         # One tick per direction, so either can be switched off while the other keeps working.
-        self.send_item = rumps.MenuItem("This Mac drives Windows", callback=self.toggle_send_to_windows)
-        self.receive_item = rumps.MenuItem("Windows drives this Mac", callback=self.toggle_windows_drives)
+        self.send_item = rumps.MenuItem("This Mac drives other machines", callback=self.toggle_send_to_windows)
+        self.receive_item = rumps.MenuItem("Other machines drive this Mac", callback=self.toggle_windows_drives)
         self._symbol = None
         super().__init__(
             "Beamer",
@@ -3235,20 +2982,17 @@ class TrayApp(rumps.App):
         AppKit.NSWorkspace.sharedWorkspace().openURL_(AppKit.NSURL.fileURLWithPath_(str(LOG_DIRECTORY)))
 
     def _announce(self):
-        """What this Mac tells the PC on every new link: where the machines are, even never
-        changed (an unstamped arrangement from the Mac fills a PC that holds only what a hello
-        told it), and its settings state. On the link's own thread."""
-        crossing_cfg = self.controller.cfg.crossing
-        return [protocol.arrangement_msg(crossing_cfg["edge"], crossing_cfg.get("arrangement_set_at", 0)),
-                protocol.settings_msg(self.control_window.same_state())]
+        """What this Mac tells a machine on every new link beyond what the link itself announces
+        (where the two sit, who else this Mac has): its settings state. On the link's own thread."""
+        return [protocol.settings_msg(self.control_window.same_state())]
 
-    def _settings(self, data):
-        AppHelper.callAfter(self.control_window.apply_same, data)
+    def _settings(self, data, peer=None):
+        AppHelper.callAfter(self.control_window.apply_same, data, peer)
 
-    def _arrangement(self, mac_edge, set_at):
+    def _arrangement(self, mac_edge, set_at, by=None):
         """An arrangement from the PC, over either link, applied on the main
         thread -- it writes the settings file and redraws the window."""
-        AppHelper.callAfter(self.control_window.apply_arrangement, mac_edge, set_at)
+        AppHelper.callAfter(self.control_window.apply_arrangement, mac_edge, set_at, by)
 
     def show_on_startup(self, _timer):
         self.startup_timer.stop()
@@ -3280,14 +3024,32 @@ class TrayApp(rumps.App):
         self.set_menu_bar_symbol(
             "windows" if controller.redirecting or controller.receiving else "held" if held else "local"
         )
+        hide = controller.cfg.hide_addresses
         if controller.redirecting:
             self.toggle_item.title = "Return input to Mac"
         else:
-            self.toggle_item.title = "Send input to Windows"
+            self.toggle_item.title = pages.redact(
+                f"Send input to {controller.peer_label}" if controller.peer_label else "Send input", hide)
         self.pause_item.title = "Resume crossing" if controller.crossing_paused else "Pause crossing"
-        self.send_item.state = int(controller.cfg.send_to_windows)
-        self.receive_item.state = int(controller.cfg.allow_windows_to_drive)
-        self.status_item.title = link_state.describe(controller).word
+        self._direction_items()
+        self.status_item.title = pages.redact(link_state.describe(controller).word, hide)
+
+    def _direction_items(self):
+        """The two direction ticks, named for the machine when there is one, for every machine
+        when there are several; mixed when the machines differ."""
+        peers = self.controller.book.peers()
+        hide = self.controller.cfg.hide_addresses
+        labels = [pages.redact(label, hide) for label in peerlist.labels(peers).values()]
+        if len(labels) == 1:
+            send, receive = f"This Mac drives {labels[0]}", f"{labels[0]} drives this Mac"
+        elif labels:
+            send, receive = "This Mac drives every machine", "Every machine drives this Mac"
+        else:
+            send, receive = "This Mac drives other machines", "Other machines drive this Mac"
+        self.send_item.title, self.receive_item.title = send, receive
+        for item, name in ((self.send_item, "send"), (self.receive_item, "allow_drive")):
+            on = [peer.get(name) is True for peer in peers]
+            item.state = 1 if on and all(on) else -1 if any(on) else 0
 
     def set_menu_bar_symbol(self, state):
         """One template glyph per state instead of words. rumps only takes an icon as a file
@@ -3316,30 +3078,50 @@ class TrayApp(rumps.App):
         self.control_window.show()
 
     def toggle_send_to_windows(self, _sender):
-        self._set_direction(send_to_windows=not self.controller.cfg.send_to_windows)
+        """The menu's tick covers every machine: all on turns them all off, anything else all on."""
+        peers = self.controller.book.peers()
+        self._switch([peer["token"] for peer in peers], send=not all(peer.get("send") is True for peer in peers))
 
     def toggle_windows_drives(self, _sender):
-        self._set_direction(allow_windows_to_drive=not self.controller.cfg.allow_windows_to_drive)
+        peers = self.controller.book.peers()
+        self._switch([peer["token"] for peer in peers], allow_drive=not all(peer.get("allow_drive") is True for peer in peers))
 
-    def _set_direction(self, **change):
+    def _set_direction(self, token, **change):
+        """One machine's switch from its row on Overview: `send=` or `allow_drive=`."""
+        self._switch([token], **change)
+
+    def _switch(self, tokens, **change):
+        controller = self.controller
+        entries = []
         try:
-            cfg = self.settings_store.save(config_to_raw(replace(self.controller.cfg, **change)))
+            for token in tokens:
+                entry = self.settings_store.set_peer(token, **change)
+                if entry is not None:
+                    entries.append(entry)
         except SettingsError as exc:
             self.logger.warning("direction not saved: %s", exc)
             self.notify_user("Beamer", f"Could not save the change: {exc}")
+            # Some machines may have been saved before this one failed, and a switch the person
+            # flipped shows a state that is not saved: read it all again.
+            self.control_window.panel.invalidate()
+            self.control_window.peers_changed()
             return
-        if not cfg.send_to_windows and self.controller.redirecting:
-            # Input comes home by this switch, and shows where the pointer is as any switch does;
-            # update_config would bring it home too, silently, as it does for a new address.
-            self.controller.set_redirecting(False)
-        self.controller.update_config(cfg)
-        self.windows_input.sync(cfg)
-        self.logger.info("directions: this Mac drives Windows %s, Windows drives this Mac %s",
-                         "on" if cfg.send_to_windows else "off", "on" if cfg.allow_windows_to_drive else "off")
+        if change.get("send") is False and any(entry.get("id") == controller.owner.on for entry in entries):
+            # Input comes home by this switch, and shows where the pointer is as any switch does.
+            controller.set_redirecting(False)
+        self.control_window.peers_changed()
+        self.logger.info("directions: %s", ", ".join(
+            f"{entry.get('name')} send {'on' if entry['send'] else 'off'} drive {'on' if entry['allow_drive'] else 'off'}"
+            for entry in entries))
         self.refresh_status(None)
 
+    def _hosted_pairing(self, entry):
+        """A machine paired with the code this Mac showed. On the pairing thread, after the entry
+        was stored: the rest happens on the main thread."""
+        AppHelper.callAfter(self.control_window.panel.hosted_pairing, entry)
+
     def reload_config(self, _sender):
-        """Re-reads config.json, for the times it was edited outside the window."""
+        """Re-reads settings.json, for the times it was edited outside the window."""
         try:
             cfg = self.settings_store.load()
         except SettingsError as exc:
@@ -3491,7 +3273,7 @@ class TrayApp(rumps.App):
     def quit_app(self, _sender=None):
         self.status_timer.stop()
         self.update_checker.stop()
-        self.discovery.stop()
+        self.pairing.stop()
         self.windows_input.stop()
         self.controller.stop()
         rumps.quit_application()
@@ -3502,7 +3284,7 @@ def parse_args(argv=None):
     parser.add_argument(
         "--config",
         default=None,
-        help="config path; defaults to ~/Library/Application Support/Beamer/config.json",
+        help="settings path; defaults to ~/Library/Application Support/Beamer/settings.json",
     )
     parser.add_argument("--hidden", action="store_true", help="start in the menu bar without opening the window")
     return parser.parse_args(argv)
@@ -3530,7 +3312,8 @@ def main(argv=None):
         else:
             logger.info("first run: no settings yet, starting from the defaults")
         cfg = editable_default_config()
-    controller = WakingController(cfg, logger=logger)
+    book, identity = bridge.links_from_store(settings_store, VERSION)
+    controller = WakingController(cfg, logger=logger, book=book, identity=identity, hardware=hardware_mac.hardware_address_towards)
     app = TrayApp(controller, settings_store, logger, hidden=args.hidden)
     controller.start()
     try:

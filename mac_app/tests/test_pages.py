@@ -177,8 +177,8 @@ class CrossingPageRulesTests(unittest.TestCase):
     def test_the_crossing_line_gives_the_first_reason_nothing_can_cross(self):
         line = pages.crossing_state_sentence
         self.assertTrue(line(False, False, False, True, False, None).startswith("Not paired yet"))
-        self.assertTrue(line(True, False, False, True, False, None).startswith("This Mac drives Windows is off"))
-        self.assertTrue(line(True, True, False, True, False, None).startswith("Not connected to the PC"))
+        self.assertTrue(line(True, False, False, True, False, None).startswith("No machine is driven"))
+        self.assertTrue(line(True, True, False, True, False, None).startswith("Not connected to any machine"))
         self.assertEqual(line(True, True, True, False, False, None), "Only the shortcut is switched on; there is nothing to pause.")
         self.assertTrue(line(True, True, True, True, True, None).startswith("Paused."))
         self.assertTrue(line(True, True, True, True, False, "Keynote").startswith("Off while Keynote is full screen"))

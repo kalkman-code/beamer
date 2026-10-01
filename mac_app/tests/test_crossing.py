@@ -181,19 +181,6 @@ class BreakthroughTests(unittest.TestCase):
                 self.assertEqual(step.edge, windows_edge)
                 self.assertAlmostEqual(step.offset, offset, places=3)
 
-    def test_home_edge(self):
-        machine = engine(edge="right")
-        self.assertEqual(machine.home_edge(), "left")
-        self.assertEqual(machine.home_edge("top"), "bottom")
-
-    def test_shortcut_home_edge_follows_the_method_that_is_on(self):
-        # `edge` stays "right" in config with the edge method off; it must not arm Windows' left.
-        self.assertEqual(engine(methods=("shortcut", "notch"), edge="right").home_edge(), "bottom")
-        self.assertEqual(engine(methods=("corner",), corner="top_left").home_edge(), "right")
-        # With only the shortcut on, the PC's edge facing this Mac still leads home.
-        self.assertEqual(engine(methods=("shortcut",), edge="right").home_edge(), "left")
-        self.assertEqual(engine(methods=("shortcut",), edge="top").home_edge(), "bottom")
-
     def test_arrival_point_sits_just_inside_the_edge(self):
         self.assertEqual(CrossingEngine.arrival_point("left", 0.5, BOUNDS), (2.0, 558.0))
         self.assertEqual(CrossingEngine.arrival_point("right", 0.0, BOUNDS), (1725.0, 0.0))
@@ -328,8 +315,7 @@ class PartOfTheEdgeTests(unittest.TestCase):
                 break
         self.assertTrue(result.crossed)
 
-    def test_it_is_the_way_home_as_the_edge_would_be(self):
-        self.assertEqual(engine(methods=("part",)).home_edge(), "left")
+    def test_part_of_the_edge_arms_the_engine(self):
         self.assertTrue(engine(methods=("part",)).armed)
 
 

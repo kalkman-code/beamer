@@ -17,5 +17,5 @@ mac_app/build/
 mac_app/dist/
 
 
-# Rendered on demand from docs/*.html; reaches the other machine via Syncthing
+# Rendered documents, never committed
 docs/pdf/

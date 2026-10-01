@@ -2,9 +2,9 @@
 callbacks to the call that actually reaches EffectOverlay or EdgeGlow, at the one hop that has no
 test today: kvm_bridge_win.py's WindowsApplication._on_pressure / _on_arrival.
 
-sender.py's MacSender._notify_pressure(edge, pressure, crossed, part) and its arrival_callback --
+sender.py's LinkSender._notify_pressure(edge, pressure, crossed, part) and its arrival_callback --
 an edge push, a Part-of-the-edge push, a corner push, a crossing, a switch home -- are already
-proven by test_sender.py's PushTests, CornerCrossingTests and ArrivalTests. receiver.py's
+proven by test_links.py's EdgeTests, CornerTests, TakingTests and OnwardTests. receiver.py's
 pressure_callback and arrival_callback (the return-edge push and its arrival) are proven by
 test_receiver.py's tests around line 716. Neither is repeated here: these tests start from the
 (edge, pressure, crossed, part) / (method, edge, x, y) values those callbacks already produce and
@@ -92,7 +92,7 @@ class PressureRoutingTest(unittest.TestCase):
         owner.glow.set_pressure.assert_called_once_with("right", 0.5, False, "end")
 
     def test_a_corner_push_reaches_the_overlay_with_its_corner(self):
-        """sender.py names the corner in `part` (test_sender.py's CornerTests), and the overlay
+        """sender.py names the corner in `part` (test_links.py's CornerTests), and the overlay
         plays the corner form from it."""
         owner = _owner(glow_style="rupture")
         overlay = mock.Mock()
@@ -132,10 +132,10 @@ class PressureRoutingTest(unittest.TestCase):
 @unittest.skipIf(kvm_bridge_win is None, "needs PySide6")
 class ArrivalRoutingTest(unittest.TestCase):
     """`method` is decided before _on_arrival ever runs, by the inline lambdas that wire
-    receiver.py's and sender.py's arrival_callback in WindowsApplication.__init__
+    the responder's and sender.py's arrival_callback in WindowsApplication.__init__
     (kvm_bridge_win.py: "notch" if edge == "bottom" else "edge", or "switch" if edge is None, for
-    the receiver around line 240; "switch" if edge is None else "edge" for the sender around line
-    253 -- the sender has no notch of its own, since only the Mac has one). Neither lambda is a
+    the responder around line 286; "switch" if edge is None else "edge" for the sender around line
+    312 -- the sender has no notch of its own, since only the Mac has one). Neither lambda is a
     separately callable unit, so it is not unit-tested on its own; these tests start from the
     method it would have produced and check where _on_arrival sends it."""
 

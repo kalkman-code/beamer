@@ -137,8 +137,18 @@ _PHASE_RESET_MASK = NS_EVENT_PHASE_ENDED | NS_EVENT_PHASE_CANCELLED
 MAGNIFY_STEP = 0.05
 
 
+RECEIVERS = ("windows", "mac")
+
+
 class GestureTranslator:
-    def __init__(self, logger=None):
+    """`receiver` is the platform of the machine being driven: a zoom or a page swipe is the
+    chord that machine answers to. The wire's key names are the receiver's own words, so a Mac's
+    "cmd" is Command and Windows' "ctrl" is Control."""
+
+    def __init__(self, logger=None, receiver="windows"):
+        if receiver not in RECEIVERS:
+            raise ValueError(f"unknown receiver platform: {receiver!r}")
+        self.receiver = receiver
         self.logger = logger or logging.getLogger("Beamer")
         self._magnify_accum = 0.0
         self._warned_types = set()
@@ -182,8 +192,9 @@ class GestureTranslator:
             self._magnify_accum = 0.0
         return messages
 
-    @staticmethod
-    def _zoom_step_messages(direction):
+    def _zoom_step_messages(self, direction):
+        if self.receiver == "mac":
+            return _chord("cmd", "=" if direction > 0 else "-")
         return [
             {"type": protocol.MSG_KEYDOWN, "data": {"key": "ctrl"}},
             protocol.scroll_msg(dy=direction, dx=0, mode="line"),
@@ -192,15 +203,21 @@ class GestureTranslator:
 
     def _translate_swipe(self, ns_event):
         delta_x = float(ns_event.deltaX)
-        if delta_x > 0:
-            arrow = "left"  # back
-        elif delta_x < 0:
-            arrow = "right"  # forward
-        else:
+        if delta_x == 0:
             return []
-        return [
-            {"type": protocol.MSG_KEYDOWN, "data": {"key": "alt"}},
-            {"type": protocol.MSG_KEYDOWN, "data": {"key": arrow}},
-            {"type": protocol.MSG_KEYUP, "data": {"key": arrow}},
-            {"type": protocol.MSG_KEYUP, "data": {"key": "alt"}},
-        ]
+        back = delta_x > 0
+        if self.receiver == "mac":
+            return _chord("cmd", "[" if back else "]")
+        return _chord("alt", "left" if back else "right")
+
+
+def _chord(modifier, key):
+    # A character key names where it sits on a US keyboard, so a receiving Mac whose layout has
+    # no such key still presses a key under the modifier rather than typing the character.
+    data = {"key": key, "us": key} if len(key) == 1 else {"key": key}
+    return [
+        {"type": protocol.MSG_KEYDOWN, "data": {"key": modifier}},
+        {"type": protocol.MSG_KEYDOWN, "data": dict(data)},
+        {"type": protocol.MSG_KEYUP, "data": dict(data)},
+        {"type": protocol.MSG_KEYUP, "data": {"key": modifier}},
+    ]

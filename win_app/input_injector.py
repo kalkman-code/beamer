@@ -399,6 +399,26 @@ def inject_key(name: str, down: bool, us: Optional[str] = None) -> None:
     _send_input(*(_keybd_input(vk, scan, flags) for vk, scan, flags in plan))
 
 
+def plan_text_inputs(text: str) -> List[Tuple[int, int, int]]:
+    """(vk, scan, flags) for typing `text` as characters: a Unicode down and up for each UTF-16 code
+    unit, so a character outside the Basic Multilingual Plane goes as its surrogate pair."""
+    plan = []
+    data = text.encode("utf-16-le")
+    for index in range(0, len(data), 2):
+        unit = int.from_bytes(data[index:index + 2], "little")
+        plan.append((0, unit, KEYEVENTF_UNICODE))
+        plan.append((0, unit, KEYEVENTF_UNICODE | KEYEVENTF_KEYUP))
+    return plan
+
+
+@_locked
+def inject_text(text: str) -> None:
+    """Types `text` as it stands (WIRE.md section 10): the layout and any modifier held play no part."""
+    plan = plan_text_inputs(text)
+    if plan:
+        _send_input(*(_keybd_input(vk, scan, flags) for vk, scan, flags in plan))
+
+
 def _mouse_input(dx: int, dy: int, data: int, flags: int) -> INPUT:
     mouse_input = MOUSEINPUT(dx=dx, dy=dy, mouseData=data, dwFlags=flags, time=0, dwExtraInfo=INJECTED_MARK)
     return INPUT(type=INPUT_MOUSE, union=_INPUTUNION(mi=mouse_input))

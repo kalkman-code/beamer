@@ -5,7 +5,6 @@ their place on a US keyboard (`us`), from the scan code here and the key code on
 character the receiving layout cannot type lands on that place when a shortcut needs it or its
 letter is from another script than the one typed there."""
 
-import time
 import unittest
 import os
 import sys
@@ -14,11 +13,8 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(
 
 import capture_win
 from core import protocol
-from core import receiver
-import sender
-from fakes import FakeClipboard, FakeDesktop
 from input_injector import KEYEVENTF_KEYUP, KEYEVENTF_UNICODE, plan_key_inputs
-from test_key_up_after_switch_back import MONITORS, make_config
+from links_rig import B, Rig
 
 VK_C, VK_2 = 0x43, 0x32
 SCANS = {VK_C: 0x2E, VK_2: 0x03}
@@ -77,19 +73,6 @@ class PlaceTests(unittest.TestCase):
         # A phone's keyboard, or a Mac on an older Beamer, sends no place.
         self.assertEqual(plan("с", ENGLISH, ENGLISH_PLACES, {"cmd"}), [(0, ord("с"), KEYEVENTF_UNICODE)])
 
-    def test_the_receiver_hands_the_place_on(self):
-        class Injector:
-            def __init__(self):
-                self.calls = []
-
-            def inject_key(self, name, down, us=None):
-                self.calls.append((name, down, us))
-
-        injector = Injector()
-        receiver.handle_message({"type": protocol.MSG_KEYDOWN, "data": {"key": "с", "us": "c"}}, injector=injector)
-        receiver.handle_message({"type": protocol.MSG_KEYUP, "data": {"key": "с"}}, injector=injector)
-        self.assertEqual(injector.calls, [("с", True, "c"), ("с", False, None)])
-
 
 class CaptureTests(unittest.TestCase):
     def test_scan_codes_name_the_us_place(self):
@@ -104,23 +87,13 @@ class CaptureTests(unittest.TestCase):
 
 class SenderTests(unittest.TestCase):
     def setUp(self):
-        self.sender = sender.MacSender(desktop=FakeDesktop(MONITORS, cursor=(0, 500)), clipboard=FakeClipboard(), is_local=lambda host: False)
-        self.sender.update_config(make_config())
-        self.sender._sock = object()
-        self.sender._connected_at = time.monotonic()
-        self.sender._last_ack_at = time.monotonic()
-        self.sender.set_redirecting(True, arrival_edge="right", offset=0.5)
-
-    def tearDown(self):
-        self.sender._sock = None
+        self.rig = Rig(cursor=(0, 500))
+        self.sender = self.rig.sender
+        self.sender.set_redirecting(True)
+        self.rig.accept_take()
 
     def keys(self):
-        sent = []
-        while not self.sender._outbound.empty():
-            message = self.sender._outbound.get_nowait()
-            if message.get("type") in (protocol.MSG_KEYDOWN, protocol.MSG_KEYUP):
-                sent.append((message["type"], message["data"]))
-        return sent
+        return [(m["type"], m["data"]) for m in self.rig.sent(B) if m["type"] in (protocol.MSG_KEYDOWN, protocol.MSG_KEYUP)]
 
     def test_a_key_carries_its_place_both_ways(self):
         self.sender.on_key("с", True, VK_C, "c")

@@ -1,5 +1,4 @@
-"""LAN discovery and pairing, shared by mac_app and win_app (two identical copies; the Mac
-test suite checks they match byte for byte).
+"""LAN discovery and pairing, shared by both apps.
 
 The host (the PC) broadcasts a small UDP beacon -- hostname, Beamer TCP port, and a random
 pairing id while a code is on screen -- and the requester (the Mac) lists what it hears. Pairing
@@ -41,18 +40,31 @@ What this protects against, and what it does not:
   code it depends on is single-use and lives a minute, so there is one computation to time per
   code on the PC and one per attempt on the Mac, and the PC's answer leaves a fixed time after
   the request whatever that computation took.
+
+Pairing version 3 (1.5.0, WIRE.md section 6) sits beside version 2 until the apps' windows move to
+it (milestone 2, steps 6a and 6b), when PairingHost's and PairingClient's version 2 path,
+Announcer and Discovery's own pair() go. In version 3 each side's identity is its 16-byte machine
+id, platform and port are bound in beside the name, a machine already paired is refused as
+`known`, the host writes the peer entry before pair_done so Td proves it saved the token, and a
+code shown as a QR carries a second secret. PairingService is version 3's socket side: every
+desktop announces and discovers on one UDP socket, and hosts over UDP and TCP with one
+PairingHost, so a code answers one pair_start whichever way it came.
 """
 
 from __future__ import annotations
 
 import base64
+import contextlib
 import hashlib
 import hmac
+import ipaddress
 import json
 import logging
+import os
 import queue
 import secrets
 import socket
+import struct
 import threading
 import time
 
@@ -112,7 +124,33 @@ MSG_FIND = "find"
 ERROR_NOT_PAIRING = "not_pairing"
 ERROR_REFUSED = "refused"
 ERROR_VERSION = "version"
-_ERRORS = (ERROR_NOT_PAIRING, ERROR_REFUSED, ERROR_VERSION)
+# Version 3's: the other side's id is already a peer's or this machine's own, and the host
+# reached MAX_PEERS while its code was up.
+ERROR_KNOWN = "known"
+ERROR_FULL = "full"
+_ERRORS = (ERROR_NOT_PAIRING, ERROR_REFUSED, ERROR_VERSION, ERROR_KNOWN, ERROR_FULL)
+# What read_qr raises for any text that is not exactly the pairing QR's.
+ERROR_BAD_QR = "bad_qr"
+
+PAIRING_V3 = 3
+CHANNEL_V3 = b"beamer-pair-v3"
+TOKEN_INFO_V3 = b"beamer-pair-token-v3"
+ID_BYTES = 16
+QR_SECRET_BYTES = 16
+MAX_PEERS = 32
+MAX_PLATFORM_CHARS = 16
+_PLATFORM_CHARS = frozenset("abcdefghijklmnopqrstuvwxyz0123456789_")
+# A peer entry that never linked and was made this recently, under the name and platform the new
+# pairing proves, is taken to be that pairing's lost pair_done and replaced rather than refused.
+REPLACE_UNLINKED_SECONDS = 600
+# Pairing over TCP, for a host no broadcast reaches and for the phones. The framing's limit is
+# the datagram's, so a message means the same on either transport.
+TCP_EXCHANGE_SECONDS = 10.0
+TCP_CONNECT_SECONDS = 3.0
+TCP_MAX_CONNECTIONS = 4
+QR_PREFIX = "beamer://pair?"
+_QR_KEYS = ("host", "port", "code", "k")
+_PRIVATE_NETWORKS = tuple(ipaddress.ip_network(net) for net in ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"))
 
 # What the exchange binds besides the code. The two roles are fixed by who shows the code; the
 # identities are parameters, empty until machines have ids of their own (wire v6), so a later
@@ -131,6 +169,16 @@ _SHA512_BLOCK_BYTES = 128
 
 class PairingError(Exception):
     pass
+
+
+class AlreadyPaired(PairingError):
+    """Version 3's `known`: the other machine's id is one of this machine's peers', or its own.
+    `entry` is that peer's entry, for the window to name it and when it was paired; None when the
+    id was this machine's own."""
+
+    def __init__(self, entry):
+        super().__init__(ERROR_KNOWN)
+        self.entry = entry
 
 
 def new_code() -> str:
@@ -205,17 +253,23 @@ def _session_id(pair_id: str, nonce: bytes) -> bytes:
     return _lv_cat(pair_id.encode("utf-8"), nonce)
 
 
-def _party(role: bytes, identity: bytes, name: str) -> bytes:
+def _party(role: bytes, identity: bytes, name: str, platform: str = None, port: int = None) -> bytes:
     """One side's associated data: CPace's ADa or ADb. The role comes first, so the two sides'
-    can never be equal, which is what stops a tag being reflected back at its sender."""
-    return _lv_cat(role, identity, name.encode("utf-8"))
+    can never be equal, which is what stops a tag being reflected back at its sender. Version 3
+    adds the platform and the link port, so the exchange proves everything pairing saves about
+    the other machine but its address."""
+    if platform is None:
+        return _lv_cat(role, identity, name.encode("utf-8"))
+    return _lv_cat(role, identity, name.encode("utf-8"), platform.encode("ascii"), port.to_bytes(2, "big"))
 
 
-def _share(code: str, sid: bytes, scalar: bytes) -> bytes:
-    return _x25519(scalar, _generator(code.encode("utf-8"), CHANNEL, sid))
+def _share(code: str, sid: bytes, scalar: bytes, channel: bytes = CHANNEL, secret: bytes = b"") -> bytes:
+    # A code read from a QR is followed by the QR's secret, 22 bytes of password in all; the
+    # generator's padding follows its length.
+    return _x25519(scalar, _generator(code.encode("utf-8") + secret, channel, sid))
 
 
-def _keys(sid: bytes, shared: bytes, ya: bytes, ada: bytes, yb: bytes, adb: bytes) -> tuple:
+def _keys(sid: bytes, shared: bytes, ya: bytes, ada: bytes, yb: bytes, adb: bytes, token_info: bytes = TOKEN_INFO) -> tuple:
     """(token, Ta, Tb, Td) for one exchange, from the secret the two shares agree. Ta and Tb are
     the draft's tags over each side's own message; Td is the host's receipt."""
     isk = hashlib.sha512(_lv_cat(_DSI + b"_ISK", sid, shared) + _lv_cat(ya, ada) + _lv_cat(yb, adb)).digest()
@@ -224,7 +278,99 @@ def _keys(sid: bytes, shared: bytes, ya: bytes, ada: bytes, yb: bytes, adb: byte
     def tag(message: bytes) -> bytes:
         return hmac.new(mac_key, message, hashlib.sha512).digest()
 
-    return _b64(protocol.hkdf_sha256(isk, sid, TOKEN_INFO)), tag(_lv_cat(ya, ada)), tag(_lv_cat(yb, adb)), tag(_lv_cat(DONE_LABEL))
+    return _b64(protocol.hkdf_sha256(isk, sid, token_info)), tag(_lv_cat(ya, ada)), tag(_lv_cat(yb, adb)), tag(_lv_cat(DONE_LABEL))
+
+
+def _is_int(value) -> bool:
+    # JSON's 1.0 and true both compare equal to 1 in Python; an integer field takes neither.
+    return type(value) is int
+
+
+def _platform_ok(platform) -> bool:
+    return isinstance(platform, str) and 0 < len(platform) <= MAX_PLATFORM_CHARS and set(platform) <= _PLATFORM_CHARS
+
+
+def _port_ok(port) -> bool:
+    return _is_int(port) and 0 <= port <= 65535
+
+
+def _name_ok(name) -> bool:
+    if not isinstance(name, str) or not 0 < len(name) <= MAX_NAME_CHARS:
+        return False
+    try:
+        name.encode("utf-8")
+    except UnicodeError:
+        return False
+    return True
+
+
+def _machine_id_ok(identity: bytes) -> bool:
+    return len(identity) == ID_BYTES and any(identity)
+
+
+def _check_own(identity: bytes, platform: str, port: int) -> None:
+    if not _machine_id_ok(identity) or not _platform_ok(platform) or not _port_ok(port):
+        raise ValueError("a version 3 side needs its 16-byte machine id, its platform and its link port")
+
+
+def _key_id(token):
+    """The link's key id (WIRE.md section 2), or None for a typed token, which has none."""
+    return protocol.key_id(token) if protocol.is_paired_token(token) else None
+
+
+def peer_entry(identity: bytes, name: str, platform: str, port: int, token: str, host: str, paired_at: int) -> dict:
+    """The peer entry pairing saves (WIRE.md sections 1 and 6). A machine that gives port 0 is a
+    phone: it is never dialled and this machine's input never goes to it."""
+    phone = port == 0
+    return {
+        "id": _b64(identity), "name": name, "platform": platform, "token": token,
+        "host": "" if phone else host, "port": port, "hw": "", "send": not phone, "allow_drive": True,
+        "side": "", "side_set_at": 0, "side_by": "", "paired_with": [], "paired_at": int(paired_at),
+        "linked": False, "from_1_4": False,
+    }
+
+
+def _find_known(peers: list, own: bytes, theirs: bytes, name: str, platform: str, now: float) -> tuple:
+    """(refused, replaced) for a pairing that proved `theirs`, `name` and `platform`. `refused` is
+    True when the id is this machine's own and otherwise the entry already holding it, None when
+    there is none; `replaced` is the entry this pairing replaces, the one left by a lost
+    pair_done."""
+    if theirs == own:
+        return True, None
+    wanted = _b64(theirs)
+    for known in peers:
+        if known.get("id") != wanted:
+            continue
+        paired_at = known.get("paired_at")
+        lost_done = (
+            known.get("linked") is False
+            and _is_int(paired_at) and paired_at > 0 and 0 <= now - paired_at < REPLACE_UNLINKED_SECONDS
+            and known.get("name") == name and known.get("platform") == platform
+        )
+        return (None, known) if lost_done else (known, None)
+    return None, None
+
+
+def _migrated_for(peers: list, address: str):
+    """The entry migrated from 1.4.x (`id: ""`) that a fresh pairing with the machine at `address`
+    replaces, or None: left beside the new entry, its first link would be answered wrong_id.
+    ⚠ Matched by its saved host alone, never by name: a name is whatever the pairing machine
+    chose, so anyone who saw the code could otherwise evict a 1.4.x pair that still links."""
+    if not address:
+        return None
+    for known in peers:
+        if known.get("id") == "" and known.get("from_1_4") is True and known.get("host") == address:
+            return known
+    return None
+
+
+def _clashes(peers: list, token: str, replaced) -> bool:
+    """Whether the new token's key id is already an entry's, bar the entry it replaces. With a
+    fresh 256-bit token that never happens; the check keeps key ids unique whatever the entries
+    hold."""
+    new = _key_id(token)
+    skip = replaced.get("id") if replaced else None
+    return any(_key_id(known.get("token")) == new for known in peers if skip is None or known.get("id") != skip)
 
 
 def _failure(kind: str, pair_id: str, error: str) -> dict:
@@ -264,29 +410,109 @@ def beacon_msg(name: str, port: int, pair_id: str = None) -> dict:
     return message
 
 
-class PairingHost:
-    """The PC's half: holds at most one live code and answers the exchange. Pure -- the
-    Announcer owns the socket, and the clock and the randomness are injected for the tests and
-    the vectors."""
+def qr_text(host: str, port: int, code: str, secret: bytes) -> str:
+    """What the pairing sheet's QR code holds (WIRE.md section 6). The sheet never shows `k` as
+    text."""
+    return f"{QR_PREFIX}host={host}&port={port}&code={code}&k={_b64(secret)}"
 
-    def __init__(self, clock=time.monotonic, name: str = "", identity: bytes = b"", entropy=secrets.token_bytes):
+
+def _decimal(text: str) -> bool:
+    # str.isdigit() also takes full-width and superscript digits; the QR takes ASCII only, and
+    # no leading zero, so a number has one spelling.
+    return text.isascii() and text.isdigit() and (text == "0" or not text.startswith("0"))
+
+
+def read_qr(text) -> dict:
+    """The host, port, code and secret a pairing QR carries, or PairingError(ERROR_BAD_QR) for
+    any other text: the four keys in order, lower case, each once, and nothing else."""
+    if not isinstance(text, str) or not text.startswith(QR_PREFIX):
+        raise PairingError(ERROR_BAD_QR)
+    fields = [field.split("=", 1) for field in text[len(QR_PREFIX):].split("&")]
+    if [field[0] for field in fields] != list(_QR_KEYS) or any(len(field) != 2 for field in fields):
+        raise PairingError(ERROR_BAD_QR)
+    host, port, code, k = (field[1] for field in fields)
+    octets = host.split(".")
+    if len(octets) != 4 or not all(_decimal(octet) and int(octet) <= 255 for octet in octets):
+        raise PairingError(ERROR_BAD_QR)
+    if not _decimal(port) or not 0 < int(port) <= 65535:
+        raise PairingError(ERROR_BAD_QR)
+    if len(code) != CODE_DIGITS or not (code.isascii() and code.isdigit()):
+        raise PairingError(ERROR_BAD_QR)
+    try:
+        secret = _unb64(k)
+    except PairingError as exc:
+        raise PairingError(ERROR_BAD_QR) from exc
+    if len(secret) != QR_SECRET_BYTES:
+        raise PairingError(ERROR_BAD_QR)
+    return {"host": host, "port": int(port), "code": code, "secret": secret}
+
+
+def _private(address: str) -> bool:
+    try:
+        return any(ipaddress.ip_address(address) in network for network in _PRIVATE_NETWORKS)
+    except ValueError:
+        return False
+
+
+def pairing_address():
+    """The address the pairing sheet shows and the QR carries: this machine's address in a
+    private range, preferring the default route's interface, else the default route's own
+    address. None when the machine has no IPv4 address at all."""
+    try:
+        # A TEST-NET address: nothing is sent, and only the default route reaches it.
+        default = local_address_towards("192.0.2.1")
+    except OSError:
+        default = None
+    if default and _private(default):
+        return default
+    return next((address for address in _local_ipv4_addresses() if _private(address)), default)
+
+
+class PairingHost:
+    """The host's half: holds at most one live code and answers the exchange. Pure -- the
+    Announcer or PairingService owns the socket, and the clock and the randomness are injected
+    for the tests and the vectors.
+
+    Version 3 also takes this machine's platform and link port, `peers` (a callable giving the
+    peer entries as they stand) and `store(entry, replaced)`, which writes the new entry, and
+    drops `replaced` when it is not None, before pair_done is sent, raising if the write fails.
+    `wall` gives unix seconds for `paired_at`."""
+
+    def __init__(self, clock=time.monotonic, name: str = "", identity: bytes = b"", entropy=secrets.token_bytes,
+                 *, version: int = PAIRING_VERSION, platform: str = "", port: int = 0, peers=None, store=None, wall=time.time):
+        if version == PAIRING_V3:
+            _check_own(identity, platform, port)
         self.clock = clock
         self.name = name[:MAX_NAME_CHARS]
         self.identity = identity
         self._entropy = entropy
+        self.version = version
+        self.platform = platform
+        self.port = port
+        self._peers = peers or list
+        self.store = store
+        self.wall = wall
         self.code = None
         self.pair_id = None
         self.expires_at = 0.0
+        # Version 3: the 16 bytes a QR carries beside the code, drawn with it and dropped with it.
+        self.qr_secret = None
         # The one pair_start this code answered, as a dict; None until it arrives.
         self._bound = None
         self._last = None
         # True once a pair_answer has just been worked out from the code, until the caller that
         # sends it takes note. A retransmit's answer comes from memory and leaves it False.
         self.fresh_answer = False
+        # The pairing just made: (token, requester_name) in version 2, the stored entry in 3.
         self.paired = None
-        # How the last code ended -- "paired", "refused", "version" or "expired" -- for the
-        # window to say so; None while a code is live or after a deliberate cancel.
+        # How the last code ended -- "paired", "refused", "version" or "expired", and in version
+        # 3 "known" (this machine has the requester already), "known_there" (the requester has
+        # this one), "full" and "not_saved" -- for the window to say so; None while a code is
+        # live or after a deliberate cancel.
         self.outcome = None
+        # The entry that made the last code end "known", for the window to name; None when the
+        # requester claimed this machine's own id.
+        self.known = None
 
     @property
     def active(self) -> bool:
@@ -302,26 +528,49 @@ class PairingHost:
     def seconds_left(self) -> int:
         return max(0, int(self.expires_at - self.clock())) if self.active else 0
 
+    @property
+    def v3(self) -> bool:
+        return self.version == PAIRING_V3
+
     def begin(self) -> str:
+        if self.v3 and len(self._peers()) >= MAX_PEERS:
+            # A host with 32 peers shows no code: the pairing could not be kept.
+            raise PairingError(ERROR_FULL)
         self.code = new_code()
         self.pair_id = self._entropy(16).hex()
+        self.qr_secret = self._entropy(QR_SECRET_BYTES) if self.v3 else None
         self.expires_at = self.clock() + CODE_LIFETIME_SECONDS
         self._bound = None
         self._last = None
         self.fresh_answer = False
         self.outcome = None
+        self.known = None
         return self.code
 
     def cancel(self) -> None:
         self.code = None
         self.pair_id = None
+        self.qr_secret = None
         self.expires_at = 0.0
         self._bound = None
         self.outcome = None
 
-    def handle(self, message: dict):
-        """The reply to one datagram, or None when it deserves no answer. A successful pairing
-        leaves the token in `self.paired` as (token, requester_name); the caller stores it."""
+    def beacon(self, port: int) -> dict:
+        """Version 3's beacon. The pairing id and this machine's id travel only while a code is
+        up, so a machine does not broadcast a stable id on every network it joins."""
+        message = {"type": MSG_BEACON, "name": self.name, "port": int(port), "pairing": PAIRING_V3, "platform": self.platform}
+        if self.active:
+            message["pair"] = self.pair_id
+            message["id"] = _b64(self.identity)
+        return message
+
+    def handle(self, message: dict, address: str = "", via=None):
+        """The reply to one message, or None when it deserves no answer. A successful pairing
+        leaves `self.paired` set: (token, requester_name) in version 2, for the caller to store;
+        in version 3 the entry `store` has already written. `address` is where the pair_start
+        came from, which version 3 saves as the requester's host. `via` is the transport it came
+        on (a TCP connection, or the UDP socket): version 3 takes a pair_confirm only on the channel
+        whose pair_start bound the code."""
         kind = message.get("type")
         pair_id = message.get("pair")
         # Every reply echoes the pairing id, so one that is not shaped like an id gets none: a
@@ -329,15 +578,17 @@ class PairingHost:
         if not isinstance(pair_id, str) or not pair_id.isascii() or not 0 < len(pair_id) <= MAX_PAIR_ID_CHARS:
             return None
         if kind == MSG_PAIR_START:
-            return self._start(message, pair_id)
+            return self._start(message, pair_id, address, via)
         if kind == MSG_PAIR_CONFIRM:
-            return self._confirm(message, pair_id)
+            return self._confirm(message, pair_id, address, via)
         if kind == MSG_PAIR_REQUEST:
             return self._outdated(pair_id)
         return None
 
-    def _start(self, message: dict, pair_id: str) -> dict:
-        sent = [message.get(field) for field in ("pair", "v", "nonce", "share", "name", "id")]
+    def _start(self, message: dict, pair_id: str, address: str, via=None) -> dict:
+        fields = ("pair", "v", "nonce", "share", "name", "id") + (("platform", "port", "qr") if self.v3 else ())
+        # "qr" absent and "qr": null are different messages; the sentinel keeps them apart.
+        sent = [message.get(field, KeyError) for field in fields]
         if self._last is not None and self._last[0] == sent:
             # A lost reply makes the requester send the same datagram again; answer it the same
             # way, so a retransmit is not read as a second attempt.
@@ -351,13 +602,19 @@ class PairingHost:
             # guess at the code, so it is refused, and the exchange already under way is left
             # alone rather than cancelled by a stranger's datagram.
             return _failure(MSG_PAIR_ANSWER, pair_id, ERROR_REFUSED)
-        if message.get("v") != PAIRING_VERSION:
+        version = message.get("v")
+        if not _is_int(version) or version != self.version:
             return self._end(MSG_PAIR_ANSWER, sent, pair_id, ERROR_VERSION, "version")
+        if self.v3 and len(self._peers()) >= MAX_PEERS:
+            return self._end(MSG_PAIR_ANSWER, sent, pair_id, ERROR_FULL, "full")
         try:
             nonce = _unb64(message.get("nonce"))
             share = _unb64(message.get("share"))
             identity = _unb64(message.get("id"))
             name = message.get("name")
+            platform = message.get("platform")
+            port = message.get("port")
+            secret = b""
             if (
                 len(nonce) != NONCE_BYTES
                 or len(share) != SHARE_BYTES
@@ -366,20 +623,30 @@ class PairingHost:
                 or len(name) > MAX_NAME_CHARS
             ):
                 raise PairingError(ERROR_REFUSED)
+            if self.v3:
+                if not (_machine_id_ok(identity) and _name_ok(name) and _platform_ok(platform) and _port_ok(port)):
+                    raise PairingError(ERROR_REFUSED)
+                if "qr" in message:
+                    if not _is_int(message["qr"]) or message["qr"] != 1:
+                        raise PairingError(ERROR_REFUSED)
+                    secret = self.qr_secret
+                requester = _party(ROLE_REQUESTER, identity, name, platform, port)
+                host = _party(ROLE_HOST, self.identity, self.name, self.platform, self.port)
+            else:
+                requester = _party(ROLE_REQUESTER, identity, name)
+                host = _party(ROLE_HOST, self.identity, self.name)
             sid = _session_id(pair_id, nonce)
             scalar = self._entropy(SHARE_BYTES)
-            requester = _party(ROLE_REQUESTER, identity, name)
-            host = _party(ROLE_HOST, self.identity, self.name)
             # Everything that can refuse this datagram is settled before the code is touched:
             # a refusal goes back at once, and must not carry the time the generator took.
             shared = _x25519(scalar, share)
         except (PairingError, UnicodeError):
             return self._end(MSG_PAIR_ANSWER, sent, pair_id, ERROR_REFUSED, "refused")
         try:
-            own = _share(self.code, sid, scalar)
+            own = _share(self.code, sid, scalar, CHANNEL_V3 if self.v3 else CHANNEL, secret)
         except PairingError:
             return self._end(MSG_PAIR_ANSWER, sent, pair_id, ERROR_REFUSED, "refused")
-        token, requester_tag, host_tag, done_tag = _keys(sid, shared, share, requester, own, host)
+        token, requester_tag, host_tag, done_tag = _keys(sid, shared, share, requester, own, host, TOKEN_INFO_V3 if self.v3 else TOKEN_INFO)
         self.fresh_answer = True
         answer = {
             "type": MSG_PAIR_ANSWER,
@@ -390,6 +657,9 @@ class PairingHost:
             "name": self.name,
             "id": _b64(self.identity),
         }
+        if self.v3:
+            answer["platform"] = self.platform
+            answer["port"] = self.port
         self._bound = {
             "sent": sent,
             "answer": answer,
@@ -397,23 +667,66 @@ class PairingHost:
             "done_tag": done_tag,
             "token": token,
             "name": name,
+            "identity": identity,
+            "platform": platform,
+            "port": port,
+            "address": address,
+            "via": via,
         }
         return answer
 
-    def _confirm(self, message: dict, pair_id: str) -> dict:
-        sent = [pair_id, message.get("tag")]
+    def _confirm(self, message: dict, pair_id: str, address: str, via=None) -> dict:
+        sent = [pair_id, message.get("tag"), message.get("error")]
         if self._last is not None and self._last[0] == sent:
             return self._last[1]
         if not self.active or pair_id != self.pair_id or self._bound is None:
             return _failure(MSG_PAIR_DONE, pair_id, ERROR_NOT_PAIRING)
         bound = self._bound
+        if self.v3 and (address != bound["address"] or via != bound["via"]):
+            # Only the address and transport whose pair_start bound the code may end it. A
+            # stranger's confirmation, a forged-source datagram or a second connection included, is
+            # not answered and leaves the exchange alone.
+            return None
         try:
             tag = _unb64(message.get("tag"))
         except PairingError:
             tag = b""
         if not hmac.compare_digest(tag, bound["requester_tag"]):
-            return self._end(MSG_PAIR_DONE, sent, pair_id, ERROR_REFUSED, "refused")
+            # An `error: known` is unauthenticated, like every refusal: the window only says the
+            # other machine may already have this one paired.
+            there = self.v3 and message.get("error") == ERROR_KNOWN
+            return self._end(MSG_PAIR_DONE, sent, pair_id, ERROR_REFUSED, "known_there" if there else "refused")
+        if self.v3:
+            return self._keep(bound, sent, pair_id)
         self.paired = (bound["token"], bound["name"])
+        return self._done(sent, pair_id, bound)
+
+    def _keep(self, bound: dict, sent: list, pair_id: str) -> dict:
+        """Version 3, once Ta has proved the requester's id: refuse a machine already paired,
+        keep key ids unique, and write the entry before pair_done says it was written."""
+        peers = self._peers()
+        known, replaced = _find_known(peers, self.identity, bound["identity"], bound["name"], bound["platform"], self.wall())
+        if known is not None:
+            reply = self._end(MSG_PAIR_DONE, sent, pair_id, ERROR_KNOWN, "known")
+            self.known = None if known is True else known
+            return reply
+        replaced = replaced or _migrated_for(peers, bound["address"])
+        if _clashes(peers, bound["token"], replaced):
+            return self._end(MSG_PAIR_DONE, sent, pair_id, ERROR_REFUSED, "refused")
+        if replaced is None and len(peers) >= MAX_PEERS:
+            # Filled by a pairing this machine requested while the code was up.
+            return self._end(MSG_PAIR_DONE, sent, pair_id, ERROR_REFUSED, "full")
+        requester_port = bound["port"]
+        entry = peer_entry(bound["identity"], bound["name"], bound["platform"], requester_port, bound["token"], bound["address"], self.wall())
+        try:
+            self.store(entry, replaced)
+        except Exception as exc:
+            logging.getLogger("Beamer").warning("the new peer entry could not be saved: %s", exc)
+            return self._end(MSG_PAIR_DONE, sent, pair_id, ERROR_REFUSED, "not_saved")
+        self.paired = entry
+        return self._done(sent, pair_id, bound)
+
+    def _done(self, sent: list, pair_id: str, bound: dict) -> dict:
         reply = {"type": MSG_PAIR_DONE, "pair": pair_id, "ok": True, "tag": _b64(bound["done_tag"])}
         self._last = (sent, reply)
         self.cancel()
@@ -438,39 +751,72 @@ class PairingHost:
 
 
 class PairingClient:
-    """The Mac's half of one attempt: builds the start, checks the answer, confirms, and yields
-    the token once the host says it has stored it."""
+    """The requester's half of one attempt: builds the start, checks the answer, confirms, and
+    yields the token once the host says it has stored it.
 
-    def __init__(self, pair_id: str, code: str, name: str, identity: bytes = b"", entropy=secrets.token_bytes):
+    Version 3 also takes this machine's platform and link port, `peers` (a callable giving the
+    peer entries), `wall` for `paired_at`, and `qr_secret` when the code was read from a QR. It
+    raises PairingError(ERROR_FULL) at once when this machine already has MAX_PEERS peers."""
+
+    def __init__(self, pair_id: str, code: str, name: str, identity: bytes = b"", entropy=secrets.token_bytes,
+                 *, version: int = PAIRING_VERSION, platform: str = "", port: int = 0, qr_secret: bytes = None, peers=None, wall=time.time):
+        self.version = version
+        self._peers = peers or list
+        self.wall = wall
+        if self.v3:
+            _check_own(identity, platform, port)
+            if qr_secret is not None and len(qr_secret) != QR_SECRET_BYTES:
+                raise ValueError("a QR secret is 16 bytes")
+            if len(self._peers()) >= MAX_PEERS:
+                raise PairingError(ERROR_FULL)
         self.pair_id = pair_id
         self.name = name[:MAX_NAME_CHARS]
         self.identity = identity
+        self.platform = platform
+        self.port = port
+        self.qr_secret = qr_secret
         self._nonce = entropy(NONCE_BYTES)
         self._sid = _session_id(pair_id, self._nonce)
         self._scalar = entropy(SHARE_BYTES)
-        self._share = _share(code, self._sid, self._scalar)
+        self._share = _share(code, self._sid, self._scalar, CHANNEL_V3 if self.v3 else CHANNEL, qr_secret or b"")
         self._answered = False
+        self._known = False
         self._token = None
         self._done_tag = None
         # The host's name and identity as the exchange bound them; None until its tag checks out.
         self.host_name = None
         self.host_identity = None
+        self.host_platform = None
+        self.host_port = None
+        # Version 3: this machine's entry that the new one replaces (a lost pair_done), or None.
+        self.replaces = None
+
+    @property
+    def v3(self) -> bool:
+        return self.version == PAIRING_V3
 
     def start(self) -> dict:
-        return {
+        message = {
             "type": MSG_PAIR_START,
             "pair": self.pair_id,
-            "v": PAIRING_VERSION,
+            "v": self.version,
             "nonce": _b64(self._nonce),
             "share": _b64(self._share),
             "name": self.name,
             "id": _b64(self.identity),
         }
+        if self.v3:
+            message["platform"] = self.platform
+            message["port"] = self.port
+            if self.qr_secret is not None:
+                message["qr"] = 1
+        return message
 
     def accept(self, answer: dict) -> dict:
         """The pair_confirm to send back, or PairingError naming why not. It judges one answer
         and no more: each answer it judged would be another guess at the code for whoever is
-        answering."""
+        answering. Version 3 refuses a host this machine already has with AlreadyPaired, once
+        the host's tag has proved its id."""
         if answer.get("type") != MSG_PAIR_ANSWER or answer.get("pair") != self.pair_id:
             raise PairingError("not a reply to this attempt")
         if self._answered:
@@ -483,30 +829,52 @@ class PairingClient:
             tag = _unb64(answer.get("tag"))
             identity = _unb64(answer.get("id"))
             name = answer.get("name")
+            platform = answer.get("platform")
+            port = answer.get("port")
             if len(share) != SHARE_BYTES or len(identity) > MAX_IDENTITY_BYTES or not isinstance(name, str) or len(name) > MAX_NAME_CHARS:
                 raise PairingError(ERROR_REFUSED)
-            requester = _party(ROLE_REQUESTER, self.identity, self.name)
-            host = _party(ROLE_HOST, identity, name)
+            if self.v3:
+                if not (_machine_id_ok(identity) and _name_ok(name) and _platform_ok(platform) and _port_ok(port)):
+                    raise PairingError(ERROR_REFUSED)
+                requester = _party(ROLE_REQUESTER, self.identity, self.name, self.platform, self.port)
+                host = _party(ROLE_HOST, identity, name, platform, port)
+            else:
+                requester = _party(ROLE_REQUESTER, self.identity, self.name)
+                host = _party(ROLE_HOST, identity, name)
             shared = _x25519(self._scalar, share)
-            token, requester_tag, host_tag, done_tag = _keys(self._sid, shared, self._share, requester, share, host)
+            token, requester_tag, host_tag, done_tag = _keys(self._sid, shared, self._share, requester, share, host, TOKEN_INFO_V3 if self.v3 else TOKEN_INFO)
         except (PairingError, UnicodeError) as exc:
             raise PairingError(ERROR_REFUSED) from exc
         if not hmac.compare_digest(tag, host_tag):
             raise PairingError(ERROR_REFUSED)
+        if self.v3:
+            self._check_host(identity, name, platform)
         self._token = token
         self._done_tag = done_tag
         self.host_name = name
         self.host_identity = identity
+        self.host_platform = platform
+        self.host_port = port
         return {"type": MSG_PAIR_CONFIRM, "pair": self.pair_id, "tag": _b64(requester_tag)}
 
+    def _check_host(self, identity: bytes, name: str, platform: str) -> None:
+        known, self.replaces = _find_known(self._peers(), self.identity, identity, name, platform, self.wall())
+        if known is not None:
+            self._known = True
+            raise AlreadyPaired(None if known is True else known)
+
     def abort(self) -> dict:
-        """What to send a host whose answer failed: a confirmation that cannot pass, so the PC
+        """What to send a host whose answer failed: a confirmation that cannot pass, so the host
         drops the code and says a wrong one was entered instead of showing it for the rest of
-        its minute."""
-        return {"type": MSG_PAIR_CONFIRM, "pair": self.pair_id, "tag": ""}
+        its minute; or, after AlreadyPaired, that this machine has the host already."""
+        message = {"type": MSG_PAIR_CONFIRM, "pair": self.pair_id, "tag": ""}
+        if self._known:
+            message["error"] = ERROR_KNOWN
+        return message
 
     def finish(self, done: dict) -> str:
-        """The agreed token, once the host's pair_done proves it stored the same one."""
+        """The agreed token, once the host's pair_done proves it stored the same one. Version 3
+        refuses it when its key id is already one of this machine's entries'."""
         if done.get("type") != MSG_PAIR_DONE or done.get("pair") != self.pair_id or self._token is None:
             raise PairingError("not a reply to this attempt")
         if done.get("ok") is not True:
@@ -517,7 +885,14 @@ class PairingClient:
             raise PairingError(ERROR_REFUSED) from exc
         if not hmac.compare_digest(tag, self._done_tag):
             raise PairingError(ERROR_REFUSED)
+        if self.v3 and _clashes(self._peers(), self._token, self.replaces):
+            raise PairingError(ERROR_REFUSED)
         return self._token
+
+    def entry(self, address: str) -> dict:
+        """Version 3: the peer entry for the host, reached at `address`, once finish() has
+        returned the token."""
+        return peer_entry(self.host_identity, self.host_name, self.host_platform, self.host_port, self._token, address, self.wall())
 
 
 def _udp_socket(bind_port: int) -> socket.socket:
@@ -584,6 +959,22 @@ def machine_name() -> str:
     return socket.gethostname().split(".", 1)[0] or "This machine"
 
 
+def _due(last: dict, host: str, now: float) -> bool:
+    """Whether `host` may be sent another datagram of a rationed kind, noting it if so."""
+    interval = BEACON_INTERVAL_SECONDS / 4
+    if now - last.get(host, -BEACON_INTERVAL_SECONDS) < interval:
+        return False
+    if len(last) > 256:
+        # Only what has lapsed is forgotten. Emptying the table would let a burst from
+        # made-up addresses wipe the record of the one being aimed at.
+        for lapsed in [known for known, sent in last.items() if now - sent >= interval]:
+            del last[lapsed]
+        if len(last) > 256:
+            return False
+    last[host] = now
+    return True
+
+
 class Announcer:
     """The PC's socket loop: broadcasts the beacon and answers pairing requests on one socket.
     `port_getter` returns the current TCP port, so a changed listen port is announced without a
@@ -647,19 +1038,7 @@ class Announcer:
 
     @staticmethod
     def _due(last: dict, host: str, now: float) -> bool:
-        """Whether `host` may be sent another datagram of a rationed kind, noting it if so."""
-        interval = BEACON_INTERVAL_SECONDS / 4
-        if now - last.get(host, -BEACON_INTERVAL_SECONDS) < interval:
-            return False
-        if len(last) > 256:
-            # Only what has lapsed is forgotten. Emptying the table would let a burst from
-            # made-up addresses wipe the record of the one being aimed at.
-            for lapsed in [known for known, sent in last.items() if now - sent >= interval]:
-                del last[lapsed]
-            if len(last) > 256:
-                return False
-        last[host] = now
-        return True
+        return _due(last, host, now)
 
     def _run(self) -> None:
         try:
@@ -714,7 +1093,8 @@ class Announcer:
                 if message is None:
                     continue
                 if message.get("type") == MSG_FIND:
-                    # At most one answer per address per interval, so the port is no amplifier.
+                    # At most one answer per address per interval: a beacon is larger than the `find` that
+                    # draws it, so the rate is what keeps the port from being a useful amplifier.
                     if self._due(answered, address[0], arrived):
                         try:
                             sock.sendto(self._beacon(), address)
@@ -842,7 +1222,13 @@ class Discovery:
             raise PairingError(ERROR_VERSION)
         if not isinstance(pc.get("pair_id"), str):
             raise PairingError(ERROR_NOT_PAIRING)
-        target = (pc["address"], pc["reply_port"])
+        with self._attempt(code):
+            client = PairingClient(pc["pair_id"], code, name or machine_name())
+            token = self._exchange_udp(sock, (pc["address"], pc["reply_port"]), client, code)
+            return token, client.host_name
+
+    @contextlib.contextmanager
+    def _attempt(self, code: str):
         if not self._pairing.acquire(blocking=False):
             # One attempt at a time: a second would take the first one's replies, and could
             # slip past the record of failed codes below.
@@ -857,31 +1243,36 @@ class Discovery:
                 # second guess. It is the code that is remembered, not the pairing id, which a
                 # beacon can forge.
                 raise PairingError(ERROR_REFUSED)
-            client = PairingClient(pc["pair_id"], code, name or machine_name())
-            while True:
-                try:
-                    self._replies.get_nowait()
-                except queue.Empty:
-                    break
-            self._awaiting = (target[0], client.pair_id)
-            answer = self._ask(sock, target, client.pair_id, client.start(), MSG_PAIR_ANSWER)
-            try:
-                confirm = client.accept(answer)
-            except PairingError:
-                # Only an answer that claimed to be good can have tested a guess. A refusal
-                # tests nothing, and a stale pairing id draws one from an honest PC.
-                if answer.get("ok") is True:
-                    self._failed[code] = self.clock() + FAILED_CODE_SECONDS
-                    try:
-                        sock.sendto(encode(client.abort()), target)
-                    except OSError:
-                        pass
-                raise
-            token = client.finish(self._ask(sock, target, client.pair_id, confirm, MSG_PAIR_DONE))
-            return token, client.host_name
+            yield
         finally:
             self._awaiting = None
             self._pairing.release()
+
+    def _judge(self, client, answer: dict, code: str, send_abort) -> dict:
+        """The pair_confirm for the first answer, which is the only one judged. Only an answer
+        that claimed to be good can have tested a guess: that code is then remembered and the
+        host told. A refusal tests nothing, and a stale pairing id draws one from an honest host."""
+        try:
+            return client.accept(answer)
+        except PairingError:
+            if answer.get("ok") is True:
+                self._failed[code] = self.clock() + FAILED_CODE_SECONDS
+                try:
+                    send_abort(client.abort())
+                except OSError:
+                    pass
+            raise
+
+    def _exchange_udp(self, sock, target, client, code: str) -> str:
+        while True:
+            try:
+                self._replies.get_nowait()
+            except queue.Empty:
+                break
+        self._awaiting = (target[0], client.pair_id)
+        answer = self._ask(sock, target, client.pair_id, client.start(), MSG_PAIR_ANSWER)
+        confirm = self._judge(client, answer, code, lambda abort: sock.sendto(encode(abort), target))
+        return client.finish(self._ask(sock, target, client.pair_id, confirm, MSG_PAIR_DONE))
 
     def _ask(self, sock, target, pair_id: str, message: dict, reply_type: str) -> dict:
         """Sends one datagram until the first reply of `reply_type` from `target` comes back.
@@ -965,18 +1356,23 @@ class Discovery:
             self.logger.warning("could not ask %s for its beacon: %s", target[0], exc)
 
     def _note_beacon(self, message: dict, address) -> None:
+        entry = self._beacon_entry(message, address)
+        if entry is not None:
+            self._remember(address, entry)
+
+    def _beacon_entry(self, message: dict, address):
         name = message.get("name")
         port = message.get("port")
         pair_id = message.get("pair")
         version = message.get("pairing")
         if not isinstance(name, str) or isinstance(port, bool) or not isinstance(port, int) or not 1 <= port <= 65535:
-            return
+            return None
         try:
             name.encode("utf-8")
         except UnicodeError:
             # Half a surrogate pair is JSON a parser accepts and text no window can show.
-            return
-        entry = {
+            return None
+        return {
             "name": name[:64] or address[0],
             "address": address[0],
             "port": port,
@@ -986,6 +1382,8 @@ class Discovery:
             "pairing": version if isinstance(version, int) and not isinstance(version, bool) else 1,
             "seen_at": self.clock(),
         }
+
+    def _remember(self, address, entry: dict) -> None:
         with self._lock:
             if address[0] not in self._seen and len(self._seen) >= MAX_SEEN_HOSTS:
                 # The list is only read while the window is open, so what has gone quiet is
@@ -1001,3 +1399,562 @@ class Discovery:
                     wanted = self._finding[0] if self._finding else None
                     del self._seen[min((key for key in self._seen if key != wanted), key=lambda key: self._seen[key]["seen_at"])]
             self._seen[address[0]] = entry
+
+
+def _shut(sock) -> None:
+    try:
+        sock.shutdown(socket.SHUT_RDWR)
+    except OSError:
+        pass
+
+
+def _send_frame(sock, message: dict) -> None:
+    body = encode(message)
+    sock.sendall(struct.pack(">I", len(body)) + body)
+
+
+def _recv_exact(sock, count: int, deadline: float) -> bytes:
+    data = b""
+    while len(data) < count:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise PairingError("no_answer")
+        sock.settimeout(remaining)
+        try:
+            chunk = sock.recv(count - len(data))
+        except OSError as exc:
+            raise PairingError("no_answer") from exc
+        if not chunk:
+            raise PairingError("no_answer")
+        data += chunk
+    return data
+
+
+def _recv_frame(sock, deadline: float) -> dict:
+    """One message over TCP: a 4-byte big-endian length, then the JSON a datagram would carry. A
+    length outside 1 to 1024 is refused before the body is read, and a body that is not a Beamer
+    message ends the exchange like a closed connection."""
+    (length,) = struct.unpack(">I", _recv_exact(sock, 4, deadline))
+    if not 0 < length <= MAX_DATAGRAM_BYTES:
+        raise PairingError("no_answer")
+    message = decode(_recv_exact(sock, length, deadline))
+    if message is None:
+        raise PairingError("no_answer")
+    return message
+
+
+def _linger(sock, deadline: float) -> None:
+    """Shuts the sending side and reads what is left for up to a second, so the last message
+    sent is not lost to a reset over unread bytes."""
+    until = min(deadline, time.monotonic() + 1.0)
+    try:
+        sock.shutdown(socket.SHUT_WR)
+        while True:
+            remaining = until - time.monotonic()
+            if remaining <= 0:
+                return
+            sock.settimeout(remaining)
+            if not sock.recv(MAX_DATAGRAM_BYTES):
+                return
+    except OSError:
+        pass
+
+
+class _Slots:
+    """The pairing listener's connections, on the link's handshake terms (WIRE.md section 2): at
+    most `size`, one per address, a new connection from an address replacing its earlier one,
+    and one from a new address replacing the oldest when all are held. A pinned connection, the
+    one whose pair_start bound the code, is never the one replaced: the exchange under way is
+    left alone. With nothing left to replace, the new connection is the one closed."""
+
+    def __init__(self, size: int):
+        self.size = size
+        self._held = {}
+        self._pinned = set()
+        self._serial = 0
+        self._lock = threading.Lock()
+
+    def take(self, address: str, close):
+        """The new connection's key, or None when every slot is pinned and it was closed."""
+        with self._lock:
+            free = [key for key in self._held if key not in self._pinned]
+            victims = [key for key in free if self._held[key][0] == address]
+            if not victims and len(self._held) >= self.size:
+                victims = free[:1]
+            closers = [self._held.pop(key)[1] for key in victims]
+            if len(self._held) >= self.size:
+                closers.append(close)
+                taken = None
+            else:
+                self._serial += 1
+                self._held[self._serial] = (address, close)
+                taken = self._serial
+        for closer in closers:
+            closer()
+        return taken
+
+    def pin(self, key: int) -> bool:
+        """False when the connection was already replaced: it is gone, and cannot be pinned."""
+        with self._lock:
+            if key not in self._held:
+                return False
+            self._pinned.add(key)
+            return True
+
+    def release(self, key: int) -> None:
+        with self._lock:
+            self._held.pop(key, None)
+            self._pinned.discard(key)
+
+    def close_all(self) -> None:
+        with self._lock:
+            closers = [close for _address, close in self._held.values()]
+        for closer in closers:
+            closer()
+
+
+class PairingService(Discovery):
+    """Pairing version 3's socket side, the same on every desktop (WIRE.md section 6, "Either
+    end"). One UDP socket beacons every 2 seconds, keeps the list of machines it hears, answers
+    `find`, carries this machine's requests and hosts its code; while a code is up a TCP listener
+    on `tcp_port` hosts it too, with the same PairingHost, so rule 1 holds across both.
+
+    `peers()` gives the peer entries as they stand; `store(entry, replaced)` writes a new one and
+    drops `replaced` (that entry, by identity) when it is not None, raising if it cannot.
+    `replaced` may be the entry migrated from 1.4.x, whose `id` is `""`: its zones go with it and
+    are not moved to the new id, since pairing does not prove it is the same machine.
+    `on_paired(entry)` is told of a pairing this machine hosted, after the entry is stored.
+
+    ⚠ `peers` and `store` run on the socket threads while this service holds its own lock, which
+    is what makes check-then-store one step for both roles. So they must never wait on the main
+    thread (no synchronous hop to it), nor on a lock held by any thread while it calls into this
+    service: the app's settings lock is taken inside `store`, and the app never calls
+    `code`, `begin_pairing` and the rest while holding it. `on_paired` runs outside the lock."""
+
+    def __init__(self, name, identity: bytes, platform: str, port_getter, peers, store, on_paired=None, logger=None,
+                 bind_port=PAIRING_PORT, tcp_port=PAIRING_PORT, announce_to=("255.255.255.255", PAIRING_PORT),
+                 clock=time.monotonic, wall=time.time):
+        super().__init__(logger=logger, bind_port=bind_port, clock=clock)
+        self.name = (name or machine_name())[:MAX_NAME_CHARS]
+        self.identity = identity
+        self.platform = platform
+        self.port_getter = port_getter
+        self._peer_entries = peers
+        self.store = store
+        self.on_paired = on_paired or (lambda entry: None)
+        self.tcp_port = tcp_port
+        self.announce_to = announce_to
+        self.wall = wall
+        self.host = PairingHost(clock, self.name, identity, version=PAIRING_V3, platform=platform, port=port_getter(),
+                                peers=peers, store=store, wall=wall)
+        self._host_lock = threading.Lock()
+        self._listener = None
+        self._listener_lock = threading.Lock()
+        self._slots = _Slots(TCP_MAX_CONNECTIONS)
+        self._own_addresses = frozenset()
+        # Why the TCP listener is not up while a code is, or None.
+        self.tcp_error = None
+
+    # The host's side.
+
+    def begin_pairing(self) -> str:
+        """Shows a new code, raising PairingError(ERROR_FULL) when this machine has 32 peers."""
+        with self._host_lock:
+            self.host.port = self.port_getter()
+            code = self.host.begin()
+            self._open_listener()
+        return code
+
+    def cancel_pairing(self) -> None:
+        with self._host_lock:
+            self.host.cancel()
+            self._close_listener()
+
+    @property
+    def code(self):
+        with self._host_lock:
+            return self.host.code if self.host.active else None
+
+    @property
+    def seconds_left(self) -> int:
+        with self._host_lock:
+            return self.host.seconds_left
+
+    @property
+    def outcome(self):
+        with self._host_lock:
+            self.host.active
+            return self.host.outcome
+
+    @property
+    def known(self):
+        with self._host_lock:
+            return self.host.known
+
+    def qr_text(self, address: str = None):
+        """The QR's text for the code on screen, at `address` or pairing_address(); None when no
+        code is up or this machine has no address."""
+        with self._host_lock:
+            if not self.host.active:
+                return None
+            code, secret = self.host.code, self.host.qr_secret
+            if self._listener is None:
+                # The TCP listener could not bind (tcp_error says why): a QR would point at
+                # nothing, so the sheet shows the code alone.
+                return None
+        address = address or pairing_address()
+        return qr_text(address, self.tcp_port, code, secret) if address else None
+
+    def machines(self) -> list:
+        """Every machine heard from recently: pcs()'s fields, with `platform` and, while its code
+        is up, `id`."""
+        return self.pcs()
+
+    def stop(self) -> None:
+        super().stop()
+        with self._host_lock:
+            self.host.cancel()
+            self._close_listener()
+        self._slots.close_all()
+
+    def _open_listener(self) -> None:
+        with self._listener_lock:
+            if self._listener is not None:
+                return
+            listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            try:
+                if os.name != "nt":
+                    # To bind again while a closed connection waits out TIME_WAIT. Windows'
+                    # SO_REUSEADDR would let another program bind the port too, so not there.
+                    listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                listener.bind(("", self.tcp_port))
+                listener.listen(TCP_MAX_CONNECTIONS * 2)
+                listener.settimeout(0.25)
+            except OSError as exc:
+                listener.close()
+                self.tcp_error = str(exc)
+                self.logger.warning("pairing over TCP %s is not available: %s", self.tcp_port, exc)
+                return
+            self.tcp_error = None
+            stop = threading.Event()
+            self._listener = (listener, stop)
+        threading.Thread(target=self._accept, args=(listener, stop), name="Beamer-pairing-tcp", daemon=True).start()
+
+    def _close_listener(self, only=None) -> None:
+        with self._listener_lock:
+            if only is not None and (self._listener is None or self._listener[0] is not only):
+                return
+            held, self._listener = self._listener, None
+        if held is not None:
+            held[1].set()
+            held[0].close()
+
+    def _accept(self, listener, stop) -> None:
+        while not stop.is_set():
+            # The listener is up only while a code is: it goes when the code expires as well as
+            # when it is used or cancelled. Under the host's lock, so a new code shown at this
+            # moment keeps its listener.
+            with self._host_lock:
+                if not self.host.active:
+                    self._close_listener(only=listener)
+                    return
+            try:
+                conn, address = listener.accept()
+            except socket.timeout:
+                continue
+            except OSError as exc:
+                # Closed on purpose, or failed (out of descriptors, say). Either way it is let go,
+                # so the next code opens a listener of its own rather than finding this one held.
+                with self._host_lock:
+                    if self._listener is not None and self._listener[0] is listener:
+                        self.tcp_error = str(exc)
+                        self._close_listener(only=listener)
+                return
+            deadline = time.monotonic() + TCP_EXCHANGE_SECONDS
+            key = self._slots.take(address[0], lambda conn=conn: _shut(conn))
+            if key is None:
+                conn.close()
+                continue
+            threading.Thread(target=self._serve, args=(conn, address[0], key, deadline), name="Beamer-pairing-conn", daemon=True).start()
+
+    def _serve(self, conn, address: str, key: int, deadline: float) -> None:
+        """One TCP exchange: the beacon, then pair_start and pair_confirm in that order. Anything
+        else, a second pair_start included, closes the connection with nothing sent; a refusal is
+        sent before the close."""
+        try:
+            conn.settimeout(TCP_EXCHANGE_SECONDS)
+            with self._host_lock:
+                beacon = self.host.beacon(self.port_getter())
+            if "pair" not in beacon:
+                return
+            _send_frame(conn, beacon)
+            expected = MSG_PAIR_START
+            while True:
+                message = _recv_frame(conn, deadline)
+                arrived = time.monotonic()
+                if message.get("type") != expected:
+                    return
+                reply, paired, fresh = self._host_handle(message, address, ("tcp", key), lambda: self._slots.pin(key))
+                if reply is None:
+                    return
+                if fresh:
+                    time.sleep(max(0.0, arrived + PAIR_ANSWER_SECONDS - time.monotonic()))
+                conn.settimeout(max(0.01, deadline - time.monotonic()))
+                _send_frame(conn, reply)
+                self._paired(paired, address)
+                if reply.get("ok") is not True or expected == MSG_PAIR_CONFIRM:
+                    _linger(conn, deadline)
+                    return
+                expected = MSG_PAIR_CONFIRM
+        except (OSError, PairingError):
+            pass
+        except Exception:
+            self.logger.exception("pairing connection dropped")
+        finally:
+            self._slots.release(key)
+            conn.close()
+
+    def _host_handle(self, message: dict, address: str, via, pin=None) -> tuple:
+        """The host's reply. `pin` holds the connection whose pair_start just bound the code, under
+        the host's lock, before its answer waits out PAIR_ANSWER_SECONDS: only a fresh answer pins,
+        never one repeated from the cache to a replay on another connection."""
+        with self._host_lock:
+            reply = self.host.handle(message, address, via)
+            paired, self.host.paired = self.host.paired, None
+            fresh, self.host.fresh_answer = self.host.fresh_answer, False
+            if pin is not None and fresh and message.get("type") == MSG_PAIR_START and reply is not None and reply.get("ok") is True:
+                if not pin():
+                    # Replaced in the instant before its pin: the code is bound to a connection
+                    # that is gone, so the attempt ends as a refusal rather than holding the code.
+                    self.host.cancel()
+                    self.host.outcome = "refused"
+                    reply = None
+        return reply, paired, fresh
+
+    def _paired(self, entry, address: str) -> None:
+        if entry is None:
+            return
+        self.logger.info("paired with %s at %s", entry["name"], address)
+        try:
+            self.on_paired(entry)
+        except Exception:
+            self.logger.exception("on_paired failed")
+
+    # The UDP socket, both ways.
+
+    def _beacon(self) -> bytes:
+        with self._host_lock:
+            return encode(self.host.beacon(self.port_getter()))
+
+    def _announce(self, sock) -> None:
+        beacon = self._beacon()
+        # A named address is honoured exactly, which keeps the tests off the real network.
+        if self.announce_to[0] == "255.255.255.255":
+            targets = broadcast_targets(self.announce_to[1])
+        else:
+            targets = [self.announce_to]
+        delivered = 0
+        for target in targets:
+            try:
+                sock.sendto(beacon, target)
+                delivered += 1
+            except OSError:
+                continue
+        if not delivered:
+            self.logger.warning("beacon reached no interface")
+
+    def _run(self) -> None:
+        try:
+            sock = _udp_socket(self.bind_port)
+        except OSError as exc:
+            self.error = str(exc)
+            self.logger.error("pairing could not bind UDP %s: %s", self.bind_port, exc)
+            return
+        self.error = None
+        self._sock = sock
+        self._own_addresses = frozenset(_local_ipv4_addresses() + [pairing_address(), "127.0.0.1"]) - {None}
+        next_beacon = 0.0
+        answered = {}
+        refused = {}
+        try:
+            while not self._stop.is_set():
+                now = time.monotonic()
+                if now >= next_beacon:
+                    next_beacon = now + BEACON_INTERVAL_SECONDS
+                    self._announce(sock)
+                self._send_find(sock)
+                try:
+                    data, address = sock.recvfrom(MAX_DATAGRAM_BYTES + 1)
+                except socket.timeout:
+                    continue
+                except ConnectionResetError:
+                    continue
+                except OSError as exc:
+                    if self._stop.is_set():
+                        break
+                    self.error = str(exc)
+                    self.logger.error("pairing stopped: %s", exc)
+                    break
+                arrived = time.monotonic()
+                message = decode(data)
+                if message is None:
+                    continue
+                try:
+                    self._dispatch(sock, message, address, arrived, answered, refused)
+                except Exception:
+                    # Whatever one datagram does, the next beacon still goes out.
+                    self.logger.exception("pairing datagram dropped")
+        except Exception as exc:
+            self.error = str(exc)
+            self.logger.exception("pairing stopped")
+        finally:
+            self._sock = None
+            sock.close()
+
+    def _dispatch(self, sock, message: dict, address, arrived: float, answered: dict, refused: dict) -> None:
+        kind = message.get("type")
+        if kind == MSG_BEACON:
+            # This machine hears its own broadcasts, from its own port at one of its own addresses.
+            if address[1] != self.bind_port or address[0] not in self._own_addresses:
+                self._note_beacon(message, address)
+        elif kind == MSG_FIND:
+            # At most one answer per address per interval: a beacon is larger than the `find` that
+            # draws it, so the rate is what keeps the port from being a useful amplifier.
+            if _due(answered, address[0], arrived):
+                sock.sendto(self._beacon(), address)
+        elif kind in (MSG_PAIR_START, MSG_PAIR_CONFIRM, MSG_PAIR_REQUEST):
+            reply, paired, fresh = self._host_handle(message, address[0], "udp")
+            # A refusal is larger than the smallest datagram that draws one, so it is rationed.
+            if reply is not None and (reply.get("ok") is True or _due(refused, address[0], arrived)):
+                if fresh:
+                    self._stop.wait(max(0.0, arrived + PAIR_ANSWER_SECONDS - time.monotonic()))
+                try:
+                    sock.sendto(encode(reply), address)
+                except OSError as exc:
+                    self.logger.warning("pairing reply not sent: %s", exc)
+            self._paired(paired, address[0])
+        elif kind in (MSG_PAIR_ANSWER, MSG_PAIR_DONE) and self._awaiting == (address[0], message.get("pair")):
+            try:
+                self._replies.put_nowait((message, address))
+            except queue.Full:
+                pass
+
+    def _beacon_entry(self, message: dict, address):
+        entry = super()._beacon_entry(message, address)
+        if entry is not None:
+            platform = message.get("platform")
+            entry["platform"] = platform if _platform_ok(platform) else None
+            entry["id"] = message.get("id") if _id_text_ok(message.get("id")) else None
+        return entry
+
+    # The requester's side.
+
+    def pair(self, machine: dict, code: str) -> dict:
+        """Pairs over UDP with `machine`, an entry from machines(), and returns the entry stored
+        for it. Blocks for up to PAIR_ATTEMPTS replies' worth, twice; call it off the main
+        thread. Raises AlreadyPaired, or PairingError naming why."""
+        sock = self._sock
+        if sock is None:
+            raise PairingError("discovery is not running")
+        if machine.get("pairing") != PAIRING_V3:
+            # Said before anything is sent: versions 2 and 3 never pair.
+            raise PairingError(ERROR_VERSION)
+        if not isinstance(machine.get("pair_id"), str):
+            raise PairingError(ERROR_NOT_PAIRING)
+        with self._attempt(code):
+            client = self._client(machine["pair_id"], code)
+            self._exchange_udp(sock, (machine["address"], machine["reply_port"]), client, code)
+            return self._keep(client, machine["address"])
+
+    def pair_by_address(self, address: str, code: str, port: int = PAIRING_PORT) -> dict:
+        """"Pair by address": the exchange over TCP with a typed address and code, for a host no
+        broadcast reaches. No QR secret, so no `qr`."""
+        try:
+            resolved = socket.getaddrinfo((address or "").strip(), port, socket.AF_INET, socket.SOCK_STREAM)[0][4][0]
+        except (OSError, IndexError, UnicodeError) as exc:
+            raise PairingError("no_answer") from exc
+        return self._pair_tcp(resolved, port, code, None)
+
+    def pair_by_qr(self, text: str) -> dict:
+        """The exchange over TCP from a QR's text, with its secret and `qr: 1`. A QR of a machine
+        this one has already does not pair: AlreadyPaired, before anything is sent."""
+        fields = read_qr(text)
+        return self._pair_tcp(fields["host"], fields["port"], fields["code"], fields["secret"])
+
+    def _client(self, pair_id: str, code: str, secret: bytes = None) -> PairingClient:
+        return PairingClient(pair_id, code, self.name, self.identity, version=PAIRING_V3, platform=self.platform,
+                             port=self.port_getter(), qr_secret=secret, peers=self._peer_entries, wall=self.wall)
+
+    def _pair_tcp(self, address: str, port: int, code: str, secret) -> dict:
+        with self._attempt(code):
+            if len(self._peer_entries()) >= MAX_PEERS:
+                raise PairingError(ERROR_FULL)
+            try:
+                sock = socket.create_connection((address, port), timeout=TCP_CONNECT_SECONDS)
+            except OSError as exc:
+                raise PairingError("no_answer") from exc
+            deadline = time.monotonic() + TCP_EXCHANGE_SECONDS
+            try:
+                with sock:
+                    beacon = _recv_frame(sock, deadline)
+                    if beacon.get("type") != MSG_BEACON:
+                        raise PairingError("no_answer")
+                    version = beacon.get("pairing")
+                    if not _is_int(version) or version != PAIRING_V3:
+                        raise PairingError(ERROR_VERSION)
+                    pair_id = beacon.get("pair")
+                    if not isinstance(pair_id, str) or not pair_id.isascii() or not 0 < len(pair_id) <= MAX_PAIR_ID_CHARS:
+                        raise PairingError(ERROR_NOT_PAIRING)
+                    if secret is not None:
+                        self._not_paired_already(beacon.get("id"))
+                    client = self._client(pair_id, code, secret)
+                    sock.settimeout(max(0.01, deadline - time.monotonic()))
+                    _send_frame(sock, client.start())
+                    answer = _recv_frame(sock, deadline)
+                    if answer.get("type") != MSG_PAIR_ANSWER:
+                        raise PairingError("no_answer")
+                    confirm = self._judge(client, answer, code, lambda abort: _send_frame(sock, abort))
+                    _send_frame(sock, confirm)
+                    client.finish(_recv_frame(sock, deadline))
+            except OSError as exc:
+                raise PairingError("no_answer") from exc
+            return self._keep(client, address)
+
+    def _not_paired_already(self, identity) -> None:
+        """A QR of a machine this one has paired already: the caller tries its link at that
+        address instead of pairing again."""
+        if not _id_text_ok(identity):
+            return
+        if identity == _b64(self.identity):
+            raise AlreadyPaired(None)
+        for known in self._peer_entries():
+            if known.get("id") == identity:
+                raise AlreadyPaired(known)
+
+    def _keep(self, client: PairingClient, address: str) -> dict:
+        """The requester writes its entry once Td has checked out. The checks are made again,
+        under the lock the host's side stores under, because this machine may have hosted or
+        requested another pairing since: two at once must not pass 32 peers or share an id. A
+        failed write leaves the host an entry that never links, which pairing again within ten
+        minutes replaces."""
+        entry = client.entry(address)
+        with self._host_lock:
+            peers = self._peer_entries()
+            known, replaced = _find_known(peers, self.identity, client.host_identity, client.host_name, client.host_platform, self.wall())
+            if known is not None:
+                raise AlreadyPaired(None if known is True else known)
+            replaced = replaced or _migrated_for(peers, address)
+            if _clashes(peers, entry["token"], replaced):
+                raise PairingError(ERROR_REFUSED)
+            if replaced is None and len(peers) >= MAX_PEERS:
+                raise PairingError(ERROR_FULL)
+            try:
+                self.store(entry, replaced)
+            except Exception as exc:
+                self.logger.warning("the new peer entry could not be saved: %s", exc)
+                raise PairingError("not_saved") from exc
+        return entry
+
+
+def _id_text_ok(text) -> bool:
+    return protocol.read_id(text) is not None

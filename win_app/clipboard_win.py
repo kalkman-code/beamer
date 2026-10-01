@@ -339,6 +339,11 @@ def changed_contents() -> Tuple[Optional[str], Optional[bytes]]:
     return text, png
 
 
+def change_stamp() -> Optional[int]:
+    """A number that changes whenever the clipboard does, or None off Windows."""
+    return user32.GetClipboardSequenceNumber() if _IS_WINDOWS else None
+
+
 def forget_sync() -> None:
     """A new link: the Mac may have lost what it was sent, so the next switch sends again."""
     global _synced_sequence

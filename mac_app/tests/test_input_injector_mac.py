@@ -53,6 +53,27 @@ class KeyPlanTests(unittest.TestCase):
         self.assertIsNone(self.plan("nonsense_key"))
 
 
+class TextChunkTests(unittest.TestCase):
+    def test_short_text_is_one_chunk(self):
+        self.assertEqual(injector.text_chunks("héllo"), ["héllo"])
+
+    def test_long_text_is_cut_inside_the_events_limit_of_utf_16_units(self):
+        chunks = injector.text_chunks("a" * 40)
+        self.assertEqual("".join(chunks), "a" * 40)
+        self.assertTrue(all(len(chunk) <= injector.TEXT_CHUNK_UNITS for chunk in chunks))
+
+    def test_a_character_outside_the_bmp_is_never_split(self):
+        text = "x" * (injector.TEXT_CHUNK_UNITS - 1) + "\U0001F600" + "y"
+        chunks = injector.text_chunks(text)
+        self.assertEqual("".join(chunks), text)
+        self.assertTrue(all(len(chunk.encode("utf-16-le")) // 2 <= injector.TEXT_CHUNK_UNITS for chunk in chunks))
+        self.assertIn("\U0001F600", "".join(chunks))
+        self.assertFalse(any(chunk.endswith("\ud83d") for chunk in chunks))
+
+    def test_nothing_is_no_chunks(self):
+        self.assertEqual(injector.text_chunks(""), [])
+
+
 class ClampTests(unittest.TestCase):
     SCREENS = [Rect(0, 0, 1000, 1000), Rect(1000, 200, 800, 600)]
 

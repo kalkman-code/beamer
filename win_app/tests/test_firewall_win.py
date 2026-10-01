@@ -7,6 +7,7 @@ the status script emits, so the decisions run on the Mac with no Windows at all.
 import unittest
 import os
 import sys
+from unittest import mock
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
@@ -34,6 +35,15 @@ def pairing_rule(action="Allow", profile="Private", program=EXE, enabled="True")
     }
 
 
+def pairing_tcp_rule(action="Allow", profile="Private", program=EXE, enabled="True"):
+    """The TCP rule for the pairing exchange, hosted while a pairing code is on screen."""
+    return {
+        "name": "{z}", "display": "Beamer Pairing (TCP-In)", "enabled": enabled, "action": action,
+        "direction": "Inbound", "profile": profile, "program": program, "protocol": "TCP",
+        "localPort": [str(firewall_win.PAIRING_PORT)],
+    }
+
+
 def network(category="Private", alias="Wi-Fi", index=5, ipv4="Internet", ipv6="NoTraffic"):
     return {"alias": alias, "index": index, "category": category, "ipv4": ipv4, "ipv6": ipv6}
 
@@ -52,7 +62,7 @@ class InterpretTests(unittest.TestCase):
         self.assertEqual(advise(status).action, "repair")
 
     def test_correct_rule_on_private_lan(self):
-        status = interpret(payload([rule(), pairing_rule()]), EXE, PORT)
+        status = interpret(payload([rule(), pairing_rule(), pairing_tcp_rule()]), EXE, PORT)
         self.assertTrue(status.allowed)
         self.assertTrue(status.covered)
         self.assertTrue(status.pairing_allowed)
@@ -91,7 +101,7 @@ class InterpretTests(unittest.TestCase):
         self.assertIn("blocking", advice.sentence)
 
     def test_block_rule_on_an_inactive_profile_is_harmless(self):
-        status = interpret(payload([rule(), pairing_rule(), rule(action="Block", profile="Public", port="Any")]), EXE, PORT)
+        status = interpret(payload([rule(), pairing_rule(), pairing_tcp_rule(), rule(action="Block", profile="Public", port="Any")]), EXE, PORT)
         self.assertFalse(status.blocked)
         self.assertEqual(advise(status).action, "check")
 
@@ -116,7 +126,7 @@ class InterpretTests(unittest.TestCase):
         self.assertFalse(interpret(payload([rule(direction="Outbound")]), EXE, PORT).allowed)
 
     def test_any_profile_rule_covers_everything(self):
-        status = interpret(payload([rule(profile="Any"), pairing_rule(profile="Any")], [network("Public")]), EXE, PORT)
+        status = interpret(payload([rule(profile="Any"), pairing_rule(profile="Any"), pairing_tcp_rule(profile="Any")], [network("Public")]), EXE, PORT)
         self.assertTrue(status.covered)
         self.assertEqual(status.public_interfaces, ((5, "Wi-Fi"),))
         self.assertEqual(advise(status).action, "check")
@@ -128,7 +138,7 @@ class InterpretTests(unittest.TestCase):
     def test_public_hyper_v_switch_beside_private_wifi_is_not_the_lan(self):
         # A common setup: Wi-Fi Private with Internet, a vEthernet switch Public with none.
         networks = [network(), network("Public", alias="vEthernet (Hyper-V Switch)", index=31, ipv4="NoTraffic")]
-        status = interpret(payload([rule(), pairing_rule()], networks), EXE, PORT)
+        status = interpret(payload([rule(), pairing_rule(), pairing_tcp_rule()], networks), EXE, PORT)
         self.assertEqual(status.active_profiles, ("Private", "Public"))
         self.assertEqual(status.lan_profiles, ("Private",))
         self.assertTrue(status.covered)
@@ -162,23 +172,83 @@ class InterpretTests(unittest.TestCase):
 
 class RepairScriptTests(unittest.TestCase):
     def test_repair_never_opens_the_port_on_public(self):
-        rendered = firewall_win._REPAIR_SCRIPT.format(
-            exe=firewall_win._quote(EXE), filters=firewall_win._RULES_FOR_LEAF,
+        rendered = firewall_win._ADD_SCRIPT.format(
+            exe=firewall_win._quote(EXE),
             name=firewall_win._quote(firewall_win.RULE_NAME), port=PORT,
             pairing_name=firewall_win._quote(firewall_win.PAIRING_RULE_NAME), pairing_port=firewall_win.PAIRING_PORT,
+            pairing_tcp_name=firewall_win._quote(firewall_win.PAIRING_TCP_RULE_NAME),
             profiles="Private",
         )
         self.assertIn("-Profile Private ", rendered)
         self.assertNotIn("Public", rendered)
         self.assertIn(f"-Protocol TCP -LocalPort {PORT} ", rendered)
         self.assertIn(f"-Protocol UDP -LocalPort {firewall_win.PAIRING_PORT} ", rendered)
-        self.assertEqual(rendered.count("-Profile Private "), 2)
+        self.assertIn(f"-DisplayName 'Beamer Pairing (TCP-In)' -Direction Inbound -Protocol TCP -LocalPort {firewall_win.PAIRING_PORT} ", rendered)
+        self.assertEqual(rendered.count("-Profile Private "), 3)
+
+    def test_the_removal_never_runs_bare(self):
         # A bare Remove-NetFirewallRule deletes every rule on the machine.
+        rendered = firewall_win._REMOVE_SCRIPT.format(
+            exe=firewall_win._quote(EXE), filters=firewall_win._RULES_FOR_LEAF,
+            name=firewall_win._quote(firewall_win.RULE_NAME),
+            pairing_name=firewall_win._quote(firewall_win.PAIRING_RULE_NAME),
+            pairing_tcp_name=firewall_win._quote(firewall_win.PAIRING_TCP_RULE_NAME),
+        )
         self.assertNotIn("\nRemove-NetFirewallRule", rendered)
-        self.assertIn("if ($stale.Count -gt 0)", rendered)
+        self.assertIn("foreach ($rule in $stale)", rendered)
 
     def test_quote_doubles_single_quotes(self):
         self.assertEqual(firewall_win._quote("it's"), "'it''s'")
+
+
+NOT_FOUND = "Remove-NetFirewallRule : The requested object could not be found."
+
+
+class RepairToleratesAbsentRulesTests(unittest.TestCase):
+    """1.5.0-beta.2, fresh install on the rig (01-10-2026): a rule enumerated twice (once by its
+    program, once by its display name) is removed once and then "not found", which aborted repair
+    before any rule was written. A rule that is already gone is the state removal wants."""
+
+    def run_repair(self, remove_error=None):
+        calls = []
+
+        def fake(script, timeout=60.0):
+            calls.append(script)
+            if "Remove-NetFirewallRule" in script and remove_error is not None:
+                raise RuntimeError(remove_error)
+            return ""
+
+        with mock.patch.object(firewall_win, "_powershell", side_effect=fake):
+            firewall_win.repair(EXE, PORT)
+        return calls
+
+    def test_a_rule_already_gone_does_not_stop_the_new_rules_being_written(self):
+        calls = self.run_repair(NOT_FOUND)
+        self.assertEqual(sum("New-NetFirewallRule" in call for call in calls), 1)
+        self.assertEqual(calls[-1].count("New-NetFirewallRule"), 3)
+
+    def test_any_other_removal_failure_still_fails_and_writes_nothing(self):
+        calls = []
+
+        def fake(script, timeout=60.0):
+            calls.append(script)
+            raise RuntimeError("Access is denied.")
+
+        with mock.patch.object(firewall_win, "_powershell", side_effect=fake):
+            with self.assertRaisesRegex(RuntimeError, "Access is denied"):
+                firewall_win.repair(EXE, PORT)
+        self.assertFalse(any("New-NetFirewallRule" in call for call in calls))
+
+    def test_the_removal_script_removes_each_rule_once_and_tolerates_not_found(self):
+        removal = firewall_win._REMOVE_SCRIPT.format(
+            exe=firewall_win._quote(EXE), filters=firewall_win._RULES_FOR_LEAF,
+            name=firewall_win._quote(firewall_win.RULE_NAME),
+            pairing_name=firewall_win._quote(firewall_win.PAIRING_RULE_NAME),
+            pairing_tcp_name=firewall_win._quote(firewall_win.PAIRING_TCP_RULE_NAME),
+        )
+        self.assertIn("Sort-Object Name -Unique", removal)
+        self.assertIn("could not be found", removal)
+        self.assertNotIn("$stale | Remove-NetFirewallRule", removal)
 
 
 if __name__ == "__main__":
@@ -197,8 +267,18 @@ class PairingRuleTests(unittest.TestCase):
         self.assertEqual(advice.action, "repair")
         self.assertIn("pairing beacon", advice.sentence)
 
-    def test_both_rules_present_is_all_clear(self):
+    def test_a_missing_pairing_rule_is_one_this_app_may_add_by_itself(self):
+        # An upgrade from 1.4.x has the receiver and the UDP rule and no TCP one: the first code shown
+        # would otherwise make Windows ask, and a click on Allow writes rules for public networks too.
         status = interpret(payload([rule(), pairing_rule()]), EXE, PORT)
+        self.assertTrue(firewall_win.missing_rule(status))
+        whole = interpret(payload([rule(), pairing_rule(), pairing_tcp_rule()]), EXE, PORT)
+        self.assertFalse(firewall_win.missing_rule(whole))
+        blocked = interpret(payload([rule(action="Block")]), EXE, PORT)
+        self.assertFalse(firewall_win.missing_rule(blocked))
+
+    def test_both_rules_present_is_all_clear(self):
+        status = interpret(payload([rule(), pairing_rule(), pairing_tcp_rule()]), EXE, PORT)
         self.assertTrue(status.pairing_allowed)
         advice = advise(status)
         self.assertEqual(advice.action, "check")
@@ -212,6 +292,30 @@ class PairingRuleTests(unittest.TestCase):
         wrong = rule(port=str(firewall_win.PAIRING_PORT))
         status = interpret(payload([rule(), wrong]), EXE, PORT)
         self.assertFalse(status.pairing_allowed)
+
+    def test_pairing_rules_without_the_tcp_one_is_reported_and_repairable(self):
+        # Installs from before pairing version 3 have the UDP beacon rule and not the TCP exchange.
+        status = interpret(payload([rule(), pairing_rule()]), EXE, PORT)
+        self.assertTrue(status.pairing_allowed)
+        self.assertFalse(status.pairing_tcp_allowed)
+        advice = advise(status)
+        self.assertEqual(advice.action, "repair")
+        self.assertIn(f"TCP {firewall_win.PAIRING_PORT}", advice.sentence)
+        self.assertNotIn("UDP", advice.sentence)
+
+    def test_both_pairing_rules_missing_names_both(self):
+        advice = advise(interpret(payload([rule()]), EXE, PORT))
+        self.assertIn(f"UDP {firewall_win.PAIRING_PORT}", advice.sentence)
+        self.assertIn(f"TCP {firewall_win.PAIRING_PORT}", advice.sentence)
+
+    def test_a_disabled_or_udp_pairing_tcp_rule_does_not_count(self):
+        for wrong in (pairing_tcp_rule(enabled="False"), {**pairing_tcp_rule(), "protocol": "UDP"}):
+            status = interpret(payload([rule(), pairing_rule(), wrong]), EXE, PORT)
+            self.assertFalse(status.pairing_tcp_allowed)
+
+    def test_a_pairing_tcp_block_is_not_an_allow(self):
+        status = interpret(payload([rule(), pairing_rule(), pairing_tcp_rule(action="Block")]), EXE, PORT)
+        self.assertFalse(status.pairing_tcp_allowed)
 
     def test_a_missing_tcp_rule_is_reported_before_the_pairing_rule(self):
         # Input not arriving at all is the bigger problem; one button fixes both.

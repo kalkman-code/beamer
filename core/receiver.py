@@ -1,7 +1,13 @@
-"""Threaded TCP receiver and ACK watchdog for the Windows tray app."""
+"""The responder: the listener every machine runs for the links its peers open to it.
+`LinkResponder` speaks wire version 6 (WIRE.md) for any number of peers, with one owner at a
+time; an older Beamer is answered only far enough to be told to update."""
 
+import collections
+import copy
+import functools
+import hmac
+import ipaddress
 import logging
-import math
 import socket
 import sys
 import threading
@@ -10,15 +16,12 @@ from enum import Enum
 from typing import Callable, Optional, Tuple
 
 from . import return_edge as crossing
+from . import peerlist
 from . import protocol
 
 
 LOGGER = logging.getLogger(__name__)
-# `config` throughout is whichever settings object the app on this side keeps.
-# Only `port` and `auth_token` are ever read from it, and the two apps' classes
-# are unrelated types, so it is not annotated or imported here -- importing one
-# app's config module would stop this file being the other app's as well.
-# The longest an idle link goes without an ACK, so the Mac's watchdog keeps
+# The longest an idle link goes without an ACK, so the initiator's watchdog keeps
 # seeing a heartbeat when nothing is being typed.
 ACK_IDLE_SECONDS = 0.4
 # How long an ACK waits after input arrives, batching a burst into one reply.
@@ -27,15 +30,13 @@ ACK_IDLE_SECONDS = 0.4
 # which a 400ms timer did not -- every reading carried up to 400ms of waiting
 # that was never network latency.
 ACK_COALESCE_SECONDS = 0.015
-HELLO_TIMEOUT_SECONDS = 5.0
-SESSION_READ_TIMEOUT_SECONDS = 2.5
 LOCK_CHECK_SECONDS = 0.5
 INJECTION_ERROR_STATUS_INTERVAL_SECONDS = 5.0
 # Windows hands the port back only when whatever holds it lets go — WinNAT's
 # dynamic reservations move on every reboot and can land on ours — so a bind
 # that fails is waited out rather than ending the listener.
 BIND_RETRY_SECONDS = 5.0
-# Connections still inside the handshake. Each is bounded to HELLO_TIMEOUT_SECONDS as a whole,
+# Connections still inside the handshake. Each is bounded to HANDSHAKE_SECONDS as a whole,
 # so a stranger holding these slots loses them within seconds, while the real peer's handshake
 # takes milliseconds and always finds one free.
 MAX_PENDING_CONNECTIONS = 4
@@ -46,31 +47,6 @@ class ServerState(Enum):
     WAITING = "Waiting"
     CONNECTED = "Connected"
     ERROR = "Error"
-
-
-class ProcessedSequence:
-    def __init__(self) -> None:
-        self._lock = threading.Lock()
-        self._latest = 0
-        self._fallback = 0
-
-    def record(self, message: dict) -> int:
-        data = message.get("data", {})
-        raw_sequence = message.get("seq")
-        if raw_sequence is None and isinstance(data, dict):
-            raw_sequence = data.get("seq")
-        with self._lock:
-            if isinstance(raw_sequence, int) and not isinstance(raw_sequence, bool) and raw_sequence >= 0:
-                self._latest = max(self._latest, raw_sequence)
-                self._fallback = max(self._fallback, self._latest)
-            else:
-                self._fallback = max(self._fallback, self._latest) + 1
-                self._latest = self._fallback
-            return self._latest
-
-    def latest(self) -> int:
-        with self._lock:
-            return self._latest
 
 
 class InputScale:
@@ -103,175 +79,491 @@ class InputScale:
         return dy * self.scroll * sign, dx * self.scroll * sign
 
 
-def handle_message(message: dict, injector=None, scale: Optional[InputScale] = None) -> bool:
-    """Inject one input event. `injector` defaults to the real input_injector
-    module, imported lazily here (not at module load) so receiver.py stays
-    importable — and its non-injection logic testable — on a machine without
-    ctypes.windll. The Mac copy of this file is handed its own injector at
-    construction and never reaches that import. Tests can pass a fake
-    injector directly."""
-    if injector is None:
-        import input_injector as injector
-    if not isinstance(message, dict):
-        raise protocol.ProtocolError("message body must be a JSON object")
-    message_type = message.get("type")
-    data = message.get("data", {})
-    if not isinstance(data, dict):
-        raise protocol.ProtocolError("message data must be a JSON object")
-    if message_type == protocol.MSG_KEYDOWN:
-        injector.inject_key(data["key"], down=True, us=data.get("us"))
-    elif message_type == protocol.MSG_KEYUP:
-        injector.inject_key(data["key"], down=False, us=data.get("us"))
-    elif message_type == protocol.MSG_MOUSEMOVE:
-        dx, dy = int(data["dx"]), int(data["dy"])
-        if scale is not None and (dx or dy):
-            dx, dy = scale.move(dx, dy)
-            if not (dx or dy):
-                return True
-        injector.inject_mouse_move(dx, dy)
-    elif message_type == protocol.MSG_MOUSEDOWN:
-        injector.inject_mouse_button(data["button"], down=True)
-    elif message_type == protocol.MSG_MOUSEUP:
-        injector.inject_mouse_button(data["button"], down=False)
-    elif message_type == protocol.MSG_SCROLL:
-        dy, dx = data["dy"], data.get("dx", 0)
-        if scale is not None:
-            dy, dx = scale.wheel(dy, dx)
-        injector.inject_scroll(dy, dx, data.get("mode", "line"))
-    elif message_type == protocol.MSG_GESTURE:
-        injector.inject_gesture(data["name"])
-    else:
-        LOGGER.warning("Unknown message type ignored: %r", message_type)
+def _close_socket(sock: Optional[socket.socket]) -> None:
+    if sock is None:
+        return
+    try:
+        sock.shutdown(socket.SHUT_RDWR)
+    except OSError:
+        pass
+    try:
+        sock.close()
+    except OSError:
+        pass
+
+
+# The handshake's bounds, from the moment a connection is accepted (section 2).
+PREAMBLE_SECONDS = 1.0
+HANDSHAKE_SECONDS = 5.0
+# How long an answer that ends a connection waits for the peer's bytes, so the answer is not lost to
+# a reset; and how many such drains run at once. A drain holds no handshake slot, so under a flood
+# of older peers the ones past the cap are closed without one rather than each costing a thread.
+DRAIN_SECONDS = 1.0
+MAX_DRAINS = 8
+# Threads for connections not yet authenticated, drains included. A connection past it is closed at
+# once, without a thread or a slot: a flood of connections must not become a flood of threads.
+MAX_HANDSHAKE_THREADS = 32
+# A frame goes out in pieces of this, each bounded by the link's timeout, so a large clipboard to a
+# slow but working peer keeps going while bytes move (section 3, liveness).
+SEND_CHUNK = 64 * 1024
+# No byte at all for this long ends a link (section 3, liveness).
+LINK_READ_TIMEOUT_SECONDS = 2.5
+# A send-home the owner does not obey within this ends its ownership by force, and after either the
+# initiator is refused `sent_home` for SENT_HOME_SECONDS (section 4).
+FORCED_END_SECONDS = 1.0
+SENT_HOME_SECONDS = 5.0
+# Frames waiting to go to one peer. A peer that stops reading is closed at this, rather than let a
+# queue grow without end; it is well past anything a working link queues between two writes.
+OUTBOX_LIMIT = 512
+
+ADMITTED = "admitted"
+FIRST_LINK = "first_link"
+FOLDED = "folded"
+WRONG_ID = "wrong_id"
+GONE = "gone"
+
+_DROPPED_TEXT = frozenset(chr(code) for code in list(range(0x00, 0x20)) + list(range(0x7F, 0xA0))) - {"\n", "\t"}
+_TEXT_KEYS = {"\n": "enter", "\t": "tab"}
+
+
+def learnable_host(address, port) -> bool:
+    """Whether a link from `address`, whose `hello` gave `port`, teaches the peer's `host`: never
+    for a peer that accepts no links, nor from a loopback or link-local address (section 2)."""
+    if port == 0:
         return False
-    return True
+    try:
+        ip = ipaddress.IPv4Address(address)
+    except ValueError:
+        return False
+    return not (ip.is_loopback or ip.is_link_local)
 
 
-class ReceiverServer:
+def ack_due(last_ack_at: float, pending_since: Optional[float]) -> float:
+    """When the next `ack` goes, timed from the last (section 9): input dealt with 15 ms or more after
+    it at once, input sooner 15 ms after it, and with none a heartbeat 0.4 seconds after it."""
+    if pending_since is None:
+        return last_ack_at + ACK_IDLE_SECONDS
+    return max(pending_since, last_ack_at + ACK_COALESCE_SECONDS)
+
+
+def text_runs(text: str) -> list:
+    """`text` as the injector types it (section 10): runs of characters, with each `\\n` and `\\t`
+    its own run, and the other control characters dropped."""
+    runs, current = [], []
+    for char in text:
+        if char in _TEXT_KEYS:
+            if current:
+                runs.append("".join(current))
+                current = []
+            runs.append(char)
+        elif char not in _DROPPED_TEXT:
+            current.append(char)
+    if current:
+        runs.append("".join(current))
+    return runs
+
+
+def corner_offset(corner: str, edge: str) -> float:
+    """Where a corner zone lands the pointer on the edge it crosses: the end nearest the corner,
+    0.0 for a top or left end and 1.0 for a bottom or right one (section 8)."""
+    vertical, horizontal = corner.split("_")
+    if edge in ("left", "right"):
+        return 0.0 if vertical == "top" else 1.0
+    return 0.0 if horizontal == "left" else 1.0
+
+
+def zone_models(zones, peers, allowed, resistance_px: int, notch_span=None) -> list:
+    """[(peer id, model)] for this machine's zones (section 8) that lead to a peer in `allowed`, at
+    `resistance_px`, in the order they are checked: corners, then edges, then parts, then the notch.
+    `peers` are the settings' peer entries, for each peer's `side`; `notch_span` is the Mac's
+    `SpanEdge` span, and without it a notch zone is left out. Zones that are off, name no learnt
+    peer, or do not fit their kind are left out."""
+    sides = {}
+    for peer in peers or ():
+        ident = protocol.read_id(peer.get("id")) if isinstance(peer, dict) else None
+        if ident is not None:
+            sides[ident] = peer.get("side")
+    found = {"corner": [], "edge": [], "part": [], "notch": []}
+    for zone in zones or ():
+        if not isinstance(zone, dict) or zone.get("off") is True:
+            continue
+        peer = protocol.read_id(zone.get("peer"))
+        if peer is None or peer not in allowed:
+            continue
+        kind, side = zone.get("kind"), sides.get(peer)
+        try:
+            if kind == "edge" and side in crossing.EDGES:
+                model = crossing.ReturnEdge(side, resistance_px)
+            elif kind == "part" and side in crossing.EDGES and isinstance(zone.get("parts"), list):
+                model = crossing.PartEdge(side, [part for part in zone["parts"] if isinstance(part, str)], resistance_px)
+            elif kind == "corner" and isinstance(zone.get("corner"), str) and zone.get("edge") in zone["corner"].split("_"):
+                model = crossing.CornerPush(zone["corner"], zone["edge"], resistance_px)
+            elif kind == "notch" and notch_span is not None:
+                model = crossing.SpanEdge("top", notch_span, resistance_px)
+            else:
+                continue
+        except ValueError:
+            continue
+        found[kind].append((peer, model))
+    return found["corner"] + found["edge"] + found["part"] + found["notch"]
+
+
+def zone_stretch(zone: dict, sides: dict) -> set:
+    """The stretch of screen a zone covers, for section 8's rule that two zones in use never cover
+    the same one: an `edge` zone its peer's side, a `part` zone the chosen thirds of it, a `corner`
+    zone its corner; a notch, and a zone whose peer has no side, cover none. `sides` maps a zone's
+    `peer` text to that peer's `side`."""
+    kind, side = zone.get("kind"), sides.get(zone.get("peer"), "")
+    if kind == "corner" and zone.get("corner") in crossing.CORNERS:
+        return {("corner", zone["corner"])}
+    if kind == "edge" and side in crossing.EDGES:
+        return {(side, part) for part in crossing.PARTS}
+    if kind == "part" and side in crossing.EDGES and isinstance(zone.get("parts"), list):
+        return {(side, part) for part in zone["parts"] if part in crossing.PARTS}
+    return set()
+
+
+@functools.lru_cache(maxsize=128)
+def _key_id_of(token) -> Optional[bytes]:
+    # Only for a token made by pairing: a key id is an offline test of its token (section 2).
+    return protocol.key_id(token) if protocol.is_paired_token(token) else None
+
+
+def _entry_key_id(entry) -> Optional[bytes]:
+    token = entry.get("token") if isinstance(entry, dict) else None
+    return _key_id_of(token) if isinstance(token, str) else None
+
+
+class HandshakeSlots:
+    """The connections still in their handshakes: at most `limit`, and one per address. Taking a
+    slot for an address that holds one displaces that connection; taking one when all are held
+    displaces the oldest. The caller closes what `take` returns. Not locked: the responder is."""
+
+    def __init__(self, limit: int = MAX_PENDING_CONNECTIONS) -> None:
+        self._limit = limit
+        self._held = collections.OrderedDict()
+
+    def take(self, host, connection):
+        displaced = self._held.pop(host, None)
+        if displaced is None and len(self._held) >= self._limit:
+            _, displaced = self._held.popitem(last=False)
+        self._held[host] = connection
+        return displaced
+
+    def free(self, host, connection) -> None:
+        if self._held.get(host) is connection:
+            del self._held[host]
+
+    def __len__(self) -> int:
+        return len(self._held)
+
+
+class PeerBook:
+    """The peers list as the link reads and writes it: WIRE.md section 1's settings, through the
+    app's own `load` (the settings as held in memory, a dict with `peers` and `zones`) and `save`
+    (given a changed copy, which it writes atomically and keeps). `lock` is held around every
+    read-check-write here; the app holds it too around its own changes to the peers, so an id
+    learnt here and a peer removed there cannot cross. Neither the responder nor this ever takes
+    the responder's lock while holding this one."""
+
+    def __init__(self, load: Callable[[], dict], save: Callable[[dict], None], lock=None) -> None:
+        self._load = load
+        self._save = save
+        self.lock = lock if lock is not None else threading.RLock()
+
+    def peers(self) -> list:
+        with self.lock:
+            return copy.deepcopy(list((self._load() or {}).get("peers") or []))
+
+    def zones(self) -> list:
+        """The zones as the settings hold them, a copy."""
+        with self.lock:
+            return copy.deepcopy(list((self._load() or {}).get("zones") or []))
+
+    def store_paired(self, peer: str, ids: list) -> None:
+        """Keep, with the entry whose id is `peer` (a `b64`), the ids it said it is paired with
+        (`paired`, WIRE.md section 3); saved only when the list changed."""
+        with self.lock:
+            settings = copy.deepcopy(self._load() or {})
+            entry = next((item for item in settings.get("peers") or [] if item.get("id") == peer), None)
+            if entry is None or entry.get("paired_with") == ids:
+                return
+            entry["paired_with"] = list(ids)
+            self._save(settings)
+
+    def find(self, key_id: bytes) -> Optional[dict]:
+        """The entry, a copy, whose token (one made by pairing) has `key_id`."""
+        for entry in self.peers():
+            found = _entry_key_id(entry)
+            if found is not None and hmac.compare_digest(found, key_id):
+                return entry
+        return None
+
+    def admit(self, key_id: bytes, own_id: bytes, peer_id: bytes, changes: dict):
+        """Section 2's id checks for a link under `key_id` whose first frame named `peer_id`, and on
+        success the entry's update from it, in one step under the lock: `(outcome, entry)`.
+        WRONG_ID when `peer_id` is this machine's own or is not the entry's; GONE when no entry has
+        the key id any longer; FIRST_LINK when the entry migrated from 1.4.x (id "") learnt its id
+        here (its zones are rewritten to name it); FOLDED when the migrated entry's link named
+        another entry's id, so that machine was paired again since the upgrade: the migrated entry
+        is dropped into that one (`fold`) and `entry` is that one; ADMITTED otherwise. `changes`
+        and `linked` are applied and saved when they change anything."""
+        with self.lock:
+            settings = copy.deepcopy(self._load() or {})
+            peers = settings.get("peers") or []
+            entry = next((p for p in peers if _entry_key_id(p) is not None and hmac.compare_digest(_entry_key_id(p), key_id)), None)
+            if entry is None:
+                return GONE, None
+            text = protocol.id_text(peer_id)
+            first = not entry.get("id")
+            if peer_id == own_id:
+                return WRONG_ID, None
+            if not first and entry.get("id") != text:
+                return WRONG_ID, None
+            if first:
+                other = next((p for p in peers if p is not entry and p.get("id") == text), None)
+                if other is not None:
+                    # Only into a desktop of the platform 1.4.x paired: a phone never had a 1.4.x
+                    # pairing, and a machine of another platform is not the one it was.
+                    if not other.get("port") or other.get("platform") != entry.get("platform"):
+                        return WRONG_ID, None
+                    fold(settings, entry, other)
+                    self._save(settings)
+                    return FOLDED, dict(copy.deepcopy(other), folded=copy.deepcopy(entry))
+            before = copy.deepcopy(entry)
+            entry.update(changes)
+            entry["linked"] = True
+            if first:
+                entry["id"] = text
+                for zone in settings.get("zones") or ():
+                    if isinstance(zone, dict) and zone.get("peer") == "":
+                        zone["peer"] = text
+            if entry != before:
+                self._save(settings)
+            return (FIRST_LINK if first else ADMITTED), copy.deepcopy(entry)
+
+
+def fold(settings: dict, migrated: dict, into: dict) -> None:
+    """Drops the entry migrated from 1.4.x (`migrated`, id "") into `into`, the entry of the same
+    machine paired again since: only that machine holds the 1.4.x token, so a link under it that
+    names `into`'s id is that machine (section 2, step 8). The migrated entry goes; `into` takes
+    its side when it has never had one (`side_set_at` 0); each of its zones moves to `into` unless
+    `into` has one of that kind already, which wins; and one pass over the zones in use, other
+    peers' first, then `into`'s own, then the moved ones, turns off any that would cover a stretch
+    already covered (section 8), so the list stays one the apps will save. Changes `settings` in
+    place."""
+    text = into["id"]
+    settings["peers"] = [peer for peer in settings.get("peers") or [] if peer is not migrated]
+    if not into.get("side") and not into.get("side_set_at") and migrated.get("side") in crossing.EDGES:
+        into.update(side=migrated["side"], side_set_at=migrated.get("side_set_at", 0), side_by=migrated.get("side_by", ""))
+    kinds = {zone.get("kind") for zone in settings.get("zones") or [] if isinstance(zone, dict) and zone.get("peer") == text}
+    zones, moved = [], []
+    for zone in settings.get("zones") or []:
+        if isinstance(zone, dict) and zone.get("peer") == "":
+            if zone.get("kind") in kinds:
+                continue
+            zone["peer"] = text
+            kinds.add(zone.get("kind"))
+            moved.append(zone)
+        zones.append(zone)
+    settings["zones"] = zones
+    sides = {peer.get("id"): peer.get("side", "") for peer in settings["peers"]}
+    dicts = [zone for zone in zones if isinstance(zone, dict)]
+    own = [zone for zone in dicts if zone.get("peer") == text and not any(zone is other for other in moved)]
+    others = [zone for zone in dicts if zone.get("peer") != text]
+    covered = set()
+    for zone in others + own + moved:
+        if zone.get("off") is True:
+            continue
+        stretch = zone_stretch(zone, sides)
+        if stretch & covered:
+            zone["off"] = True
+        else:
+            covered |= stretch
+
+
+class _Link:
+    """One authenticated link an initiator opened to this machine. Its reader thread deals with
+    what arrives; its writer thread sends everything that goes out, in order (the `outbox`) and
+    the `ack`s when they are due, so nothing that holds the responder's lock ever waits on a
+    socket."""
+
+    def __init__(self, sock, session, peer_id, key_id, host, name, caps, own_id, own_caps, allow_drive) -> None:
+        self.sock = sock
+        self.session = session
+        self.peer_id = peer_id
+        self.key_id = key_id
+        self.host = host
+        self.name = name
+        self.caps = frozenset(caps)
+        self.own_id = own_id
+        self.own_caps = frozenset(own_caps)
+        self.allow_drive = allow_drive
+        self.route = 0              # the last route accepted on this link
+        self.held = {}              # ("key" or "button", name): `us`, what the owner holds down here
+        self.closed = threading.Event()
+        self.cond = threading.Condition()
+        self.outbox = collections.deque()
+        self.dealt = 0              # the highest seq dealt with
+        self.dealt_at = 0.0
+        self.pending_since = None   # when the first input not yet acknowledged was dealt with
+        self.acked = 0
+        self.last_ack_at = time.monotonic()
+        self.input_error_at = float("-inf")  # when an injection error last reached the status
+
+    def post(self, message: dict) -> bool:
+        with self.cond:
+            if self.closed.is_set():
+                return False
+            if len(self.outbox) >= OUTBOX_LIMIT:
+                LOGGER.warning("%s stopped reading; closing its link", self.name)
+                self._close_locked()
+                return False
+            self.outbox.append(message)
+            self.cond.notify()
+            return True
+
+    def dealt_with(self, seq: int) -> None:
+        with self.cond:
+            if seq <= self.dealt:
+                return
+            now = time.monotonic()
+            self.dealt, self.dealt_at = seq, now
+            if self.pending_since is None:
+                self.pending_since = now
+            self.cond.notify()
+
+    def close(self) -> None:
+        with self.cond:
+            self._close_locked()
+
+    def _close_locked(self) -> None:
+        self.closed.set()
+        self.cond.notify_all()
+        try:
+            self.sock.shutdown(socket.SHUT_RDWR)
+        except OSError:
+            pass
+
+
+class LinkResponder:
+    """Wire version 6's responder (WIRE.md sections 2 to 5, 9 and 10): accepts links from every
+    paired peer on one port, keeps one link per peer id, and at most one owner, whose input alone
+    is injected. Nothing in it knows which platform it runs on; everything platform-shaped is
+    handed in.
+
+    - `book`: a PeerBook over the app's settings.
+    - `identity()`: this machine as its `welcome` says it, a dict of `id` (16 bytes), `name`,
+      `platform`, `app`, `caps` and optionally `hw`; read at each handshake.
+    - `injector`, `desktop`, `clipboard`, `unlock`: the platform modules.
+      The injector also needs `inject_text(chars)` for the `text` capability. The clipboard needs
+      `get_contents()`, `set_contents(text, image)` and `change_stamp()`, a value that changes
+      whenever the clipboard does; without it, a machine let go never sends its clipboard.
+      `unlock` is Windows' lock-screen module, or None.
+    - `hardware(host)`: this machine's address on the interface that reaches `host`, asked for each
+      link's own address so the `welcome` gives every peer the address its wake-on-LAN must go to;
+      without it, the `identity()`'s `hw` is sent as it stands.
+    - `away()`: whether this machine's own input is on another machine (owner.Owner.away), which
+      refuses a take as `busy`. Called under the responder's lock, so a plain read that never
+      blocks. The app sets `away` before it sends a take and then reads `driven`; if that is true,
+      a take here won the race and the app's input goes home.
+    - `zones()`: this machine's zones as settings.json keeps them; `notch_span`: the Mac's notch
+      span for SpanEdge, or None.
+
+    Callbacks, each on a link's thread, never with the responder's lock held, each by peer id:
+    `owner_callback(peer or None)` when ownership begins or ends, always in the order it did; `arrival_callback(edge, x, y)`
+    and `pressure_callback(edge, pressure, crossed, part)` for the crossing effects;
+    `arrangement_callback(peer, {edge, set_at, by})`; `settings_callback(peer, data)`, only from a
+    peer whose `caps` list `settings`; `paired_callback(peer, ids)`; `notice_callback(text)` for the
+    one-time notice when a migrated pairing learns its peer; `link_callback(peer, up)`; and
+    `announce(peer)`, the messages to send once a link is up (section 3, announcements).
+    `status_callback(state, detail)` takes ServerState.
+
+    The app calls `peers_changed()` after every change to the peers (a removal closes that peer's
+    links; `allow_drive` sends `accepts` and, turned off, ends that peer's ownership), `rearm()`
+    after a change to the zones, and `send_home()` to send the owner home from here."""
+
     def __init__(
         self,
+        book: PeerBook,
+        identity: Callable[[], dict],
+        *,
         status_callback: Callable[[ServerState, str], None],
+        injector=None,
+        desktop=None,
         clipboard=None,
         unlock=None,
-        desktop=None,
-        pressure_callback: Optional[Callable[[str, float, bool, Optional[str]], None]] = None,
-        injector=None,
-        focus_callback: Optional[Callable[[str], None]] = None,
-        peer_callback: Optional[Callable[[str, Optional[str], Optional[int]], None]] = None,
-        arrangement_callback: Optional[Callable[[str, int], None]] = None,
-        arrival_callback: Optional[Callable[[str, int, int], None]] = None,
-        self_name: str = "PC",
-        peer_name: str = "Mac",
-        self_target: str = "windows",
-        peer_target: str = "mac",
+        hardware: Optional[Callable[[str], Optional[str]]] = None,
+        away: Optional[Callable[[], bool]] = None,
+        zones: Optional[Callable[[], list]] = None,
+        notch_span=None,
+        owner_callback=None,
+        arrival_callback=None,
+        pressure_callback=None,
+        arrangement_callback=None,
+        settings_callback=None,
+        paired_callback=None,
+        notice_callback=None,
+        link_callback=None,
+        announce=None,
     ) -> None:
-        # One module serves both machines. Everything
-        # platform-shaped is handed in -- the injector, clipboard, desktop
-        # geometry and unlock modules, the two names that appear in status
-        # text, and the two wire target words -- so nothing below knows which
-        # side it is running on. `focus_callback(target)` fires on every focus
-        # message, which is how the app that owns this receiver knows input
-        # has arrived or gone home -- and once more with the peer's own target
-        # when the link that brought input here ends before the peer has
-        # taken it back, because the peer fails open on its side and the
-        # message saying so never reaches a dead socket.
-        self._injector = injector
-        # This machine's speed for the peer's pointer and scroll; the owner replaces it when its
-        # settings change. Read once per message on the session thread.
-        self.input_scale: Optional[InputScale] = None
-        # Whether this machine's edges are held (Pause crossing, a full-screen app). A hold is
-        # about this screen, so it stops the peer's pointer going home through it as well as this
-        # machine's own; the peer's shortcut still switches. Read on the session thread.
-        self.edges_held: Callable[[], bool] = lambda: False
-        # `return_model(edge, resistance)` builds the way home the peer named from this machine's
-        # own ways in: the whole edge, only its chosen thirds, its corner, or None for no way home
-        # by the pointer. The edges on a screen follow that machine's settings, whoever's pointer
-        # pushes; without an owner's answer the whole edge is armed.
-        self.return_model: Optional[Callable[[str, int], Optional[crossing.ReturnEdge]]] = None
-        self._focus_callback = focus_callback
-        self._peer_driving = False
-        # `peer_callback(host, return_edge, resistance_px)` fires once per
-        # authenticated connection, with the peer's address and the way home
-        # its hello carried. It is how the machine on this side learns which
-        # border to push out across without anyone configuring it twice --
-        # the way home from there is the way out from here.
-        self._peer_callback = peer_callback
-        # `arrangement_callback(mac_edge, set_at)` fires when the peer says
-        # where the two machines are in relation to each other. Either end may
-        # change it, so this is how the change arrives at the end that did not
-        # make it.
-        self._arrangement_callback = arrangement_callback
-        # Same on both machines (settings_sync). `settings_callback(data)` fires on the session
-        # thread for each settings message; `announce()` returns the messages this end sends the
-        # moment a peer has authenticated -- its stamped arrangement and its settings -- so a
-        # change made while nobody was connected still reaches the other end; `peer_settings` is
-        # whether the latest peer's hello said it keeps settings in step, None before any.
-        self.settings_callback: Optional[Callable[[dict], None]] = None
-        self.announce: Callable[[], list] = lambda: []
-        self.peer_settings: Optional[bool] = None
-        # `arrival_callback(edge, x, y)` fires on the session thread each time
-        # a crossing lands the pointer here, with the edge it came in by and
-        # where it was placed, in the desktop module's coordinates, and with
-        # edge None and wherever the pointer is when input comes here by a
-        # switch instead. It is how the owner plays its arrival effect; the
-        # owner marshals it.
-        self._arrival_callback = arrival_callback
-        self._self_name = self_name
-        self._peer_name = peer_name
-        self._self_target = self_target
-        self._peer_target = peer_target
+        self._book = book
+        self._identity = identity
         self._status_callback = status_callback
-        # `desktop` defaults to the real desktop_win module, imported lazily for
-        # the same reason as `clipboard` below. `pressure_callback(edge,
-        # pressure, crossed, part)` is called on the session thread as the
-        # pointer is pushed against the return edge, `part` the third or corner
-        # pushed when the way home is only those; the GUI marshals it to the glow.
+        self._injector = injector
         self._desktop = desktop
-        self._pressure_callback = pressure_callback
-        # The way home. Armed by every focus{target:"windows"} the Mac sends,
-        # which carries the return edge and resistance, and None until then.
-        self._return_edge: Optional[crossing.ReturnEdge] = None
-        # The edge and resistance that focus named, kept so a settings change can rebuild the way
-        # home (`rearm_return`) without waiting for the next focus.
-        self._named_return: Optional[tuple] = None
-        # Held while the session thread feeds the way home and while a settings change rebuilds it,
-        # so a rebuild never revives a way home that was just pushed through or handed back.
-        self._return_lock = threading.RLock()
-        # `unlock` defaults to the real unlock_win module, imported lazily for
-        # the same reason as `clipboard` below.
+        self._clipboard = clipboard
         self._unlock = unlock
-        # Set while a lock-screen unlock is in flight. Input that arrives in
-        # that window is dropped rather than queued: an unlock takes several
-        # seconds, and replaying seconds of stale mouse moves and keystrokes
-        # onto the desktop the moment it appears is worse than losing them.
+        self._hardware = hardware
+        self._away = away or (lambda: False)
+        self._zones = zones or (lambda: [])
+        self._notch_span = notch_span
+        self._callbacks = {
+            "owner": owner_callback, "arrival": arrival_callback, "pressure": pressure_callback,
+            "arrangement": arrangement_callback, "settings": settings_callback, "paired": paired_callback,
+            "notice": notice_callback, "link": link_callback,
+        }
+        self._announce = announce or (lambda peer: [])
+        # This machine's speed for a peer's pointer and scroll, and whether
+        # its edges are held (Pause crossing, a full-screen app), which keeps the zones from firing.
+        self.input_scale: Optional[InputScale] = None
+        self.edges_held: Callable[[], bool] = lambda: False
+        # One lock for the links, the owner and everything the owner decides. Held while the owner's
+        # input is injected, so an ownership ending on another thread cannot release keys between
+        # the check and the press. Never held while calling the app, or across a socket write.
+        self._lock = threading.RLock()
+        self._slots = HandshakeSlots()
+        self._drains = 0
+        self._handshaking = 0               # threads for connections not yet authenticated
+        self._links = {}                    # peer id: _Link
+        self._owner: Optional[_Link] = None
+        self._claiming: Optional[_Link] = None  # a take being decided, visible before `away` is read
+        self._visit = 0                     # raised each time an ownership begins
+        self._generation = 0                # raised on every change to the peers or the zones
+        self._reach = frozenset()
+        self._resistance = protocol.DEFAULT_RESISTANCE_PX
+        self._armed = []                    # [(peer id, model)] while the zones are live
+        self._zones_live = False
+        self._sent_home_at = {}             # peer id: when it was sent home or ended by force
+        self._forced = None                 # the forced end's timer after a send-home
+        self._clipboard_mark = None         # the clipboard's change stamp when this owner's visit began
+        # Ownership changes for owner_callback, queued under the lock and delivered in order, one
+        # thread at a time, so the app never hears an end after the next owner's beginning.
+        self._owner_events = collections.deque()
+        self._notify_lock = threading.RLock()
         self._unlocking = threading.Event()
-        # When the console was last tested for the lock screen and first seen on it while the peer
-        # drives this PC, and whether its input has been sent home for that lock. See
-        # _home_if_locked.
+        self._arriving_visit = None         # the visit whose pointer is landing and unlock not yet asked
         self._lock_checked_at = float("-inf")
         self._locked_since = None
         self._sent_home_for_lock = False
-        # Set from the moment a focus brings the peer's input here until the unlock it may need
-        # has been asked for, so the lock check cannot act in between. See _handle_focus.
-        self._arriving = threading.Event()
-        # `clipboard` defaults to the real clipboard_win module, imported
-        # lazily (not at module load) so receiver.py stays importable -- and
-        # its non-clipboard logic testable -- on a machine without
-        # ctypes.windll, e.g. this Mac. Tests can pass a fake directly, the
-        # same way handle_message's `injector` argument works.
-        self._clipboard = clipboard
-        self._lock = threading.RLock()
+        self._connections = set()
         self._thread: Optional[threading.Thread] = None
         self._stop_event: Optional[threading.Event] = None
         self._listener: Optional[socket.socket] = None
-        self._client: Optional[socket.socket] = None
-        # The live session per connection, so a message can be sent to the
-        # client from outside its own thread -- which is what an arrangement
-        # changed in the window needs.
-        self._sessions: dict = {}
-        self._connections: set = set()
-        self._pending = 0
-        self._session_generation = 0
+        self._port = None
         self._requested_running = False
+
+    # The listener
 
     @property
     def listening(self) -> bool:
@@ -279,458 +571,886 @@ class ReceiverServer:
             return self._requested_running and self._thread is not None and self._thread.is_alive()
 
     @property
-    def return_edge(self) -> Optional[str]:
-        """The Windows edge the Mac last named as the way home, or None."""
-        model = self._return_edge
-        return model.edge if model is not None else None
+    def owner(self) -> Optional[bytes]:
+        link = self._owner
+        return link.peer_id if link is not None else None
 
     @property
-    def return_resistance(self) -> Optional[int]:
-        """How many pixels of push the Mac last asked for at the return edge, or None."""
-        model = self._return_edge
-        return model.resistance_px if model is not None else None
+    def driven(self) -> bool:
+        """True from the moment a take is being decided, before `away()` is read, until the take is
+        refused or the ownership it began ends. The app sends its own input elsewhere by setting
+        `away` first and reading this after: whichever of the two moves second sees the other, so
+        a machine is never driven and driving at once (section 4). A plain read, never the lock: the
+        hook thread asks it, and the lock is held while the owner's input is injected, which on
+        Windows waits for that same thread's hook."""
+        return self._claiming is not None or self._owner is not None
 
-    def start(self, config) -> None:
+    def links(self) -> set:
+        with self._lock:
+            return set(self._links)
+
+    def caps_of(self, peer: bytes) -> Optional[frozenset]:
+        """The capabilities the peer's link announced, or None when it has no link here."""
+        with self._lock:
+            link = self._links.get(peer)
+        return link.caps if link is not None else None
+
+    def start(self, port: int) -> None:
         with self._lock:
             if self._thread is not None and self._thread.is_alive():
                 return
             stop_event = threading.Event()
-            thread = threading.Thread(
-                target=self._server_thread,
-                args=(config, stop_event),
-                name="Beamer-server",
-                daemon=True,
-            )
-            self._stop_event = stop_event
-            self._thread = thread
+            thread = threading.Thread(target=self._server_thread, args=(port, stop_event), name="Beamer-v6-server", daemon=True)
+            self._stop_event, self._thread, self._port = stop_event, thread, port
             self._requested_running = True
-        self._set_status(ServerState.WAITING, f"Starting on port {config.port}")
-        try:
-            thread.start()
-        except Exception:
-            with self._lock:
-                if self._thread is thread:
-                    self._thread = None
-                    self._stop_event = None
-                    self._requested_running = False
-            raise
+        self._set_status(ServerState.WAITING, f"Starting on port {port}")
+        thread.start()
 
     def stop(self) -> None:
         with self._lock:
             self._requested_running = False
-            stop_event = self._stop_event
-            listener = self._listener
+            stop_event, listener, thread = self._stop_event, self._listener, self._thread
             connections = set(self._connections)
-            thread = self._thread
+            after = self._end_locked(self._owner) if self._owner is not None else []
+            # Closed under the lock, so no take queued on one can be accepted after this.
+            for link in self._links.values():
+                link.close()
+        self._run(after)
         if stop_event is not None:
             stop_event.set()
         for connection in connections:
-            self._close_socket(connection)
-        self._close_socket(listener)
-        # start() publishes the thread under the lock and starts it outside, so a
-        # stop() landing in that window would join a thread that never started,
-        # which raises rather than returning.
+            _close_socket(connection)
+        _close_socket(listener)
         if thread is not None and thread is not threading.current_thread() and thread.ident is not None:
             thread.join(timeout=2.0)
-        if thread is not None and thread.is_alive():
-            LOGGER.error("Server thread did not stop within two seconds")
-            self._set_status(ServerState.ERROR, "Listener did not stop; see log")
-            return
         with self._lock:
             if self._thread is thread:
-                self._thread = None
-                self._stop_event = None
-                self._listener = None
-                self._client = None
-        self._hand_back("Listening stopped")
+                self._thread = self._stop_event = self._listener = None
         self._set_status(ServerState.STOPPED, "Listening stopped")
 
-    def _server_thread(self, config, stop_event: threading.Event) -> None:
-        failed = False
+    def _server_thread(self, port: int, stop_event: threading.Event) -> None:
         try:
-            self._serve(config, stop_event)
+            listener = self._bind(port, stop_event)
+            if listener is None:
+                return
+            listener.listen(8)
+            # Closing a listener does not wake accept() everywhere, so stop() waits on this poll.
+            listener.settimeout(0.1)
+            with self._lock:
+                self._listener = listener
+            LOGGER.info("Listening for version 6 links on 0.0.0.0:%s", port)
+            self._report()
+            while not stop_event.is_set():
+                try:
+                    connection, address = listener.accept()
+                except socket.timeout:
+                    continue
+                except OSError:
+                    if stop_event.is_set():
+                        break
+                    raise
+                accepted = time.monotonic()
+                with self._lock:
+                    crowded = self._handshaking >= MAX_HANDSHAKE_THREADS
+                    if not crowded:
+                        self._handshaking += 1
+                        displaced = self._slots.take(address[0], connection)
+                        self._connections.add(connection)
+                if crowded:
+                    LOGGER.warning("Closed a connection from %s: %d handshakes already running", address[0], MAX_HANDSHAKE_THREADS)
+                    _close_socket(connection)
+                    continue
+                if displaced is not None:
+                    _close_socket(displaced)
+                threading.Thread(
+                    target=self._connection_thread, args=(connection, address[0], accepted), name="Beamer-v6-link", daemon=True
+                ).start()
         except Exception as exc:
             if not stop_event.is_set():
-                failed = True
-                LOGGER.exception("Server thread failed")
+                LOGGER.exception("The version 6 listener failed")
                 self._set_status(ServerState.ERROR, f"Listener failed: {exc}")
         finally:
             with self._lock:
                 listener = self._listener
-                connections = set(self._connections)
                 self._listener = None
-                self._client = None
-                if self._thread is threading.current_thread():
-                    self._thread = None
-                    self._stop_event = None
-                if failed:
-                    self._requested_running = False
-            for connection in connections:
-                self._close_socket(connection)
-            self._close_socket(listener)
-            if stop_event.is_set():
-                self._set_status(ServerState.STOPPED, "Listening stopped")
+            _close_socket(listener)
 
-    def _bind(self, config, stop_event: threading.Event):
-        """Bind the listening socket, waiting for the port if something holds it."""
-        reported = ""
+    def _bind(self, port: int, stop_event: threading.Event):
+        reported = False
         while not stop_event.is_set():
             listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            # On the Mac this is what lets the port be taken back straight
-            # after a restart, while the last session's connections sit in
-            # TIME_WAIT. On Windows the same option means something else: a
-            # second bind on a port another listener holds succeeds, and the
-            # two split the Mac's connections between them, so the held-port
-            # wait below never fired for a zombie Beamer. Windows does not
-            # need it for TIME_WAIT, so it does without.
+            # SO_REUSEADDR only off Windows, where it would let a second
+            # listener share the port.
             if sys.platform != "win32":
                 listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             try:
-                listener.bind(("0.0.0.0", config.port))
+                listener.bind(("0.0.0.0", port))
+                return listener
             except OSError as exc:
-                self._close_socket(listener)
-                # Said the way a user can act on it: the log carries the error, the
-                # status carries the one thing they can change.
-                detail = f"Another program is using port {config.port} — change the port on the Connection page"
-                # Only on a change: a retry every few seconds otherwise repeats
-                # the same line and the same status for as long as the port is held.
-                if detail != reported:
-                    LOGGER.error("Cannot listen on port %s: %s", config.port, exc)
-                    reported = detail
-                    self._set_status(ServerState.ERROR, detail)
+                _close_socket(listener)
+                if not reported:
+                    reported = True
+                    LOGGER.error("Cannot listen on port %s: %s", port, exc)
+                    self._set_status(ServerState.ERROR, f"Another program is using port {port} — change the port on the Connection page")
                 stop_event.wait(BIND_RETRY_SECONDS)
-                continue
-            return listener
         return None
 
-    def _serve(self, config, stop_event: threading.Event) -> None:
-        listener = self._bind(config, stop_event)
-        if listener is None:
-            return
-        # A stale, not-yet-torn-down session must never block a reconnect: a
-        # backlog of 2 lets a fresh Mac connection queue up while the previous
-        # session's thread is still winding down, instead of the OS refusing
-        # it outright.
-        listener.listen(2)
-        listener.settimeout(0.5)
-        with self._lock:
-            self._listener = listener
-        LOGGER.info("Listening on 0.0.0.0:%s", config.port)
-        self._set_status(ServerState.WAITING, f"Waiting on port {config.port}")
-        while not stop_event.is_set():
-            try:
-                connection, address = listener.accept()
-            except socket.timeout:
-                continue
-            except OSError:
-                if stop_event.is_set():
-                    break
-                raise
-            # Hand the connection to its own thread immediately and go back
-            # to accept(): a slow or stuck peer must never stall the listener,
-            # which is what used to make a stale session block a reconnect.
-            # Bounded, because accept() happens before any proof of the token.
-            # Only handshakes count: an authenticated peer never blocks the
-            # next one, and a stranger's slot frees itself within seconds.
-            with self._lock:
-                crowded = self._pending >= MAX_PENDING_CONNECTIONS
-                if not crowded:
-                    self._pending += 1
-            if crowded:
-                LOGGER.warning("Refusing %s:%s: %d handshakes already in progress", address[0], address[1], MAX_PENDING_CONNECTIONS)
-                self._close_socket(connection)
-                continue
-            thread = threading.Thread(
-                target=self._session_thread,
-                args=(connection, address, config, stop_event),
-                name="Beamer-session",
-                daemon=True,
-            )
-            thread.start()
-
-    def _session_thread(
-        self,
-        connection: socket.socket,
-        address,
-        config,
-        server_stop: threading.Event,
-    ) -> None:
-        with self._lock:
-            self._connections.add(connection)
+    def _connection_thread(self, connection: socket.socket, host: str, accepted: float) -> None:
+        link = None
         try:
-            self._handle_client(connection, address, config, server_stop)
+            link = self._handshake(connection, host, accepted)
+        except Exception:
+            LOGGER.exception("The handshake with %s failed", host)
+        finally:
+            with self._lock:
+                self._slots.free(host, connection)
+                self._handshaking -= 1
+        try:
+            if link is not None:
+                self._serve(link)
         finally:
             with self._lock:
                 self._connections.discard(connection)
-            self._close_socket(connection)
+            _close_socket(connection)
 
-    def _handle_client(
-        self,
-        connection: socket.socket,
-        address,
-        config,
-        server_stop: threading.Event,
-    ) -> None:
-        peer = f"{address[0]}:{address[1]}"
-        LOGGER.info("Connection from %s", peer)
-        try:
-            handshake = self._handshake(connection, peer, config, server_stop)
-        finally:
-            with self._lock:
-                self._pending -= 1
-        if handshake is None:
-            return
-        session, version, hello = handshake
-        self._clipboard_module().forget_sync()
+    # The handshake (section 2)
 
-        if version != protocol.PROTOCOL_VERSION:
-            LOGGER.warning(
-                "Rejecting %s: unsupported protocol version %r (expected %s)",
-                peer,
-                version,
-                protocol.PROTOCOL_VERSION,
-            )
-            self._send_message(connection, session, protocol.welcome_msg(error="version_mismatch"))
-            self._note_version_mismatch(f"{self._peer_name} app is an older Beamer version — update both apps")
-            return
-
-        # The Mac now pings at least once a second while idle, so a read
-        # timeout here means the peer is gone, not merely quiet.
-        connection.settimeout(SESSION_READ_TIMEOUT_SECONDS)
-        connection.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-        sequence = ProcessedSequence()
-        if not self._send_message(connection, session, protocol.welcome_msg()):
-            return
-
-        with self._lock:
-            previous_client = self._client
-            self._client = connection
-            self._sessions[connection] = session
-            self._session_generation += 1
-            my_generation = self._session_generation
-        if previous_client is not None and previous_client is not connection:
-            # Preempt: a reconnecting Mac instantly replaces a stale session
-            # instead of queueing behind it. Closing it here unblocks that
-            # thread's blocked recv so it can exit.
-            LOGGER.info("Superseding the previous session for %s", peer)
-            self._close_socket(previous_client)
-
-        LOGGER.info("Authenticated %s (protocol v%s)", peer, version)
-        # A peer that has just connected has its input at home, whatever the
-        # session it replaced was in the middle of.
-        self._hand_back(f"{self._peer_name} reconnected")
-        self.peer_settings = protocol.keeps_settings(hello)
-        self._notify_peer(address[0], hello)
-        self._set_status(ServerState.CONNECTED, f"Connected to {address[0]}")
-        try:
-            announcements = list(self.announce())
-        except Exception:
-            LOGGER.exception("Announce failed")
-            announcements = []
-        for announcement in announcements:
-            self._send_message(connection, session, announcement)
-
-        client_stop = threading.Event()
-        ack_due = threading.Event()
-        ack_thread = threading.Thread(
-            target=self._ack_thread,
-            args=(connection, session, sequence, client_stop, server_stop, ack_due),
-            name="Beamer-ack",
-            daemon=True,
-        )
-        ack_thread.start()
-
-        last_injection_status_at = 0.0
-        try:
-            while not server_stop.is_set() and not client_stop.is_set():
-                try:
-                    message = protocol.recv_msg(connection, session)
-                except socket.timeout:
-                    if self._is_current_session(my_generation):
-                        LOGGER.warning("%s went quiet; treating the connection as dead", peer)
-                    break
-                except protocol.ConnectionClosed:
-                    if self._is_current_session(my_generation):
-                        LOGGER.info("%s disconnected", peer)
-                    break
-                except protocol.ProtocolError as exc:
-                    if self._is_current_session(my_generation):
-                        LOGGER.warning("Protocol error from %s: %s", peer, exc)
-                    break
-                except OSError as exc:
-                    if (
-                        not server_stop.is_set()
-                        and not client_stop.is_set()
-                        and self._is_current_session(my_generation)
-                    ):
-                        LOGGER.warning("Receive failed for %s: %s", peer, exc)
-                    break
-                message_type = message.get("type") if isinstance(message, dict) else None
-                if message_type == protocol.MSG_PING:
-                    # Liveness only; never recorded or acked as an input event.
-                    continue
-                if message_type == protocol.MSG_FOCUS:
-                    # Never recorded or acked as an input event, like ping.
-                    self._handle_focus(message, connection, session, peer, address[0])
-                    continue
-                if message_type == protocol.MSG_CLIPBOARD:
-                    # Never recorded or acked as an input event, like ping.
-                    self._handle_inbound_clipboard(message, peer)
-                    continue
-                if message_type == protocol.MSG_ARRANGEMENT:
-                    # Never recorded or acked as an input event, like ping.
-                    self._handle_arrangement(message)
-                    continue
-                if message_type == protocol.MSG_SETTINGS:
-                    # Never recorded or acked as an input event, like ping.
-                    self._handle_settings(message)
-                    continue
-                if self._unlocking.is_set():
-                    # Dropped, not queued: see _begin_unlock. Still recorded so
-                    # the ACK sequence stays continuous and the Mac's watchdog
-                    # does not read the unlock as a dead link.
-                    sequence.record(message)
-                    continue
-                if message_type == protocol.MSG_MOUSEMOVE and self._return_trip(message, connection, session):
-                    # Held at the edge or crossed: not injected, but still an
-                    # input event for the ACK sequence.
-                    sequence.record(message)
-                    continue
-                try:
-                    processed = handle_message(message, self._injector, self.input_scale)
-                except Exception:
-                    LOGGER.exception("Input event from %s could not be injected", peer)
-                    now = time.monotonic()
-                    if now - last_injection_status_at >= INJECTION_ERROR_STATUS_INTERVAL_SECONDS:
-                        last_injection_status_at = now
-                        self._set_status(ServerState.CONNECTED, f"Input error from {address[0]}; see log")
-                    continue
-                if not processed:
-                    continue
-                sequence.record(message)
-                ack_due.set()
-        finally:
-            client_stop.set()
-            ack_thread.join(timeout=1.0)
-            if ack_thread.is_alive():
-                LOGGER.error("ACK thread did not stop within one second")
-                self._set_status(ServerState.ERROR, "ACK worker did not stop; see log")
-            with self._lock:
-                self._sessions.pop(connection, None)
-                is_current = self._session_generation == my_generation
-                if is_current:
-                    self._client = None
-            if is_current:
-                self._hand_back(f"{self._peer_name} went away")
-            # A preempted (superseded) session must exit silently: only the
-            # current-generation session may flip status to WAITING.
-            if is_current and not server_stop.is_set():
-                self._set_status(ServerState.WAITING, f"Waiting on port {config.port}")
-
-    def _is_current_session(self, generation: int) -> bool:
-        with self._lock:
-            return self._session_generation == generation
-
-    def _handshake(self, connection: socket.socket, peer: str, config, server_stop: threading.Event):
-        """Read the Mac's preamble, answer with ours, then open its hello.
-        Returns (session, declared version) or None once the failure has been
-        logged. The preamble is read before ours is sent so an older Mac, which
-        opens with a cleartext frame instead, gets a cleartext version_mismatch
-        it can display rather than bytes it reads as a bogus length."""
-        connection.settimeout(HELLO_TIMEOUT_SECONDS)
-        # One deadline for the whole handshake, not a timeout per read: a peer
-        # trickling a byte at a time would otherwise hold its slot for ever.
-        deadline = time.monotonic() + HELLO_TIMEOUT_SECONDS
-        session = protocol.SecureSession(config.auth_token)
+    def _handshake(self, connection: socket.socket, host: str, accepted: float) -> Optional[_Link]:
+        """Steps 2 to 9 of the responder's handshake. The link, once its `welcome` has gone, or
+        None once the connection has been answered or needs closing with nothing sent."""
         try:
             try:
-                protocol.recv_preamble(connection, session, deadline=deadline)
+                preamble = protocol.recv_link_preamble(connection, accepted + PREAMBLE_SECONDS)
             except protocol.VersionMismatch as exc:
-                if exc.peer_version is None:
-                    LOGGER.warning("%s opened with the pre-v4 cleartext protocol", peer)
-                    connection.sendall(protocol.legacy_frame(protocol.welcome_msg(error="version_mismatch")))
-                    self._note_version_mismatch(f"{self._peer_name} app is an older Beamer version — update both apps")
-                else:
-                    LOGGER.warning("%s speaks wire version %r, expected %s", peer, exc.peer_version, protocol.PROTOCOL_VERSION)
-                    connection.sendall(session.preamble())
-                    self._note_version_mismatch(
-                        f"{self._peer_name} app is Beamer protocol v{exc.peer_version}, this {self._self_name} is v{protocol.PROTOCOL_VERSION} — update both apps"
-                    )
+                self._not_version_6(connection, host, exc.peer_version)
                 return None
+            _, key_id, _ = protocol.split_preamble(preamble)
+            entry = self._book.find(key_id)
+            if entry is None:
+                LOGGER.info("%s named a pairing this machine does not have; closed", host)
+                return None
+            session = protocol.LinkSession(entry["token"], protocol.ROLE_RESPONDER)
+            session.accept_preamble(preamble)
+            deadline = accepted + HANDSHAKE_SECONDS
+            # The last read left the preamble's deadline on the socket, perhaps nearly spent.
+            connection.settimeout(max(0.001, deadline - time.monotonic()))
             connection.sendall(session.preamble())
-            first = protocol.recv_msg(connection, session, limit=protocol.HELLO_MAX_BYTES, deadline=deadline)
-        except socket.timeout:
-            LOGGER.warning("Authentication timed out for %s", peer)
+            try:
+                hello = protocol.read_hello(protocol.recv_first_msg(connection, session, deadline))
+            except (protocol.NotAnObject, protocol.InvalidHello):
+                LOGGER.warning("%s sent a first frame that is not a valid hello", host)
+                self._answer(connection, host, session.seal(protocol.invalid_hello_v6()))
+                return None
+            identity = self._identity()
+            own_id = bytes(identity["id"])
+            changes = {"name": hello["name"], "platform": hello["platform"], "port": hello["port"]}
+            if hello["hw"] is not None:
+                changes["hw"] = hello["hw"]
+            if learnable_host(host, hello["port"]):
+                changes["host"] = host
+            try:
+                outcome, entry = self._book.admit(key_id, own_id, hello["id"], changes)
+            except Exception:
+                LOGGER.exception("Could not save what the link from %s taught", host)
+                return None
+            if outcome == GONE:
+                LOGGER.info("The pairing %s linked under was removed during its handshake; closed", host)
+                return None
+            if outcome == FOLDED:
+                # Answered with the welcome, so the far side's own step 7 folds its 1.4.x entry
+                # too, then closed: the pairing this link came under is gone.
+                name = peerlist.label_for(self._settings_now()[0], token=entry.get("token")) or entry.get("name") or host
+                LOGGER.info("%s linked under its 1.4.x pairing after pairing again; folded into the new one", name)
+                self._callback("notice", f"{name} linked from {host} under its Beamer 1.4 pairing, {entry['folded'].get('name') or 'unnamed'}, which is now part of {name}.")
+                welcome = protocol.welcome_v6(
+                    own_id, identity["name"], identity["platform"], identity["app"], identity["caps"], entry.get("allow_drive") is True, self._hardware_towards(host, identity)
+                )
+                self._answer(connection, host, session.seal(welcome))
+                return None
+            if outcome == WRONG_ID:
+                LOGGER.warning("%s holds a pairing of this machine's under another machine's id", host)
+                self._answer(connection, host, session.seal(protocol.wrong_id_v6()))
+                return None
+            if outcome == FIRST_LINK:
+                # Said the moment the id is saved: a claimer that resets before its welcome still
+                # holds the entry, and this notice is how the user learns who took it.
+                self._callback("notice", f"Linked with {hello['name']} at {host} for the first time on Beamer 1.5.0.")
+            allow_drive = entry.get("allow_drive") is True
+            welcome = protocol.welcome_v6(
+                own_id, identity["name"], identity["platform"], identity["app"], identity["caps"], allow_drive, self._hardware_towards(host, identity)
+            )
+            protocol.send_msg(connection, session, welcome)
+        except (socket.timeout, protocol.ConnectionClosed, protocol.ProtocolError, OSError) as exc:
+            LOGGER.info("Handshake with %s ended: %s", host, exc)
             return None
-        except protocol.ConnectionClosed:
-            LOGGER.info("%s disconnected before authentication", peer)
-            return None
-        except protocol.AuthenticationError:
-            # The one signal that the Mac does not hold the shared token. Nothing is sent back:
-            # a reply would tell a guesser it had reached a Beamer.
-            LOGGER.warning("Authentication failed for %s: frame failed authentication", peer)
-            return None
-        except protocol.ProtocolError as exc:
-            LOGGER.warning("Protocol error during authentication from %s: %s", peer, exc)
-            return None
-        except OSError as exc:
-            if not server_stop.is_set():
-                LOGGER.warning("Authentication receive failed for %s: %s", peer, exc)
-            return None
-        if first.get("type") != protocol.MSG_HELLO:
-            LOGGER.warning("%s authenticated but did not say hello first", peer)
-            return None
-        data = first.get("data")
-        return session, self._hello_version(first), data if isinstance(data, dict) else {}
+        return _Link(connection, session, hello["id"], key_id, host, hello["name"], hello["caps"], own_id, identity["caps"], allow_drive)
 
-    def _note_version_mismatch(self, detail: str) -> None:
+    def _hardware_towards(self, host, identity):
+        """The `hw` for the welcome to `host`, as the initiator's hook does for its hello: the hook is
+        optional and never fatal, and one that raises sends none, because the field is optional on
+        the wire and the link matters more."""
+        if self._hardware is None:
+            return identity.get("hw")
+        try:
+            return self._hardware(host) or None
+        except Exception:
+            LOGGER.exception("Could not read this machine's hardware address towards %s", host)
+            return None
+
+    def _not_version_6(self, connection: socket.socket, host: str, version) -> None:
+        """An older or newer Beamer: the version 5 legacy frame for one from before version 4, else
+        the short reply, and the status names the peer at that address, if one is."""
+        self._answer(connection, host, protocol.legacy_version_reply() if version is None else protocol.short_reply())
+        who = peerlist.label_for(self._settings_now()[0], host=host) or host
+        if version is not None and version > protocol.LINK_VERSION:
+            detail = f"{who} runs a newer Beamer: update Beamer on this machine"
+        else:
+            detail = f"Update Beamer on {who}: it is older than this one"
+        LOGGER.warning("%s speaks wire version %r; answered and closed", host, version)
         with self._lock:
-            has_active_client = self._client is not None
-        if not has_active_client:
+            linked = bool(self._links)
+        if not linked:
             self._set_status(ServerState.ERROR, detail)
 
-    def _ack_thread(
-        self,
-        connection: socket.socket,
-        session: protocol.SecureSession,
-        sequence: ProcessedSequence,
-        client_stop: threading.Event,
-        server_stop: threading.Event,
-        ack_due: threading.Event,
-    ) -> None:
+    def _answer(self, connection: socket.socket, host: str, data: bytes) -> None:
+        """Send `data`, free the handshake slot, shut the sending side, and read what the peer sends
+        for up to DRAIN_SECONDS so the answer is not lost to a reset."""
+        with self._lock:
+            self._slots.free(host, connection)
+            draining = self._drains < MAX_DRAINS
+            if draining:
+                self._drains += 1
         try:
-            while not server_stop.is_set():
-                woken = ack_due.wait(ACK_IDLE_SECONDS)
-                if client_stop.is_set():
-                    return
-                if woken:
-                    ack_due.clear()
-                    # Coalesce on client_stop, not sleep, so a disconnect during
-                    # the batching window still exits promptly.
-                    if client_stop.wait(ACK_COALESCE_SECONDS):
+            connection.settimeout(DRAIN_SECONDS)
+            connection.sendall(data)
+            connection.shutdown(socket.SHUT_WR)
+            end = time.monotonic() + DRAIN_SECONDS
+            while draining:
+                left = end - time.monotonic()
+                if left <= 0:
+                    break
+                connection.settimeout(left)
+                if not connection.recv(65536):
+                    break
+        except OSError:
+            pass
+        finally:
+            if draining:
+                with self._lock:
+                    self._drains -= 1
+
+    # A link
+
+    def _serve(self, link: _Link) -> None:
+        link.sock.settimeout(LINK_READ_TIMEOUT_SECONDS)
+        try:
+            link.sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+        except OSError:
+            pass
+        with self._lock:
+            earlier = self._links.get(link.peer_id)
+            self._links[link.peer_id] = link
+            # Step 10: an earlier link from this peer is closed, its ownership ended first, and
+            # closed under the lock, so no take still queued on it can be accepted after this.
+            after = self._end_locked(earlier) if earlier is not None else []
+            if earlier is not None:
+                earlier.close()
+        writer = threading.Thread(target=self._writer, args=(link,), name="Beamer-v6-writer", daemon=True)
+        try:
+            self._run(after)
+            writer.start()
+            # A peer removed, or its allow_drive changed, between the handshake's read of the book
+            # and this link joining the others was missed by the app's peers_changed(): look again.
+            self.peers_changed()
+            self._callback("link", link.peer_id, True)
+            self._report()
+            try:
+                for message in list(self._announce(link.peer_id)):
+                    link.post(message)
+            except Exception:
+                LOGGER.exception("Announcements for %s failed", link.name)
+            while not link.closed.is_set():
+                try:
+                    plain = link.session.open_raw(protocol.recv_frame(link.sock))
+                    if len(plain) > protocol.SMALL_MESSAGE_BYTES and self._owner is not link:
+                        # Only the owner's clipboard is this large; opening it was enough to keep
+                        # the counter in step, and parsing it is the peer's to make this machine pay for.
+                        LOGGER.info("Dropped a %d byte frame from %s, which does not own this machine", len(plain), link.name)
+                        continue
+                    message = protocol.parse_message(plain)
+                except socket.timeout:
+                    LOGGER.warning("%s went quiet; its link is over", link.name)
+                    break
+                except (protocol.ConnectionClosed, protocol.ProtocolError, OSError) as exc:
+                    if not link.closed.is_set():
+                        LOGGER.info("The link from %s ended: %s", link.name, exc)
+                    break
+                self._dispatch(link, message)
+        finally:
+            with self._lock:
+                current = self._links.get(link.peer_id) is link
+                if current:
+                    del self._links[link.peer_id]
+                after = self._end_locked(link)
+            link.close()
+            self._run(after)
+            if writer.ident is not None:
+                writer.join(timeout=1.0)
+            if current:
+                self._callback("link", link.peer_id, False)
+                self._report()
+
+    def _writer(self, link: _Link) -> None:
+        """Everything this link sends, in order, and its `ack`s when they are due (section 9)."""
+        while True:
+            is_ack = False
+            with link.cond:
+                while True:
+                    if link.closed.is_set():
                         return
-                ack = protocol.ack_msg(sequence.latest(), locked=self._unlocking.is_set())
-                if not self._send_message(connection, session, ack):
-                    client_stop.set()
-                    self._close_socket(connection)
+                    if link.outbox:
+                        message = link.outbox.popleft()
+                        break
+                    now = time.monotonic()
+                    due = ack_due(link.last_ack_at, link.pending_since)
+                    if now >= due:
+                        seq = link.dealt
+                        held_us = int((now - link.dealt_at) * 1_000_000) if seq > link.acked else 0
+                        link.acked, link.last_ack_at, link.pending_since = seq, now, None
+                        # Only the owner hears of the lock screen: to anyone else it would say who
+                        # has just arrived to drive this machine.
+                        locked = self._unlocking.is_set() and self._owner is link
+                        message = protocol.ack_v6(seq, held_us, locked=locked)
+                        is_ack = True
+                        break
+                    link.cond.wait(due - now)
+            try:
+                # Only this thread sends once the link is up, so sealing and sending need not be
+                # one step under the session's lock to keep the counters in order.
+                frame = memoryview(link.session.seal(message))
+                sent = 0
+                while sent < len(frame):
+                    sent += link.sock.send(frame[sent:sent + SEND_CHUNK])
+            except (OSError, protocol.ProtocolError, ValueError) as exc:
+                LOGGER.info("Sending to %s failed: %s", link.name, exc)
+                link.close()
+                return
+            if is_ack:
+                self._home_if_locked(link)
+
+    def _dispatch(self, link: _Link, message) -> None:
+        kind = message.get("type") if isinstance(message, dict) else None
+        try:
+            if kind in protocol.INPUT_TYPES:
+                self._on_input(link, message)
+            elif kind == protocol.MSG_FOCUS:
+                self._on_focus(link, message)
+            elif kind == protocol.MSG_CLIPBOARD:
+                self._on_clipboard(link, message)
+            elif kind == protocol.MSG_ARRANGEMENT:
+                read = protocol.read_arrangement_v6(message, time.time())
+                if read is not None:
+                    self._callback("arrangement", link.peer_id, read)
+            elif kind == protocol.MSG_SETTINGS:
+                parsed = protocol.read_message(message)
+                if parsed is not None and "settings" in link.caps:
+                    self._callback("settings", link.peer_id, parsed[1])
+            elif kind == protocol.MSG_PAIRED:
+                ids = protocol.read_paired(message)
+                if ids is not None:
+                    self._callback("paired", link.peer_id, ids)
+        except Exception:
+            LOGGER.exception("A %r from %s could not be dealt with", kind, link.name)
+
+    # Input (sections 3, 4 and 10)
+
+    def _on_input(self, link: _Link, message) -> None:
+        read = protocol.read_input(message)
+        if read is None:
+            return
+        after = []
+        try:
+            with self._lock:
+                if self._owner is not link or not self._takes(link, read):
+                    pass
+                elif self._unlocking.is_set():
+                    # Input that arrives while the lock screen clears is dropped, but a release of
+                    # something injected before it still goes, or that key stays down after.
+                    if self._releases_held(link, read):
+                        self._inject_locked(link, read)
+                elif not (read["type"] == protocol.MSG_MOUSEMOVE and self._zones_locked(link, read, after)):
+                    self._inject_locked(link, read)
+        except Exception:
+            LOGGER.exception("Input from %s could not be injected", link.name)
+            self._input_error_status(link)
+        finally:
+            link.dealt_with(read["seq"])
+        self._run(after)
+
+    def _input_error_status(self, link: _Link) -> None:
+        """Says in the status that this peer's input is not being injected, as ReceiverServer did:
+        at most once per INJECTION_ERROR_STATUS_INTERVAL_SECONDS a link, since a broken injector
+        fails on every event."""
+        now = time.monotonic()
+        if now - link.input_error_at < INJECTION_ERROR_STATUS_INTERVAL_SECONDS:
+            return
+        link.input_error_at = now
+        who = peerlist.label_for(self._settings_now()[0], peer_id=protocol.id_text(link.peer_id)) or link.name
+        self._set_status(ServerState.CONNECTED, f"Input error from {who}; see log")
+
+    @staticmethod
+    def _releases_held(link: _Link, read: dict) -> bool:
+        if read["type"] == protocol.MSG_KEYUP:
+            return ("key", read["key"]) in link.held
+        if read["type"] == protocol.MSG_MOUSEUP:
+            return ("button", read["button"]) in link.held
+        return False
+
+    def _takes(self, link: _Link, read: dict) -> bool:
+        """Whether this machine acts on this input at all: a message its capabilities do not cover
+        is dropped, and still acknowledged (section 2)."""
+        if read["type"] == protocol.MSG_TEXT:
+            return read["text"] is not None and "text" in link.own_caps and hasattr(self._injector_module(), "inject_text")
+        if read["type"] == protocol.MSG_GESTURE:
+            return "gestures" in link.own_caps
+        return True
+
+    def _inject_locked(self, link: _Link, read: dict) -> None:
+        injector = self._injector_module()
+        kind = read["type"]
+        if kind in (protocol.MSG_KEYDOWN, protocol.MSG_KEYUP):
+            down = kind == protocol.MSG_KEYDOWN
+            if down:
+                link.held[("key", read["key"])] = read["us"]
+            else:
+                link.held.pop(("key", read["key"]), None)
+            injector.inject_key(read["key"], down=down, us=read["us"])
+        elif kind == protocol.MSG_MOUSEMOVE:
+            dx, dy = read["dx"], read["dy"]
+            if self.input_scale is not None and (dx or dy):
+                dx, dy = self.input_scale.move(dx, dy)
+                if not (dx or dy):
                     return
-                self._home_if_locked()
-        except Exception as exc:
-            LOGGER.exception("ACK thread failed")
-            self._set_status(ServerState.ERROR, f"ACK worker failed: {exc}")
-            client_stop.set()
-            self._close_socket(connection)
+            injector.inject_mouse_move(dx, dy)
+        elif kind in (protocol.MSG_MOUSEDOWN, protocol.MSG_MOUSEUP):
+            down = kind == protocol.MSG_MOUSEDOWN
+            if down:
+                link.held[("button", read["button"])] = None
+            else:
+                link.held.pop(("button", read["button"]), None)
+            injector.inject_mouse_button(read["button"], down=down)
+        elif kind == protocol.MSG_SCROLL:
+            dy, dx = read["dy"], read["dx"]
+            if self.input_scale is not None:
+                dy, dx = self.input_scale.wheel(dy, dx)
+            injector.inject_scroll(dy, dx, read["mode"])
+        elif kind == protocol.MSG_GESTURE:
+            injector.inject_gesture(read["name"])
+        elif kind == protocol.MSG_TEXT:
+            for run in text_runs(read["text"]):
+                if run in _TEXT_KEYS:
+                    injector.inject_key(_TEXT_KEYS[run], down=True)
+                    injector.inject_key(_TEXT_KEYS[run], down=False)
+                else:
+                    injector.inject_text(run)
 
-    def _home_if_locked(self) -> None:
-        """Send the peer's input home when this PC is on its lock screen. Beamer can neither inject
-        into the secure desktop nor watch the return edge there, so a Mac left driving a locked PC
-        had no way back until someone unlocked it by hand (issue #5).
+    def _release_locked(self, link: _Link) -> None:
+        """Let go of every key and button injected for this owner (section 4, step 1), then the
+        injector's own record of what it holds, as the backstop."""
+        injector = self._injector_module()
+        for (kind, name), us in reversed(list(link.held.items())):
+            try:
+                if kind == "key":
+                    injector.inject_key(name, down=False, us=us)
+                else:
+                    injector.inject_mouse_button(name, down=False)
+            except Exception:
+                LOGGER.exception("Could not release %r for %s", name, link.name)
+        link.held.clear()
+        release_all = getattr(injector, "release_all", None)
+        if release_all is not None:
+            try:
+                release_all()
+            except Exception:
+                LOGGER.exception("Could not release the keys %s was holding", link.name)
 
-        Timed, not per tick: the ACK thread wakes on every injected event, and is_locked walks the
-        process list. Locked on two checks LOCK_CHECK_SECONDS apart, and never while an unlock is
-        in flight: a switch to a locked PC reaches _begin_unlock a moment after focus, and an
-        unlock provider that can clear the lock screen must be given the chance."""
-        if not self._peer_driving or self._unlocking.is_set() or self._arriving.is_set():
+    # The zones (sections 5 and 8)
+
+    def _arm_locked(self, peers, zones) -> None:
+        owner = self._owner
+        if owner is None:
+            self._armed, self._zones_live = [], False
+            return
+        try:
+            self._armed = zone_models(zones, peers, {owner.peer_id} | self._reach, self._resistance, self._notch_span)
+        except Exception:
+            LOGGER.exception("Could not arm the zones for %s", owner.name)
+            self._armed = []
+        self._zones_live = True
+
+    def _disarm_locked(self) -> None:
+        self._armed, self._zones_live = [], False
+
+    def _zones_locked(self, link: _Link, read: dict, after: list) -> bool:
+        """Feeds one mouse move to the armed zones, first that holds the pointer winning. True when
+        the move was used at an edge (held there, or crossed and the owner sent a `switch`)."""
+        if not self._armed or self.edges_held():
+            return False
+        desktop = self._desktop_module()
+        monitors, pointer = desktop.monitors(), desktop.cursor_position()
+        for peer, model in self._armed:
+            outcome = model.feed(monitors, pointer, float(read["dx"]), float(read["dy"]))
+            if outcome.action == crossing.PASS:
+                continue
+            part = None
+            if isinstance(model, crossing.PartEdge):
+                part = crossing.part_of(crossing.display_fraction(monitors, model.edge, pointer))
+            elif isinstance(model, crossing.CornerPush):
+                part = model.corner
+            if outcome.action == crossing.HOLD:
+                desktop.set_cursor_position(*outcome.position)
+                after.append(lambda: self._callback("pressure", model.edge, outcome.pressure, False, part))
+                return True
+            offset = corner_offset(model.corner, model.edge) if isinstance(model, crossing.CornerPush) else outcome.offset
+            self._disarm_locked()
+            LOGGER.info("The pointer pushed through a zone here; asking %s to move its input on", link.name)
+            link.post(protocol.switch_v6(link.route, peer, outcome.edge, offset))
+            after.append(lambda: self._callback("pressure", model.edge, 1.0, True, part))
+            return True
+        return False
+
+    def rearm(self) -> None:
+        """Rebuilds the zones from the settings as they are now, while an owner drives and they are
+        live, so a change on the Crossing page applies at once. Never revives zones spent by a
+        `switch` or a send-home."""
+        with self._lock:
+            self._generation += 1
+        self._rearm_fresh()
+
+    def _rearm_fresh(self) -> None:
+        # The settings are read without the lock, so a change landing meanwhile is caught by the
+        # generation and read again, rather than armed over by what was read before it.
+        for _ in range(5):
+            with self._lock:
+                generation = self._generation
+            peers, zones = self._settings_now()
+            with self._lock:
+                if generation != self._generation:
+                    continue
+                if self._owner is not None and self._zones_live:
+                    self._arm_locked(peers, zones)
+                return
+
+    def _settings_now(self):
+        """The peers and zones as the app holds them now, or none of either when it cannot say."""
+        try:
+            peers = self._book.peers()
+        except Exception:
+            LOGGER.exception("Could not read the peers")
+            peers = []
+        try:
+            zones = list(self._zones() or [])
+        except Exception:
+            LOGGER.exception("Could not read the zones")
+            zones = []
+        return peers, zones
+
+    # Ownership (section 4)
+
+    def _on_focus(self, link: _Link, message) -> None:
+        focus = protocol.read_focus(message, link.own_id)
+        if focus is None:
+            return
+        after = []
+        with self._lock:
+            generation = self._generation
+        peers, zones = self._settings_now() if focus["here"] else ((), ())
+        with self._lock:
+            if link.closed.is_set() or focus["route"] <= link.route:
+                return
+            if not focus["here"]:
+                if self._owner is link:
+                    link.route = focus["route"]
+                    after = self._end_locked(link, let_go=True)
+            else:
+                why = self._refusal_locked(link, focus)
+                if why is not None:
+                    link.post(protocol.refuse_msg(focus["route"], why))
+                    return
+                link.route = focus["route"]
+                # The answer goes before the pointer is placed or anything plays.
+                link.post(protocol.accept_msg(focus["route"]))
+                after = self._own_locked(link, focus, peers, zones)
+            stale = focus["here"] and generation != self._generation
+        self._run(after)
+        if stale:
+            self._rearm_fresh()
+
+    def _refusal_locked(self, link: _Link, focus: dict) -> Optional[str]:
+        """Section 4's decision order, after the stale route (steps 2 to 7). The take is made
+        visible (`driven`) before `away()` is read, and stays so until it is refused or becomes
+        the ownership; `away()` is called under the lock, so it must be a plain read."""
+        if focus["malformed"]:
+            return "malformed"
+        if not link.allow_drive:
+            return "not_allowed"
+        self._claiming = link
+        try:
+            busy = bool(self._away())
+        except Exception:
+            LOGGER.exception("Could not tell whether this machine's input is elsewhere")
+            busy = False
+        why = None
+        sent_home_at = self._sent_home_at.get(link.peer_id)
+        if busy:
+            why = "busy"
+        elif sent_home_at is not None and time.monotonic() - sent_home_at < SENT_HOME_SECONDS:
+            why = "sent_home"
+        elif self._owner is not None and self._owner is not link:
+            why = "owned"
+        elif focus["stay"] and self._owner is not link:
+            why = "malformed"
+        if why is not None:
+            self._claiming = None
+        return why
+
+    def _own_locked(self, link: _Link, focus: dict, peers, zones) -> list:
+        began = self._owner is not link
+        # The owner is set before the claim is dropped, so `driven` never reads false between.
+        self._owner = link
+        self._claiming = None
+        self._reach = frozenset(peer for peer in focus["reach"] if peer not in (link.peer_id, link.own_id))
+        self._resistance = focus["resistance_px"]
+        self._arm_locked(peers, zones)
+        after = []
+        if began:
+            self._visit += 1
+            self._clipboard_mark = self._clipboard_stamp()
+            self._sent_home_for_lock = False
+            self._locked_since = None
+            self._owner_events.append(link.peer_id)
+        if not focus["stay"]:
+            # Held until the unlock has been asked for, so the lock check cannot send this owner
+            # home in the moment between its arrival and the provider's chance to clear the lock.
+            visit = self._visit
+            self._arriving_visit = visit
+            after.append(lambda: self._land(link, focus, visit))
+        return after
+
+    def _end_locked(self, link: Optional[_Link], let_go: bool = False, why: Optional[str] = None) -> list:
+        """Ends `link`'s ownership, if it holds it (section 4): its keys and buttons released before
+        anything else is injected, its zones dropped; on a let-go the clipboard, when something
+        other than a `clipboard` message changed it; otherwise, with `why` and the link up, a
+        `refuse`. Returns what is left to do without the lock."""
+        if link is None or self._owner is not link:
+            return []
+        self._owner = None
+        self._reach = frozenset()
+        self._arriving_visit = None
+        self._disarm_locked()
+        self._cancel_forced_locked()
+        self._release_locked(link)
+        self._owner_events.append(None)
+        after = []
+        if let_go:
+            mark, visit = self._clipboard_mark, self._visit
+            after.append(lambda: self._clipboard_back(link, mark, visit))
+        elif why is not None and not link.closed.is_set():
+            link.post(protocol.refuse_msg(link.route, why))
+        return after
+
+    def send_home(self) -> bool:
+        """Sends the owner home from here (section 5): its shortcut, a menu, a direction switch
+        turned off, or Windows locking. False when nobody drives this machine. If the owner has not
+        let go within FORCED_END_SECONDS, its ownership ends by force."""
+        return self._send_home(None)
+
+    def _send_home(self, expected: Optional[_Link]) -> bool:
+        with self._lock:
+            link = self._owner
+            if link is None or (expected is not None and link is not expected):
+                return False
+            self._disarm_locked()
+            self._sent_home_at[link.peer_id] = time.monotonic()
+            LOGGER.info("Sending %s's input home from here", link.name)
+            link.post(protocol.switch_v6(link.route, link.peer_id))
+            self._cancel_forced_locked()
+            timer = threading.Timer(FORCED_END_SECONDS, lambda: self._forced_end(link, timer))
+            timer.daemon = True
+            self._forced = timer
+            timer.start()
+            return True
+
+    def _forced_end(self, link: _Link, timer) -> None:
+        with self._lock:
+            if self._forced is not timer or self._owner is not link:
+                return
+            LOGGER.info("%s did not let go after being sent home; its ownership ends here", link.name)
+            self._sent_home_at[link.peer_id] = time.monotonic()
+            after = self._end_locked(link, why="sent_home")
+        self._run(after)
+
+    def _cancel_forced_locked(self) -> None:
+        if self._forced is not None:
+            self._forced.cancel()
+            self._forced = None
+
+    def peers_changed(self) -> None:
+        """Brings the links in step with the peers list after the app changed it: a removed peer's
+        links close at once, ending its ownership first; a peer whose `allow_drive` changed is sent
+        `accepts`, and turned off, loses its ownership with `refuse {why: "not_allowed"}`."""
+        with self._lock:
+            self._generation += 1
+        peers, _ = self._settings_now()
+        by_key_id = {}
+        for peer in peers:
+            found = _entry_key_id(peer)
+            if found is not None:
+                by_key_id[found] = peer
+        after = []
+        with self._lock:
+            for link in list(self._links.values()):
+                peer = by_key_id.get(link.key_id)
+                if peer is None or peer.get("id") != protocol.id_text(link.peer_id):
+                    after += self._end_locked(link)
+                    LOGGER.info("%s was removed; its link is closed", link.name)
+                    link.close()
+                    continue
+                allow_drive = peer.get("allow_drive") is True
+                if allow_drive != link.allow_drive:
+                    link.allow_drive = allow_drive
+                    if not allow_drive:
+                        after += self._end_locked(link, why="not_allowed")
+                    link.post(protocol.accepts_msg(allow_drive))
+        self._run(after)
+        self._rearm_fresh()
+
+    def send(self, peer: bytes, message: dict) -> bool:
+        """Sends `message` on the link `peer` opened to this machine: False when there is none."""
+        with self._lock:
+            link = self._links.get(peer)
+        return link is not None and link.post(message)
+
+    # The clipboard (section 5)
+
+    def _on_clipboard(self, link: _Link, message) -> None:
+        read = protocol.read_clipboard(message)
+        if read is None:
+            return
+        text = read["text"] if read["text"] and "clipboard" in link.own_caps else None
+        image = read["image"] if "clipboard_image" in link.own_caps else None
+        if text is None and image is None:
+            return
+        # Checked and set under one hold of the lock, so an ownership ending meanwhile cannot let
+        # a peer that no longer owns this machine set its clipboard.
+        with self._lock:
+            if self._owner is not link:
+                return
+            try:
+                if not self._clipboard_module().set_contents(text, image):
+                    LOGGER.warning("Could not set the clipboard %s sent", link.name)
+            except Exception:
+                LOGGER.exception("Could not set the clipboard %s sent", link.name)
+            self._clipboard_mark = self._clipboard_stamp()
+
+    def _clipboard_stamp(self):
+        stamp = getattr(self._clipboard_module(), "change_stamp", None)
+        if stamp is None:
+            return None
+        try:
+            return stamp()
+        except Exception:
+            LOGGER.exception("Could not read the clipboard's change stamp")
+            return None
+
+    def _clipboard_back(self, link: _Link, mark, visit: int) -> None:
+        """A let-go owner gets this machine's clipboard only when something other than its own
+        `clipboard` messages changed it during the visit, so an idle machine gives nothing away;
+        and never once another ownership has begun or the clipboard changed while it was read, so
+        what it gets is never the next owner's."""
+        stamp = self._clipboard_stamp()
+        if stamp is None or stamp == mark:
+            return
+        try:
+            text, image = self._clipboard_module().get_contents()
+        except Exception:
+            LOGGER.exception("Could not read the clipboard for %s", link.name)
+            return
+        if "clipboard" not in link.caps or not text or len(text.encode("utf-8", "replace")) > protocol.CLIPBOARD_MAX_BYTES:
+            text = None
+        if "clipboard_image" not in link.caps or image is None or len(image) > protocol.CLIPBOARD_IMAGE_MAX_BYTES:
+            image = None
+        if text is None and image is None:
+            return
+        with self._lock:
+            if self._visit == visit and self._owner is None and self._clipboard_stamp() == stamp:
+                link.post(protocol.clipboard_msg(text, image))
+
+    # Landing and the lock screen
+
+    def _land(self, link: _Link, focus: dict, visit: int) -> None:
+        """Places the pointer where a take by a zone says, or says where it is for one by the
+        shortcut, then clears Windows' lock screen out of the way; nothing, once that visit is
+        over."""
+        try:
+            with self._lock:
+                current = self._visit == visit and self._owner is link
+            if not current:
+                return
+            desktop = self._desktop_module()
+            if focus["edge"] is not None:
+                x, y = crossing.arrival_position(desktop.monitors(), focus["edge"], focus["offset"])
+                desktop.set_cursor_position(x, y)
+                self._callback("arrival", focus["edge"], x, y)
+            else:
+                x, y = desktop.cursor_position()
+                self._callback("arrival", None, x, y)
+        except Exception:
+            LOGGER.exception("Could not land %s's pointer", link.name)
+        try:
+            self._begin_unlock(link)
+        finally:
+            with self._lock:
+                if self._arriving_visit == visit:
+                    self._arriving_visit = None
+
+    def _begin_unlock(self, link: _Link) -> None:
+        unlock = self._unlock
+        if unlock is None or self._unlocking.is_set():
+            return
+        try:
+            if unlock.is_locked() is not True:
+                return
+        except Exception:
+            LOGGER.exception("Could not tell whether this machine is locked")
+            return
+        self._unlocking.set()
+        LOGGER.info("%s's input arrived at a locked machine; asking the provider to unlock", link.name)
+        self._set_status(ServerState.CONNECTED, "Unlocking Windows…")
+        threading.Thread(target=self._unlock_worker, args=(unlock, link), name="Beamer-v6-unlock", daemon=True).start()
+
+    def _unlock_worker(self, unlock, link: _Link) -> None:
+        try:
+            unlocked = unlock.ensure_unlocked()
+        except Exception:
+            LOGGER.exception("The unlock failed")
+            unlocked = False
+        finally:
+            self._unlocking.clear()
+        # An unlock outlives an owner whose link ended during it: that end has reported, and a
+        # failure must not say CONNECTED over it.
+        if unlocked or self._owner is not link:
+            self._report()
+        else:
+            self._set_status(ServerState.CONNECTED, "Windows is locked — unlock it at the PC")
+
+    def _home_if_locked(self, link: _Link) -> None:
+        """An owner left driving a machine on its lock screen is sent home,
+        once per visit, after two checks LOCK_CHECK_SECONDS apart, and never while an unlock is in
+        flight or the owner is arriving."""
+        if self._unlock is None or self._owner is not link:
+            return
+        if self._unlocking.is_set() or self._arriving_visit is not None:
             self._locked_since = None
             return
         now = time.monotonic()
@@ -738,7 +1458,7 @@ class ReceiverServer:
             return
         self._lock_checked_at = now
         try:
-            locked = self._unlock_module().is_locked() is True
+            locked = self._unlock.is_locked() is True
         except Exception:
             locked = False
         if not locked:
@@ -747,22 +1467,17 @@ class ReceiverServer:
         if self._locked_since is None:
             self._locked_since = now
             return
-        if self._sent_home_for_lock:
-            return
-        LOGGER.info("Windows is locked while the %s drives it; sending its input home", self._peer_name)
-        self._sent_home_for_lock = self.send_home()
+        if not self._sent_home_for_lock:
+            LOGGER.info("This machine is locked while %s drives it; sending its input home", link.name)
+            self._sent_home_for_lock = self._send_home(link)
 
-    def _clipboard_module(self):
-        if self._clipboard is not None:
-            return self._clipboard
-        import clipboard_win
-        return clipboard_win
+    # Plumbing
 
-    def _unlock_module(self):
-        if self._unlock is not None:
-            return self._unlock
-        import unlock_win
-        return unlock_win
+    def _injector_module(self):
+        if self._injector is not None:
+            return self._injector
+        import input_injector
+        return input_injector
 
     def _desktop_module(self):
         if self._desktop is not None:
@@ -770,423 +1485,57 @@ class ReceiverServer:
         import desktop_win
         return desktop_win
 
-    def _return_trip(self, message: dict, connection: socket.socket, session: protocol.SecureSession) -> bool:
-        """The return path. Feeds every mouse move to the pressure model while
-        a return edge is armed; True means the move was consumed — the pointer
-        was held at the edge, or it broke through and the Mac has been asked
-        to take input back — and must not be injected."""
-        data = message.get("data")
-        if not isinstance(data, dict):
-            return False
-        try:
-            with self._return_lock:
-                model = self._return_edge
-                if model is None or not model.armed or self.edges_held():
-                    return False
-                desktop = self._desktop_module()
-                monitors, pointer = desktop.monitors(), desktop.cursor_position()
-                outcome = model.feed(monitors, pointer, float(data["dx"]), float(data["dy"]))
-                if outcome.action == crossing.CROSS:
-                    self._named_return = None
-            # Which third or corner is being pushed, so the owner lights only that.
-            part = None
-            if isinstance(model, crossing.PartEdge):
-                part = crossing.part_of(crossing.display_fraction(monitors, model.edge, pointer))
-            elif isinstance(model, crossing.CornerPush):
-                part = model.corner
-            if outcome.action == crossing.HOLD:
-                desktop.set_cursor_position(*outcome.position)
-            elif outcome.action == crossing.CROSS:
-                LOGGER.info("Pointer pushed through the %s edge; returning input to the %s", model.edge, self._peer_name)
-                self._send_message(connection, session, protocol.switch_msg(self._peer_target, outcome.edge, outcome.offset))
-        except Exception:
-            # Logged once, not at 100Hz: the return edge is dropped until the
-            # Mac's next switch re-arms it, and input keeps flowing normally.
-            LOGGER.exception("Return edge failed; crossing back is off until the next switch")
-            self._drop_return()
-            return False
-        if outcome.action == crossing.PASS:
-            return False
-        self._notify_pressure(model.edge, outcome.pressure, outcome.action == crossing.CROSS, part)
-        return True
+    def _clipboard_module(self):
+        if self._clipboard is not None:
+            return self._clipboard
+        import clipboard_win
+        return clipboard_win
 
-    def send_arrangement(self, mac_edge: str, set_at: int) -> bool:
-        """Tell the peer where the machines are, over the connection it opened
-        to this one. Used when the change was made at this end: the outward
-        link may be down, or may not exist on this machine at all, and this
-        one is up by definition whenever there is anyone to tell."""
-        with self._lock:
-            connection = self._client
-            session = self._session_for(connection)
-        if connection is None or session is None:
-            return False
-        return self._send_message(connection, session, protocol.arrangement_msg(mac_edge, set_at))
-
-    def send_settings(self, data: dict) -> bool:
-        """Tell the peer this end's settings state, over the connection it opened to this one."""
-        with self._lock:
-            connection = self._client
-            session = self._session_for(connection)
-        if connection is None or session is None:
-            return False
-        return self._send_message(connection, session, protocol.settings_msg(data))
-
-    def send_home(self) -> bool:
-        """Send the peer's input back to it from this end, as its own return
-        edge would. The escape that does not depend on that edge: the owner
-        calls it when someone here asks to switch while the peer is driving.
-        Earlier versions refused this outright, and a push through the edge
-        that failed to fire could then leave the peer's pointer stuck here
-        with no way back. The send runs on its own thread, because the
-        callers are a hook and an event tap that must never block on a
-        socket."""
-        with self._lock:
-            connection = self._client
-            session = self._session_for(connection)
-        if not self._peer_driving or connection is None or session is None:
-            return False
-        self._drop_return()
-        LOGGER.info("Switch asked for here; sending input home to the %s", self._peer_name)
-        threading.Thread(
-            target=self._send_message,
-            args=(connection, session, protocol.switch_msg(self._peer_target)),
-            name="Beamer-send-home",
-            daemon=True,
-        ).start()
-        return True
-
-    def _session_for(self, connection):
-        return self._sessions.get(connection) if connection is not None else None
-
-    def _handle_arrangement(self, message: dict) -> None:
-        read = protocol.read_arrangement(message.get("data"))
-        if read is None or self._arrangement_callback is None:
+    def _callback(self, name: str, *args) -> None:
+        callback = self._callbacks[name]
+        if callback is None:
             return
         try:
-            self._arrangement_callback(*read)
+            callback(*args)
         except Exception:
-            LOGGER.exception("Arrangement callback failed")
+            LOGGER.exception("The %s callback failed", name)
 
-    def _handle_settings(self, message: dict) -> None:
-        if self.settings_callback is None or not isinstance(message.get("data"), dict):
-            return
-        try:
-            self.settings_callback(message["data"])
-        except Exception:
-            LOGGER.exception("Settings callback failed")
-
-    def _notify_peer(self, host: str, hello: dict) -> None:
-        if self._peer_callback is None:
-            return
-        edge = hello.get("return_edge")
-        if edge not in crossing.EDGES:
-            edge = None
-        resistance = hello.get("resistance_px")
-        if isinstance(resistance, bool) or not isinstance(resistance, (int, float)):
-            resistance = None
-        try:
-            self._peer_callback(host, edge, None if resistance is None else int(resistance))
-        except Exception:
-            LOGGER.exception("Peer callback failed")
-
-    def _notify_focus(self, target) -> None:
-        if self._focus_callback is None or not isinstance(target, str):
-            return
-        if target == self._self_target:
-            self._peer_driving = True
-            self._sent_home_for_lock = False
-            # A lock seen on the last visit says nothing about this one.
-            self._locked_since = None
-        elif target == self._peer_target:
-            self._peer_driving = False
-        try:
-            self._focus_callback(target)
-        except Exception:
-            LOGGER.exception("Focus callback failed")
-
-    def _hand_back(self, why: str) -> None:
-        """The peer's input was on this machine and the link that carried it
-        is over. The peer has already failed open on its own side; the focus
-        that would have said so died with the socket, so it is raised here.
-        Otherwise the owner of this receiver keeps treating the peer as
-        driving, and its own edge and shortcut stay dead until the peer next
-        crosses in and back."""
-        if not self._peer_driving:
-            return
-        self._drop_return()
-        LOGGER.info("%s while its input was here; input returned to this %s", why, self._self_name)
-        self._release_peer_keys()
-        self._notify_focus(self._peer_target)
-
-    def _release_peer_keys(self) -> None:
-        """Let go of whatever the peer was holding here. A modifier or button
-        injected for the peer and never released -- a chord in flight when
-        input went home or the link died -- would otherwise stay down on this
-        machine, turning every later local keystroke into a shortcut."""
-        injector = self._injector
-        if injector is None:
+    def _run(self, steps) -> None:
+        """What an ownership change leaves to do without the lock: the owner callbacks it queued,
+        first and in order, then `steps`."""
+        self._tell_owner()
+        for step in steps:
             try:
-                import input_injector as injector
+                step()
             except Exception:
-                LOGGER.exception("Injector unavailable; keys the peer held may still be down")
-                return
-        release = getattr(injector, "release_all", None)
-        if release is None:
-            return
-        try:
-            release()
-        except Exception:
-            LOGGER.exception("Could not release the keys the %s was holding", self._peer_name)
+                LOGGER.exception("A step after an ownership change failed")
+        self._tell_owner()
 
-    def _notify_pressure(self, edge: str, pressure: float, crossed: bool, part: Optional[str] = None) -> None:
-        if self._pressure_callback is None:
-            return
-        try:
-            self._pressure_callback(edge, pressure, crossed, part)
-        except Exception:
-            LOGGER.exception("Pressure callback failed")
+    def _tell_owner(self) -> None:
+        # One thread at a time delivers, so the order queued under the lock is the order heard.
+        with self._notify_lock:
+            while True:
+                with self._lock:
+                    if not self._owner_events:
+                        return
+                    peer = self._owner_events.popleft()
+                self._callback("owner", peer)
 
-    def rearm_return(self) -> None:
-        """Rebuilds the way home from this machine's Crossing settings as they are now, for the
-        edge and resistance the peer last named, so a change applies while the peer's input is
-        here rather than at its next crossing. Nothing happens once that input has gone home, or
-        after the way home has been pushed through."""
-        with self._return_lock:
-            named = self._named_return
-            model = self._return_edge
-            if not self._peer_driving or named is None or (model is not None and not model.armed):
-                return
-            self._arm_return({"return_edge": named[0], "resistance_px": named[1]})
-
-    def _drop_return(self) -> None:
-        """The peer's visit is over, or its way home is spent: nothing may rebuild it."""
-        with self._return_lock:
-            self._return_edge = None
-            self._named_return = None
-
-    def _arm_return(self, data: dict) -> None:
-        """Every switch to Windows says which edge leads home and how hard to
-        push; an older Mac that says neither gets no return edge, so nothing
-        it does not expect can fire."""
-        with self._return_lock:
-            self._build_return(data)
-
-    def _build_return(self, data: dict) -> None:
-        edge = data.get("return_edge")
-        if edge not in crossing.EDGES:
-            self._return_edge = None
-            self._named_return = None
-            return
-        resistance = data.get("resistance_px", crossing.DEFAULT_RESISTANCE_PX)
-        # json.loads accepts Infinity and NaN, and int() of either raises, which
-        # nothing above this catches: a bad number gets the default instead.
-        if isinstance(resistance, bool) or not isinstance(resistance, (int, float)) or not math.isfinite(resistance):
-            resistance = crossing.DEFAULT_RESISTANCE_PX
-        self._named_return = (edge, int(resistance))
-        if self.return_model is None:
-            self._return_edge = crossing.ReturnEdge(edge, int(resistance))
-            return
-        try:
-            self._return_edge = self.return_model(edge, int(resistance))
-        except Exception:
-            LOGGER.exception("Could not build the way home through the %s edge", edge)
-            self._return_edge = crossing.ReturnEdge(edge, int(resistance))
-
-    def _place_pointer(self, data: dict) -> None:
-        """A crossing names the edge and the fraction along it, and the pointer is placed there. A
-        switch by the shortcut or a menu names neither and leaves the pointer where it was, which
-        the arrival callback gets as edge None, so the owner can show where that is."""
-        edge = data.get("edge")
-        offset = data.get("offset")
-        if edge not in crossing.EDGES or isinstance(offset, bool) or not isinstance(offset, (int, float)):
-            if self._arrival_callback is None:
-                return
-            try:
-                x, y = self._desktop_module().cursor_position()
-                self._arrival_callback(None, x, y)
-            except Exception:
-                LOGGER.exception("Arrival callback for a switch failed")
-            return
-        try:
-            desktop = self._desktop_module()
-            x, y = crossing.arrival_position(desktop.monitors(), edge, offset)
-            desktop.set_cursor_position(x, y)
-        except Exception:
-            LOGGER.exception("Could not place the pointer at the %s edge on arrival", edge)
-            return
-        if self._arrival_callback is None:
-            return
-        try:
-            self._arrival_callback(edge, x, y)
-        except Exception:
-            LOGGER.exception("Arrival callback failed")
-
-    def _begin_unlock(self, peer: str, host: str) -> None:
-        """Take the console off the lock screen, if it is on one, so the input
-        about to arrive has somewhere to land. Beamer cannot type on the secure
-        desktop at all -- see unlock_win -- so without this, switching to a
-        locked PC silently injects into nothing.
-
-        The lock test is a cheap in-process snapshot, so the common case (an
-        unlocked PC) stays inline and costs nothing. Only a real unlock goes to
-        a thread, because it takes seconds and this runs on the message loop
-        that has to keep draining pings."""
-        try:
-            unlock = self._unlock_module()
-        except Exception:
-            LOGGER.exception("Unlock support unavailable")
-            return
-        if unlock.is_locked() is not True:
-            return
-        if self._unlocking.is_set():
-            return
-        self._unlocking.set()
-        LOGGER.info("%s switched to a locked PC; asking the provider to unlock", peer)
-        self._set_status(ServerState.CONNECTED, "Unlocking Windows…")
+    def _report(self) -> None:
         with self._lock:
-            generation = self._session_generation
-        threading.Thread(
-            target=self._unlock_worker,
-            args=(unlock, peer, host, generation),
-            name="Beamer-unlock",
-            daemon=True,
-        ).start()
-
-    def _unlock_worker(self, unlock, peer: str, host: str, generation: int) -> None:
-        try:
-            unlocked = unlock.ensure_unlocked()
-        except Exception:
-            LOGGER.exception("Unlock failed for %s", peer)
-            unlocked = False
-        finally:
-            self._unlocking.clear()
-        # An unlock takes seconds, so the Mac may have gone in the meantime and
-        # the session's own exit already have set WAITING. Only the session
-        # that asked for this unlock may report its outcome.
-        if not self._is_current_session(generation):
-            return
-        if unlocked:
-            self._set_status(ServerState.CONNECTED, f"Connected to {host}")
+            links = list(self._links.values())
+            port = self._port
+        names = []
+        if links:
+            peers = self._settings_now()[0]
+            names = sorted(peerlist.label_for(peers, peer_id=protocol.id_text(link.peer_id)) or link.name for link in links)
+        if names:
+            self._set_status(ServerState.CONNECTED, "Connected to " + ", ".join(names))
         else:
-            self._set_status(
-                ServerState.CONNECTED, "Windows is locked — unlock it at the PC"
-            )
-
-    def _handle_focus(
-        self,
-        message: dict,
-        connection: socket.socket,
-        session: protocol.SecureSession,
-        peer: str,
-        host: str,
-    ) -> None:
-        """`focus{target:"mac"}` means the Mac just switched input back to
-        itself: reply with this Windows clipboard's text so the Mac's
-        pasteboard picks up whatever was last copied here.
-        `target:"windows"` means input is coming here: learn the way home
-        from it, land the pointer where a crossing says, and clear the lock
-        screen out of its way."""
-        data = message.get("data")
-        target = data.get("target") if isinstance(data, dict) else None
-        if target == self._peer_target:
-            # Released before the owner hears input is home: the Mac's tap
-            # comes back on at that notice, and a modifier still down would
-            # chord with the first local keystroke.
-            self._drop_return()
-            self._release_peer_keys()
-        if target == self._self_target:
-            # Raised before anyone hears the peer is driving, and held until the unlock has been
-            # asked for. Placing the pointer or an owner's callback can take a second, and in
-            # that second the lock check saw a locked PC with the peer driving and sent its
-            # input home before the provider that could have unlocked it was tried.
-            self._arriving.set()
-            try:
-                self._notify_focus(target)
-                self._arm_return(data)
-                self._place_pointer(data)
-                self._begin_unlock(peer, host)
-            finally:
-                self._arriving.clear()
-            return
-        self._notify_focus(target)
-        if target != self._peer_target:
-            return
-        clipboard = self._clipboard_module()
-        try:
-            text, image = clipboard.changed_contents()
-        except Exception:
-            LOGGER.exception("Failed to read the local clipboard for %s", peer)
-            return
-        if text and len(text.encode("utf-8")) > protocol.CLIPBOARD_MAX_BYTES:
-            LOGGER.warning("Local clipboard text too large; skipping the text for %s", peer)
-            text = None
-        if image is not None and len(image) > protocol.CLIPBOARD_IMAGE_MAX_BYTES:
-            LOGGER.warning(
-                "Local clipboard image is %d bytes, over the %d cap; skipping the image for %s",
-                len(image),
-                protocol.CLIPBOARD_IMAGE_MAX_BYTES,
-                peer,
-            )
-            image = None
-        if not text and image is None:
-            return
-        self._send_message(connection, session, protocol.clipboard_msg(text or None, image))
-
-    def _handle_inbound_clipboard(self, message: dict, peer: str) -> None:
-        data = message.get("data")
-        text = data.get("text") if isinstance(data, dict) else None
-        if not isinstance(text, str) or not text:
-            text = None
-        elif len(text.encode("utf-8")) > protocol.CLIPBOARD_MAX_BYTES:
-            LOGGER.warning("Ignoring oversized inbound clipboard text from %s", peer)
-            text = None
-        image = protocol.clipboard_image(data)
-        if text is None and image is None:
-            return
-        clipboard = self._clipboard_module()
-        try:
-            if not clipboard.set_contents(text, image):
-                LOGGER.warning("Failed to set the local clipboard for %s", peer)
-        except Exception:
-            LOGGER.exception("Failed to set the local clipboard for %s", peer)
-
-    @staticmethod
-    def _hello_version(message: dict):
-        data = message.get("data", {})
-        if not isinstance(data, dict):
-            return None
-        return data.get("version")
-
-    @staticmethod
-    def _send_message(
-        connection: socket.socket,
-        session: protocol.SecureSession,
-        message: dict,
-    ) -> bool:
-        """The session's own lock serialises the seal and the write together,
-        so frames reach the wire in counter order from every thread."""
-        try:
-            protocol.send_msg(connection, session, message)
-            return True
-        except (OSError, protocol.ProtocolError) as exc:
-            LOGGER.warning("Send failed: %s", exc)
-            return False
+            self._set_status(ServerState.WAITING, f"Waiting on port {port}")
 
     def _set_status(self, state: ServerState, detail: str) -> None:
         try:
             self._status_callback(state, detail)
         except Exception:
             LOGGER.exception("Status callback failed")
-
-    @staticmethod
-    def _close_socket(sock: Optional[socket.socket]) -> None:
-        if sock is None:
-            return
-        try:
-            sock.shutdown(socket.SHUT_RDWR)
-        except OSError:
-            pass
-        try:
-            sock.close()
-        except OSError:
-            pass

@@ -1,4 +1,6 @@
-"""Shared config.json loader for mac_sender.py and win_receiver.py."""
+"""The Mac app's Config and the parser for config.json's shape.
+
+settings_store reads settings.json (WIRE.md section 1) into that shape, so what is above it is unchanged."""
 
 import json
 import os
@@ -79,6 +81,9 @@ class Config:
     # seconds of the last change to that or to a shared value; see settings_sync.
     same_on_both: bool = False
     same_set_at: int = 0
+    # Who made the change the stamp above is for, as a machine id: the tie-break between two ends
+    # that changed it in the same second (WIRE.md section 10).
+    same_by: str = ""
     # How the PC's pointer and scroll feel on this Mac; see receiver.InputScale.
     pointer_speed: float = 1.0
     scroll_speed: float = 1.0
@@ -111,7 +116,11 @@ def load_config(path: str = None) -> Config:
 
     with open(path, "r", encoding="utf-8") as f:
         raw = json.load(f)
+    return parse_config(raw)
 
+
+def parse_config(raw: dict) -> Config:
+    """A Config from a dict in config.json's shape, the one settings_store hands over from settings.json."""
     missing = [k for k in ("host", "port", "auth_token") if k not in raw]
     if missing:
         raise ConfigError(f"config.json is missing required field(s): {', '.join(missing)}")
@@ -146,6 +155,7 @@ def load_config(path: str = None) -> Config:
     if isinstance(crossing["edge_parts"], list):
         crossing["edge_parts"] = list(crossing["edge_parts"])
     crossing["resistance_px"] = int(crossing["resistance_px"])
+    crossing["arrangement_set_at"] = _stamp(crossing["arrangement_set_at"])
 
     return Config(
         host=raw["host"],
@@ -165,6 +175,7 @@ def load_config(path: str = None) -> Config:
         hide_addresses=raw.get("hide_addresses", False) is True,
         same_on_both=raw.get("same_on_both", False) is True,
         same_set_at=_stamp(raw.get("same_set_at", 0)),
+        same_by=str(raw.get("same_by", "") or ""),
         pointer_speed=raw.get("pointer_speed", 1.0),
         scroll_speed=raw.get("scroll_speed", 1.0),
         reverse_scroll=raw.get("reverse_scroll", False),

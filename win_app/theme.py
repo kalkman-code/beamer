@@ -110,12 +110,13 @@ def system_dark() -> bool:
     """The system's own light/dark choice. AppsUseLightTheme, not the taskbar's
     SystemUsesLightTheme, which Windows lets disagree with it -- this window is an app."""
     try:
-        import winreg
+        if sys.platform == "win32":
+            import winreg
 
-        with winreg.OpenKey(
-            winreg.HKEY_CURRENT_USER, r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize"
-        ) as key:
-            return winreg.QueryValueEx(key, "AppsUseLightTheme")[0] == 0
+            with winreg.OpenKey(
+                winreg.HKEY_CURRENT_USER, r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize"
+            ) as key:
+                return winreg.QueryValueEx(key, "AppsUseLightTheme")[0] == 0
     except (ImportError, OSError):
         pass
     from PySide6.QtGui import QGuiApplication

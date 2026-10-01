@@ -12,12 +12,18 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(
 
 import app_config
 import capture_win
-from core import protocol
 from app_config import ConfigError, config_from_dict, config_to_dict, default_config
-import sender as sender_module
-import test_sender
-from test_sender import MONITORS, MacSenderWithLink, make_config, wait_for
-from fakes import FakeClipboard, FakeDesktop, wait_for_calls
+from core.tests import responder_harness as harness
+from links_rig import B, Rig, make_config
+
+
+def wait_for(predicate, timeout=5.0):
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if predicate():
+            return True
+        time.sleep(0.02)
+    return False
 
 
 def raw(**values):
@@ -104,16 +110,11 @@ class ConfigRangeTests(unittest.TestCase):
 
 class HeldEdgeTests(unittest.TestCase):
     def setUp(self):
-        self.desktop = FakeDesktop(MONITORS, cursor=(0, 500))
-        self.link = MacSenderWithLink(desktop=self.desktop)
-        self.sender = self.link.sender
-
-    def tearDown(self):
-        self.link.close()
+        self.rig = Rig(cursor=(0, 500))
+        self.sender = self.rig.sender
 
     def push(self, times=10):
-        for _ in range(times):
-            self.sender.on_motion(-20, 0)
+        self.rig.push(times)
 
     def test_pause_holds_the_edge_and_leaves_the_shortcut(self):
         self.sender.crossing_paused = True
@@ -138,101 +139,100 @@ class HeldEdgeTests(unittest.TestCase):
         self.assertTrue(self.sender.redirecting)
 
     def test_a_drag_against_the_edge_does_not_cross(self):
-        self.sender.on_mouse(capture_win.WM_LBUTTONDOWN, 0, 500, 0)
+        self.sender.on_button("left", True)
         self.push()
         self.assertFalse(self.sender.redirecting)
-        self.sender.on_mouse(capture_win.WM_LBUTTONUP, 0, 500, 0)
+        self.sender.on_button("left", False)
         self.push()
         self.assertTrue(self.sender.redirecting)
 
     def test_a_button_whose_release_was_never_seen_does_not_hold_the_edge_for_ever(self):
         # Let go over the secure desktop: the hook never saw the release, Windows says it is up.
-        self.desktop.button_down = lambda name: False
-        self.sender.on_mouse(capture_win.WM_MBUTTONDOWN, 0, 500, 0)
+        self.rig.desktop.button_down = lambda name: False
+        self.sender.on_button("middle", True)
         self.push()
         self.assertTrue(self.sender.redirecting)
 
     def test_a_drag_crosses_when_the_setting_is_off(self):
         self.sender.update_config(make_config(block_while_dragging=False))
-        self.sender.on_mouse(capture_win.WM_LBUTTONDOWN, 0, 500, 0)
+        self.sender.on_button("left", True)
         self.push()
         self.assertTrue(self.sender.redirecting)
 
 
 class AlertAndWakeTests(unittest.TestCase):
     def setUp(self):
-        self.alerts = []
         self.packets = []
-        self.sender = sender_module.MacSender(
-            desktop=FakeDesktop(MONITORS, cursor=(900, 500)),
-            clipboard=FakeClipboard(),
-            is_local=lambda host: False,
-            wake_sender=lambda mac, host: self.packets.append((mac, host)),
-            mac_lookup=lambda host: None,
-        )
-        self.sender.on_alert = lambda title, message: self.alerts.append(message)
+
+    def rig(self, **fields):
+        rig = Rig(entries=[harness.entry(B, "Mac", side="left", **fields)], up=())
+        rig.sender._wake_sender = lambda address, host=None: self.packets.append((address, host))
+        return rig
 
     def test_a_switch_with_no_link_and_no_address_says_why(self):
-        self.sender.update_config(make_config())
-        self.assertFalse(self.sender.set_redirecting(True))
-        self.assertTrue(self.alerts and self.alerts[0].startswith("Cannot switch"))
+        rig = self.rig()
+        self.assertFalse(rig.sender.set_redirecting(True))
+        self.assertTrue(rig.alerts and rig.alerts[0].startswith("Cannot switch"))
         self.assertEqual(self.packets, [])
 
     def test_a_switch_with_no_link_wakes_a_mac_whose_address_is_known(self):
-        self.sender.update_config(make_config(mac_hardware_address="02:1A:2B:3C:0D:4E"))
-        self.assertFalse(self.sender.set_redirecting(True))
+        rig = self.rig(hw="02:1A:2B:3C:0D:4E")
+        self.assertFalse(rig.sender.set_redirecting(True))
         self.assertTrue(wait_for(lambda: self.packets))
-        self.assertEqual(self.packets[0], ("02:1A:2B:3C:0D:4E", "127.0.0.1"))
-        self.assertTrue(wait_for(lambda: "Waking your Mac…" in self.alerts))
-        self.sender._stop_event.set()
+        self.assertEqual(self.packets[0], ("02:1A:2B:3C:0D:4E", "192.168.77.9"))
+        self.assertTrue(wait_for(lambda: "Waking Mac…" in rig.alerts))
+        rig.sender._stop_event.set()
 
     def test_a_mac_that_refused_the_token_is_not_woken(self):
-        self.sender.update_config(make_config(mac_hardware_address="02:1A:2B:3C:0D:4E"))
-        self.sender._status = sender_module.AUTH_FAILED_STATUS
-        self.assertFalse(self.sender.set_redirecting(True))
+        rig = self.rig(hw="02:1A:2B:3C:0D:4E")
+        rig.links.refusing.add(B)
+        rig.sender.on_status(rig.links.key_of(rig.settings.data["peers"][0]), False, "Mac refused the pairing")
+        self.assertFalse(rig.sender.set_redirecting(True))
         self.assertEqual(self.packets, [])
-        self.assertTrue(self.alerts[0].endswith(sender_module.AUTH_FAILED_STATUS))
+        self.assertTrue(rig.alerts[0].endswith("Mac refused the pairing"))
 
     def test_a_dead_link_sending_input_home_says_so(self):
-        self.sender.redirecting = True
-        self.sender._force_local("the link went quiet")
-        self.assertEqual(self.alerts, ["Input returned to this PC"])
+        rig = Rig()
+        rig.sender.set_redirecting(True)
+        rig.accept_take()
+        rig.links.up_set.discard(B)
+        rig.sender.on_key("a", True, 0x41, "a")
+        self.assertFalse(rig.sender.redirecting)
+        self.assertEqual(rig.alerts, ["Lost the link to Mac"])
 
 
-class ModifierAndRoundTripTests(test_sender.LinkTests):
-    """Over the real loopback link to the Mac's receiver, reusing LinkTests' set-up; its own
-    tests are proved in test_sender and not run twice."""
+class ModifierStyleTests(unittest.TestCase):
+    def setUp(self):
+        self.rig = Rig()
+        self.sender = self.rig.sender
+        self.sender.set_redirecting(True)
+        self.rig.accept_take()
+
+    def keys(self):
+        return [(m["type"], m["data"]["key"]) for m in self.rig.sent(B) if m["type"] in ("keydown", "keyup")]
 
     def test_positional_sends_ctrl_as_control(self):
-        self.sender.update_config(make_config(port=self.port, modifier_style="positional"))
-        self.sender.set_redirecting(True, arrival_edge="right", offset=0.5)
+        self.sender.update_config(make_config(modifier_style="positional"))
         self.sender.on_key("cmd", True)
-        # The style changes while the key is held: its release still matches its press.
-        self.sender.update_config(make_config(port=self.port))
+        self.assertEqual(self.keys(), [("keydown", "ctrl")])
+
+    # LinkSender._key_message applies the style when the outbound worker delivers a key, and
+    # `_keys_down` holds only the physical name, so a release after a style change leaves under
+    # the new style's name: the Mac gets ctrl down and cmd up. The press goes out within
+    # milliseconds, hence the flush between the two calls.
+    def test_the_style_changing_while_a_key_is_held_still_releases_it_under_its_press_name(self):
+        self.sender.update_config(make_config(modifier_style="positional"))
+        self.sender.on_key("cmd", True)
+        self.rig.flush()
+        self.sender.update_config(make_config())
         self.sender.on_key("cmd", False)
-        wait_for_calls(self.injector.calls, 2)
-        self.assertEqual(self.injector.calls, [("key", ("ctrl", True)), ("key", ("ctrl", False))])
+        self.assertEqual(self.keys(), [("keydown", "ctrl"), ("keyup", "ctrl")])
 
     def test_shift_let_go_first_still_releases_the_capital(self):
-        self.sender.set_redirecting(True, arrival_edge="right", offset=0.5)
         self.sender.on_key("A", True, 0x41)
         self.sender.on_key("a", False, 0x41)
-        wait_for_calls(self.injector.calls, 2)
-        self.assertEqual(self.injector.calls, [("key", ("A", True)), ("key", ("A", False))])
+        self.assertEqual(self.keys(), [("keydown", "A"), ("keyup", "A")])
         self.assertEqual(self.sender._keys_down, {})
-
-    def test_the_round_trip_is_measured_while_input_is_on_the_mac(self):
-        self.assertIsNone(self.sender.round_trip_ms)
-        self.sender.set_redirecting(True, arrival_edge="right", offset=0.5)
-        for _ in range(5):
-            self.sender.on_motion(3, 0)
-            time.sleep(0.05)
-        self.assertTrue(wait_for(lambda: self.sender.round_trip_ms is not None), "no round trip measured")
-        self.assertGreaterEqual(self.sender.round_trip_ms, 0)
-
-
-for _name in [n for n in dir(test_sender.LinkTests) if n.startswith("test_")]:
-    setattr(ModifierAndRoundTripTests, _name, None)
 
 
 if __name__ == "__main__":

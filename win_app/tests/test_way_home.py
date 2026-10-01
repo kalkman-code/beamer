@@ -1,33 +1,35 @@
-import sys
 import unittest
-from types import SimpleNamespace
+
+from core import receiver, return_edge
+from core.protocol import id_text
+from core.tests.responder_harness import B
+
+PEER = id_text(B)
 
 
-@unittest.skipUnless(sys.platform == "win32", "the app module needs Windows")
 class WayHomeFollowsThisPcTests(unittest.TestCase):
-    """The Mac's pointer comes home through this PC's edge as this PC's own settings say."""
+    """A peer's pointer goes on from this PC through the zones this PC's own settings hold, the ones
+    its own pointer crosses by."""
 
-    def model(self, methods, parts=("middle",), corner="bottom_left", edge="bottom"):
-        import kvm_bridge_win
-
-        config = SimpleNamespace(crossing_methods=list(methods), crossing_edge_parts=list(parts), crossing_corner=corner)
-        return kvm_bridge_win.WindowsApplication._return_model(SimpleNamespace(_config=config), edge, 120)
+    def arm(self, zones, side="bottom"):
+        peers = [{"id": PEER, "side": side}]
+        return [model for _peer, model in receiver.zone_models(zones, peers, {B}, 120)]
 
     def test_part_of_the_edge_arms_only_its_thirds(self):
-        from core import return_edge
+        armed = self.arm([{"peer": PEER, "kind": "part", "parts": ["start", "end"]}])
+        self.assertIsInstance(armed[0], return_edge.PartEdge)
+        self.assertEqual(armed[0].parts, frozenset({"start", "end"}))
 
-        armed = self.model(["part", "shortcut"], parts=("start", "end"))
-        self.assertIsInstance(armed, return_edge.PartEdge)
-        self.assertEqual(armed.parts, frozenset({"start", "end"}))
+    def test_a_corner_zone_arms_the_edge_it_names(self):
+        armed = self.arm([{"peer": PEER, "kind": "corner", "corner": "bottom_left", "edge": "bottom"}])
+        self.assertIsInstance(armed[0], return_edge.CornerPush)
+        self.assertEqual(armed[0].edge, "bottom")
 
-    def test_a_corner_on_that_edge_and_none_elsewhere(self):
-        from core import return_edge
+    def test_the_shortcut_alone_leaves_no_way_on_by_the_pointer(self):
+        self.assertEqual(self.arm([]), [])
 
-        self.assertIsInstance(self.model(["corner"], corner="bottom_left"), return_edge.CornerPush)
-        self.assertIsNone(self.model(["corner"], corner="top_left"))
-
-    def test_the_shortcut_alone_leaves_no_way_home_by_the_pointer(self):
-        self.assertIsNone(self.model(["shortcut"]))
+    def test_a_zone_that_is_off_is_not_armed(self):
+        self.assertEqual(self.arm([{"peer": PEER, "kind": "edge", "off": True}]), [])
 
 
 if __name__ == "__main__":

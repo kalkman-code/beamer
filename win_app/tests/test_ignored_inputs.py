@@ -1,9 +1,8 @@
 """Keys and buttons that stay on this PC while its input is on the Mac: the sender's decision on
-the hook thread, the side buttons now crossing, and the setting's round trip through config.json."""
+the hook thread, the side buttons now crossing, and the setting's round trip through settings.json."""
 
 import json
 import tempfile
-import time
 import unittest
 from pathlib import Path
 import os
@@ -15,9 +14,7 @@ import app_config
 import capture_win
 from core import ignored
 from core import protocol
-import sender
-from fakes import FakeClipboard, FakeDesktop
-from core.return_edge import Rect
+from links_rig import B, Rig, make_config as rig_config
 
 VK_F13 = 0x7C
 VK_A = 0x41
@@ -37,57 +34,46 @@ def make_config(**overrides):
     return app_config.Config(**values)
 
 
-def x_button(message, number):
-    return message, number << 16
-
-
 class SenderTests(unittest.TestCase):
     def setUp(self):
-        self.sender = sender.MacSender(
-            desktop=FakeDesktop([Rect(0, 0, 1920, 1080)], cursor=(900, 500)),
-            clipboard=FakeClipboard(),
-            is_local=lambda host: False,
-        )
-        self.configure([ignored.key(VK_F13), ignored.button("back")])
-        self.sender._sock = object()
-        self.sender._connected_at = time.monotonic()
-        self.sender._last_ack_at = time.monotonic()
+        self.rig = Rig(cursor=(900, 500), ignored_inputs=[ignored.key(VK_F13), ignored.button("back")])
+        self.sender = self.rig.sender
         self.sender.set_redirecting(True)
-        self.drain()
-
-    def tearDown(self):
-        self.sender._sock = None
+        self.rig.accept_take()
 
     def configure(self, entries):
-        self.sender.update_config(make_config(ignored_inputs=list(entries)))
+        self.sender.update_config(rig_config(ignored_inputs=list(entries)))
 
-    def drain(self):
-        messages = []
-        while not self.sender._outbound.empty():
-            messages.append(self.sender._outbound.get_nowait())
-        return [(m["type"], m["data"]) for m in messages if m["type"] in (
+    def sent(self):
+        return [(m["type"], m["data"]) for m in self.rig.sent(B) if m["type"] in (
             protocol.MSG_KEYDOWN, protocol.MSG_KEYUP, protocol.MSG_MOUSEDOWN, protocol.MSG_MOUSEUP
         )]
 
-    def test_an_ignored_key_reaches_this_pc_and_not_the_mac(self):
+    def mouse(self, message, data=0):
+        """`WindowsApplication._on_hook_mouse` for a button: the hook's message, then the sender's call."""
+        event = capture_win.mouse_event(message, data)
+        self.assertEqual(event[0], "button")
+        return self.sender.on_button(event[1], event[2])
+
+    def test_an_ignored_key_reaches_this_pc_and_not_the_peer(self):
         self.assertFalse(self.sender.on_key("f13", True, VK_F13))
         self.assertFalse(self.sender.on_key("f13", False, VK_F13))
-        self.assertEqual(self.drain(), [])
+        self.assertEqual(self.sent(), [])
 
-    def test_any_other_key_still_goes_to_the_mac(self):
+    def test_any_other_key_still_goes_to_the_peer(self):
         self.assertTrue(self.sender.on_key("a", True, VK_A))
         self.assertTrue(self.sender.on_key("a", False, VK_A))
-        self.assertEqual(self.drain(), [
+        self.assertEqual(self.sent(), [
             (protocol.MSG_KEYDOWN, {"key": "a"}),
             (protocol.MSG_KEYUP, {"key": "a"}),
         ])
 
-    def test_a_key_ignored_while_held_on_the_mac_is_still_released_there(self):
+    def test_a_key_ignored_while_held_on_the_peer_is_still_released_there(self):
         self.configure([])
         self.assertTrue(self.sender.on_key("f13", True, VK_F13))
         self.configure([ignored.key(VK_F13)])
         self.assertTrue(self.sender.on_key("f13", False, VK_F13))
-        self.assertEqual(self.drain(), [
+        self.assertEqual(self.sent(), [
             (protocol.MSG_KEYDOWN, {"key": "f13"}),
             (protocol.MSG_KEYUP, {"key": "f13"}),
         ])
@@ -95,20 +81,17 @@ class SenderTests(unittest.TestCase):
     def test_the_side_buttons_cross_as_back_and_forward(self):
         self.configure([])
         for message in (capture_win.WM_XBUTTONDOWN, capture_win.WM_XBUTTONUP):
-            message, data = x_button(message, 2)
-            self.assertTrue(self.sender.on_mouse(message, 0, 0, data))
-        self.assertEqual(self.drain(), [
+            self.assertTrue(self.mouse(message, 2 << 16))
+        self.assertEqual(self.sent(), [
             (protocol.MSG_MOUSEDOWN, {"button": "forward"}),
             (protocol.MSG_MOUSEUP, {"button": "forward"}),
         ])
 
     def test_an_ignored_button_stays_on_this_pc(self):
-        message, data = x_button(capture_win.WM_XBUTTONDOWN, 1)
-        self.assertFalse(self.sender.on_mouse(message, 0, 0, data))
-        message, data = x_button(capture_win.WM_XBUTTONUP, 1)
-        self.assertFalse(self.sender.on_mouse(message, 0, 0, data))
-        self.assertTrue(self.sender.on_mouse(capture_win.WM_MBUTTONDOWN, 0, 0, 0))
-        self.assertEqual(self.drain(), [(protocol.MSG_MOUSEDOWN, {"button": "middle"})])
+        self.assertFalse(self.mouse(capture_win.WM_XBUTTONDOWN, 1 << 16))
+        self.assertFalse(self.mouse(capture_win.WM_XBUTTONUP, 1 << 16))
+        self.assertTrue(self.mouse(capture_win.WM_MBUTTONDOWN))
+        self.assertEqual(self.sent(), [(protocol.MSG_MOUSEDOWN, {"button": "middle"})])
 
 
 class CaptureTests(unittest.TestCase):
@@ -153,7 +136,7 @@ class CaptureTests(unittest.TestCase):
 class ConfigTests(unittest.TestCase):
     def test_the_list_survives_a_save_and_a_load(self):
         with tempfile.TemporaryDirectory() as directory:
-            path = Path(directory) / "config.json"
+            path = Path(directory) / "settings.json"
             entries = [ignored.key(VK_F13), ignored.button("back")]
             app_config.save_config(path, make_config(port=24820, ignored_inputs=entries))
             self.assertEqual(json.loads(path.read_text())["ignored_inputs"], entries)

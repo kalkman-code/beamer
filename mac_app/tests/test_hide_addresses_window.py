@@ -1,5 +1,5 @@
-"""Hide addresses in the real settings window: the pairing card's typed address and what it says
-about it. Built as tools/readme_shots_mac.py builds it, never put on screen, starting no network."""
+"""Hide addresses in the real settings window: the pairing sheet's typed address, the machines list
+and what they say. Built as the README's screenshots build it, never put on screen, starting no network."""
 
 import json
 import logging
@@ -37,28 +37,32 @@ class HideAddressesWindowTests(unittest.TestCase):
             self.window = kvm_bridge_app.ControlWindow.alloc().initWithController_settingsStore_logger_(
                 WakingController(store.load(), logger=logger), store, logger
             )
-        self.window.discovery = mock.Mock(pcs=mock.Mock(return_value=[]))
+        self.service = mock.Mock(machines=mock.Mock(return_value=[]), error=None, code=None)
+        self.window.panel.service = self.service
 
     def tearDown(self):
         self.window.appearance_watch.stop()
         self.directory.cleanup()
 
     def test_the_typed_address_is_dots_and_is_never_said_back(self):
-        plain_box, secret_box = self.window.find_boxes
+        panel = self.window.panel
+        plain_box, secret_box = panel.find_boxes
         self.assertTrue(plain_box.isHidden())
         self.assertFalse(secret_box.isHidden())
-        self.window.find_secret.setStringValue_("192.0.2.10")
-        with mock.patch.object(kvm_bridge_app.AppHelper, "callLater"):
-            self.window.findPC_(None)
-        self.window.discovery.find.assert_called_once_with("192.0.2.10")
-        self.window._find_timed_out(self.window._find_serial)
-        self.assertNotIn("192.0.2.10", self.window.find_status.view.stringValue())
+        panel.find_secret.setStringValue_("192.0.2.10")
+        for field, digit in zip(panel.code_boxes.fields, "123456"):
+            field.setStringValue_(digit)
+        with mock.patch.object(kvm_bridge_app.machines_panel.threading, "Thread"):
+            panel._pair()
+        self.assertIn("Pairing with", panel.pair_status.text)
+        self.assertNotIn("192.0.2.10", panel.pair_status.text)
 
     def test_switching_it_off_shows_the_typed_address_again(self):
-        self.window.find_secret.setStringValue_("192.0.2.10")
+        panel = self.window.panel
+        panel.find_secret.setStringValue_("192.0.2.10")
         self.window._set_hide_addresses(False)
-        self.assertEqual(self.window.find_field.stringValue(), "192.0.2.10")
-        self.assertFalse(self.window.find_boxes[0].isHidden())
+        self.assertEqual(panel.find_field.stringValue(), "192.0.2.10")
+        self.assertFalse(panel.find_boxes[0].isHidden())
 
     def test_the_footer_hides_an_address_in_a_failed_switch(self):
         # Codex, 29-09-2026: a failed switch put the connection status, which names the PC's
@@ -66,12 +70,28 @@ class HideAddressesWindowTests(unittest.TestCase):
         self.window._say("Connecting to 192.0.2.20:24820", "fault")
         self.assertNotIn("192.0.2.20", self.window.message_label.view.stringValue())
 
-    def test_an_unnamed_pc_is_not_named_by_its_address(self):
-        # peer_name falls back to the address when the PC has no name.
+    def test_an_unnamed_machine_is_not_named_by_its_address(self):
+        # labels() falls back to the address when a machine has no name.
         self.window.controller.cfg.pc_name = ""
-        self.window._refresh_paired(mock.Mock(key="token"))
-        self.assertNotIn("192.0.2.20", self.window.paired_name.view.stringValue())
-        self.assertNotIn("192.0.2.20", self.window.paired_note.view.stringValue())
+        peer = self.window.controller.book.peers()[0]
+        self.window.settings_store.set_peer(peer["token"], send=True)
+        settings = self.window.settings_store.current()
+        settings["peers"][0]["name"] = ""
+        self.window.settings_store.save_settings(settings)
+        self.window.panel.refresh()
+        texts = []
+
+        def walk(view):
+            if isinstance(view, kvm_bridge_app.AppKit.NSTextField):
+                texts.append(view.stringValue())
+            texts.append(view.accessibilityLabel() or "")
+            for sub in view.subviews():
+                walk(sub)
+
+        for row in self.window.panel.list.arrangedSubviews():
+            walk(row)
+        self.assertTrue(texts)
+        self.assertNotIn("192.0.2.20", " ".join(texts))
 
 
 class ReloadTests(unittest.TestCase):

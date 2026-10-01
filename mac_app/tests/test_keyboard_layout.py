@@ -15,7 +15,7 @@ import keyboard_layout
 import input_injector_mac as injector
 from core import protocol
 from bridge import QuartzEventTranslator
-from tests.test_bridge import FakeQuartz
+from bridge_fakes import FakeQuartz
 
 GERMAN = {0x00: "a", 0x06: "y", 0x07: "x", 0x08: "c", 0x09: "v", 0x0C: "q", 0x10: "z", 0x18: None, 0x21: "ü", 0x29: "ö", 0x32: "<"}
 FRENCH = {0x00: "q", 0x06: "w", 0x0C: "a", 0x0D: "z", 0x10: "y", 0x12: "&", 0x29: "m"}

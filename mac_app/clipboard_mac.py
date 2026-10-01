@@ -77,6 +77,11 @@ def _change_count():
         return None
 
 
+def change_stamp():
+    """A number that changes whenever the pasteboard does, or None when it cannot be read."""
+    return _change_count()
+
+
 def changed_contents():
     """get_contents(), or (None, None) when the pasteboard has not changed since it was last sent
     to or written from the peer. Either way the current contents count as sent from here on."""

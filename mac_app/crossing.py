@@ -141,22 +141,6 @@ class CrossingEngine:
         self._last_x = None
         self._last_y = None
 
-    def home_edge(self, mac_edge=None):
-        """The Windows edge the pointer comes home through: opposite the Mac edge it left by or,
-        for a shortcut switch, opposite whichever pointer method is on. The notch and a corner come
-        first because the configured `edge` keeps its value while the edge method is off, and
-        reading it then armed the wrong Windows edge and left the notch's way home dead. With only
-        the shortcut on it is still the PC's edge facing this Mac: turning this Mac's own edge off
-        says nothing about the PC's, and the PC also learns from it which way its own push goes."""
-        if mac_edge is None:
-            if "notch" in self.methods and not self.methods & {"edge", "part"}:
-                mac_edge = "top"
-            elif "corner" in self.methods and not self.methods & {"edge", "part"}:
-                mac_edge = self.corner.split("_")[1]
-            else:
-                mac_edge = self.edge
-        return OPPOSITE[mac_edge]
-
     def pressure_at(self, now):
         """Pressure as a fraction, decayed to `now` without recording anything — for the glow,
         which has to keep fading after the last event arrives."""

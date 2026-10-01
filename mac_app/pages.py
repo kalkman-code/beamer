@@ -14,8 +14,8 @@ from core import effects
 # set up in after the Overview; Cmd+1 is the first.
 PAGES = (
     ("overview", "Overview", "gauge.with.needle",
-     "Where input is, whether the link is up, and the controls you reach for every day. Pair with a "
-     "PC here first."),
+     "Where input is, whether each link is up, and the controls you reach for every day. Pair your "
+     "machines here first."),
     ("permissions", "Permissions", "lock.shield",
      "macOS must allow Beamer to read this keyboard and trackpad before it can send them anywhere."),
     ("crossing", "Crossing", "cursorarrow.motionlines",
@@ -26,7 +26,7 @@ PAGES = (
     ("design", "Design", "paintpalette",
      "How crossing looks and feels on this Mac: the edge, the corner, the notch and the trackpad."),
     ("connection", "Connection", "network",
-     "Where the PC is and the token this Mac proves itself with. Pairing fills these in."),
+     "Where the first machine you paired is. Pairing fills these in."),
 )
 KEYS = tuple(page[0] for page in PAGES)
 # Under the purpose on the pages whose settings are this Mac's alone, so nobody looks for the PC's
@@ -235,11 +235,11 @@ def crossing_state_sentence(paired, sending, connected, armed, paused, full_scre
     """The Crossing page's line under Pause: why nothing can cross, first match wins, and only then
     whether crossing is on, held or paused."""
     if not paired:
-        return "Not paired yet, so no edge or shortcut moves input until you pair with a PC above."
+        return "Not paired yet, so no edge or shortcut moves input until you pair a machine on Overview."
     if not sending:
-        return "This Mac drives Windows is off, so edges and the shortcut do nothing."
+        return "No machine is driven by this Mac, so edges and the shortcut do nothing."
     if not connected:
-        return "Not connected to the PC, so edges and the shortcut do nothing yet."
+        return "Not connected to any machine, so edges and the shortcut do nothing yet."
     if not armed:
         return "Only the shortcut is switched on; there is nothing to pause."
     if paused:

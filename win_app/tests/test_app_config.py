@@ -148,24 +148,6 @@ if __name__ == "__main__":
     unittest.main()
 
 
-class ArrangementTests(unittest.TestCase):
-    """Which end's arrangement stands when the two disagree."""
-
-    def test_the_newer_stamp_wins(self):
-        self.assertTrue(protocol.arrangement_wins(200, 100))
-        self.assertFalse(protocol.arrangement_wins(100, 200))
-
-    def test_an_equal_stamp_changes_nothing(self):
-        self.assertFalse(protocol.arrangement_wins(100, 100))
-
-    def test_a_peer_with_no_stamp_never_beats_a_change_made_here(self):
-        self.assertFalse(protocol.arrangement_wins(0, 100))
-        self.assertFalse(protocol.arrangement_wins(None, 100))
-
-    def test_two_ends_that_never_changed_it_agree(self):
-        self.assertFalse(protocol.arrangement_wins(0, 0))
-
-
 class LegacyTriggerTests(unittest.TestCase):
     def test_right_alt_is_a_choice_and_is_kept(self):
         # "alt_r" was once rewritten to "cmd_r" as a dead default, but it is a live entry in
@@ -203,16 +185,61 @@ class LegacyPortTests(unittest.TestCase):
     def test_a_new_config_starts_on_the_new_port(self):
         self.assertEqual(default_config().port, protocol.DEFAULT_PORT)
 
-    def test_loading_a_config_on_the_old_port_writes_the_move_down(self):
+    def test_migrating_a_config_on_the_old_port_writes_the_move_down(self):
         with tempfile.TemporaryDirectory() as directory:
-            path = Path(directory) / "config.json"
-            path.write_text(
+            (Path(directory) / "config.json").write_text(
                 json.dumps(
                     {"host": "192.168.1.3", "port": protocol.LEGACY_DEFAULT_PORT, "auth_token": "t"}
                 ),
                 encoding="utf-8",
             )
+            path = Path(directory) / "settings.json"
             self.assertEqual(app_config.load_config(path).port, protocol.DEFAULT_PORT)
             on_disk = json.loads(path.read_text(encoding="utf-8"))
             self.assertEqual(on_disk["port"], protocol.DEFAULT_PORT)
 
+
+class ReadFallbackPeerBookTests(unittest.TestCase):
+    """A read that fails (a scanner holding settings.json) gives the link's read-only calls the last
+    good copy, but never a copy that a save could write back over what the window has since changed."""
+
+    def setUp(self):
+        self.disk = {"peers": [{"id": "a", "token": "t", "paired_with": []}], "zones": [{"peer": "a"}]}
+        self.broken = False
+        self.saved = []
+
+        def load():
+            if self.broken:
+                raise OSError("locked by a scanner")
+            return json.loads(json.dumps(self.disk))
+
+        self.book = app_config.ReadFallbackPeerBook(load, self.saved.append)
+
+    def test_the_read_only_calls_use_the_last_good_copy_when_a_read_fails(self):
+        self.book.peers()
+        self.broken = True
+        self.assertEqual([peer["id"] for peer in self.book.peers()], ["a"])
+        self.assertEqual(self.book.zones(), [{"peer": "a"}])
+
+    def test_with_no_good_copy_yet_a_failed_read_raises(self):
+        self.broken = True
+        with self.assertRaises(OSError):
+            self.book.peers()
+
+    def test_a_save_after_a_failed_read_raises_rather_than_write_the_stale_copy(self):
+        self.book.peers()
+        self.disk["peers"][0]["send"] = False
+        self.broken = True
+        with self.assertRaises(OSError):
+            self.book.store_paired("a", ["b"])
+        with self.assertRaises(OSError):
+            self.book.admit(b"\x00" * 32, b"\x01" * 16, b"\x02" * 16, {})
+        self.assertEqual(self.saved, [])
+
+    def test_a_removed_machine_does_not_come_back_through_a_pairing_message(self):
+        self.book.peers()
+        self.disk["peers"] = []
+        self.broken = True
+        with self.assertRaises(OSError):
+            self.book.store_paired("a", ["b"])
+        self.assertEqual(self.saved, [])

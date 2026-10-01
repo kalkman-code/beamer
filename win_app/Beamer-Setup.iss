@@ -62,4 +62,4 @@ Filename: "schtasks.exe"; Parameters: "/Create /RL HIGHEST /SC ONLOGON /TN Beame
 ; The rules and the task were written elevated (by the app, or by the autostart step above), so
 ; removing them needs elevation the per-user uninstaller does not have: one prompt, one command,
 ; rather than three deletions that fail silently and leave them behind.
-Filename: "cmd.exe"; Parameters: "/c netsh advfirewall firewall delete rule name=""Beamer Receiver (TCP-In)"" & netsh advfirewall firewall delete rule name=""Beamer Pairing (UDP-In)"" & schtasks /Delete /TN Beamer /F"; Flags: runhidden shellexec waituntilterminated; Verb: runas; RunOnceId: "BeamerCleanup"
+Filename: "cmd.exe"; Parameters: "/c netsh advfirewall firewall delete rule name=""Beamer Receiver (TCP-In)"" & netsh advfirewall firewall delete rule name=""Beamer Pairing (UDP-In)"" & netsh advfirewall firewall delete rule name=""Beamer Pairing (TCP-In)"" & schtasks /Delete /TN Beamer /F"; Flags: runhidden shellexec waituntilterminated; Verb: runas; RunOnceId: "BeamerCleanup"

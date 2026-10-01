@@ -366,28 +366,13 @@ class CrossingPageTest(unittest.TestCase):
         self.reflect(self.page)
         self.assertEqual([buttons[p].text() for p in ("start", "middle", "end")], ["Left", "Middle", "Right"])
 
-    def test_an_edge_learned_from_the_mac_renames_the_chips(self):
-        import kvm_bridge_win
-
+    def test_an_edge_learned_from_a_peer_renames_the_chips(self):
         page = self.page
         page._config.crossing_methods = ["part"]
         page._config.mac_return_edge = "right"
         self.reflect(page)
-        page._persist = lambda: True
-        page._start_sending = lambda config: None
-        page._reflect_look = lambda: None
-        page._reflect_ways = lambda: self.reflect(page)
-        page.sender = SimpleNamespace(update_config=lambda config: None)
-        page.mac_host_readout = widgets.label("", "readout")
-        page.edge_choice = SimpleNamespace(set_value=lambda value: None)
-        # A hello fills only an edge the PC does not hold yet (G1).
-        page._config.mac_return_edge = ""
-        real = kvm_bridge_win.sender.is_this_machine
-        kvm_bridge_win.sender.is_this_machine = lambda host: False
-        try:
-            kvm_bridge_win.WindowsApplication._on_learned(page, "192.168.1.10", "top", 120)
-        finally:
-            kvm_bridge_win.sender.is_this_machine = real
+        page._config.mac_return_edge = "top"
+        self.reflect(page)
         buttons = page.part_buttons
         self.assertEqual([buttons[p].text() for p in ("start", "middle", "end")], ["Left", "Middle", "Right"])
         self.assertIn("top edge", page.parts_note.text())
@@ -410,12 +395,19 @@ class CrossingPageTest(unittest.TestCase):
         line = pages_win.crossing_state_sentence
         self.assertTrue(line(False, False, False, False, True, False, None).startswith("Not paired yet"))
         self.assertTrue(line(True, False, True, False, True, False, None).startswith("Waiting to hear from your Mac"))
-        self.assertTrue(line(True, True, False, False, True, False, None).startswith("This PC drives your Mac is off"))
+        self.assertTrue(line(True, True, False, False, True, False, None).startswith("This PC does not drive your Mac"))
         self.assertTrue(line(True, True, True, False, True, False, None).startswith("Not connected to your Mac"))
         self.assertTrue(line(True, True, True, True, False, False, None).startswith("Only the shortcut"))
         self.assertTrue(line(True, True, True, True, True, True, None).startswith("Paused."))
         self.assertTrue(line(True, True, True, True, True, False, "Keynote").startswith("Off while Keynote"))
         self.assertEqual(line(True, True, True, True, True, False, None), "On. Pause it to lean on an edge without switching.")
+
+    def test_the_crossing_line_names_the_machine_it_is_given(self):
+        line = pages_win.crossing_state_sentence
+        self.assertTrue(line(True, True, True, False, True, False, None, "Studio Mac").startswith("Not connected to Studio Mac"))
+        self.assertIn("Studio Mac", line(True, False, True, False, True, False, None, "Studio Mac"))
+        self.assertIn("Studio Mac", line(True, True, False, False, True, False, None, "Studio Mac"))
+        self.assertIn("pair a machine", line(False, False, False, False, True, False, None, "Studio Mac"))
 
     def test_a_reason_shows_even_when_only_the_shortcut_is_on(self):
         self.assertTrue(pages_win.crossing_state_blocked(False, True, True, True))
@@ -423,11 +415,6 @@ class CrossingPageTest(unittest.TestCase):
         self.assertTrue(pages_win.crossing_state_blocked(True, True, False, True))
         self.assertTrue(pages_win.crossing_state_blocked(True, True, True, False))
         self.assertFalse(pages_win.crossing_state_blocked(True, True, True, True))
-
-    def test_the_overview_says_whether_this_pcs_own_link_is_up(self):
-        self.assertEqual(pages_win.outward_link_line(True), "This PC to your Mac: Linked")
-        self.assertEqual(pages_win.outward_link_line(False),
-                         "This PC to your Mac: not connected, so pushing an edge does nothing")
 
     def test_no_learned_edge_is_not_described_as_the_right_edge(self):
         summary = pages_win.ways_summary(["edge"], "", ["middle"], "top_right", "Right Ctrl", "double_tap")

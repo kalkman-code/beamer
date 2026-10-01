@@ -27,6 +27,9 @@ RULE_NAME = "Beamer Receiver (TCP-In)"
 # not the second, so reporting only the TCP rule tells that user everything is fine.
 PAIRING_RULE_NAME = "Beamer Pairing (UDP-In)"
 PAIRING_PORT = protocol.PAIRING_PORT
+# Pairing version 3 also hosts the pairing exchange over TCP on the same number while a code is
+# on screen. Judged on its own: without it a Mac still finds this PC, then fails to finish pairing.
+PAIRING_TCP_RULE_NAME = "Beamer Pairing (TCP-In)"
 _IS_WINDOWS = sys.platform == "win32"
 
 
@@ -44,6 +47,15 @@ class FirewallStatus:
     # Whether the pairing beacon's UDP rule is present. Defaults True so a status built before
     # pairing existed does not claim a missing rule it knows nothing about.
     pairing_allowed: bool = True
+    pairing_tcp_allowed: bool = True
+
+
+def missing_rule(status: "FirewallStatus") -> bool:
+    """Whether a rule this app needs is absent and nothing blocks it, so an elevated run may write the
+    rules without asking: the receiver's, or either pairing rule."""
+    return not status.error and not status.blocked and not (
+        status.allowed and getattr(status, "pairing_allowed", True) and getattr(status, "pairing_tcp_allowed", True)
+    )
 
 
 @dataclass(frozen=True)
@@ -143,11 +155,12 @@ def interpret(payload: dict, exe: str, port: int, elevated: bool = True) -> Fire
     blocked = any(touches(p, active or ("Domain", "Private", "Public")) for p in block_profiles)
     covered = all(any(touches(p, (name,)) for p in allow_profiles) for name in lan_profiles) and bool(allow_profiles)
     public = tuple((int(n.get("index", 0)), str(n.get("alias", ""))) for n in lan if str(n.get("category", "")) == "Public")
-    pairing_rules = [
-        rule for rule in payload.get("rules", [])
-        if _rule_applies(rule, exe, PAIRING_PORT, "udp")
-        and str(rule.get("action", "")).lower() == "allow"
-    ]
+    def pairing_allowed(protocol: str) -> bool:
+        return any(
+            _rule_applies(rule, exe, PAIRING_PORT, protocol) and str(rule.get("action", "")).lower() == "allow"
+            for rule in payload.get("rules", [])
+        )
+
     return FirewallStatus(
         port=port,
         allowed=bool(allow_profiles),
@@ -158,7 +171,8 @@ def interpret(payload: dict, exe: str, port: int, elevated: bool = True) -> Fire
         public_interfaces=public,
         elevated=elevated,
         error="",
-        pairing_allowed=bool(pairing_rules),
+        pairing_allowed=pairing_allowed("udp"),
+        pairing_tcp_allowed=pairing_allowed("tcp"),
     )
 
 
@@ -204,12 +218,23 @@ def advise(status: FirewallStatus) -> Advice:
             "repair",
             rule_profiles,
         )
-    elif not status.pairing_allowed:
+    elif not status.pairing_allowed or not status.pairing_tcp_allowed:
+        missing = []
+        if not status.pairing_allowed:
+            missing.append((
+                f"the pairing beacon on UDP {PAIRING_PORT}",
+                "a Mac that has not been set up by hand will never see this PC in its list",
+            ))
+        if not status.pairing_tcp_allowed:
+            missing.append((
+                f"the pairing exchange on TCP {PAIRING_PORT}",
+                "a Mac that finds this PC cannot finish pairing with it",
+            ))
         advice = Advice(
-            f"Windows Firewall lets your Mac reach Beamer on port {port}, but there is no rule for the "
-            f"pairing beacon on UDP {PAIRING_PORT}, so a Mac that has not been set up by hand will never "
-            "see this PC in its list. Installs made before pairing existed are missing it. Fixing it adds "
-            "the missing rule and leaves the working one alone.",
+            f"Windows Firewall lets your Mac reach Beamer on port {port}, but there is no rule for "
+            f"{' or for '.join(rule for rule, _ in missing)}, so {' and '.join(effect for _, effect in missing)}. "
+            "Installs made before these rules existed are missing them. Fixing it adds what is missing "
+            "and leaves the working rules alone.",
             "Fix the firewall",
             "repair",
             rule_profiles,
@@ -297,14 +322,27 @@ $networks = @(Get-NetConnectionProfile | ForEach-Object {{
 [pscustomobject]@{{ rules = @($rules); networks = $networks }} | ConvertTo-Json -Depth 4 -Compress
 """
 
-_REPAIR_SCRIPT = _PREAMBLE + """
+# The same rule is reached more than once (by its program and again by its display name), and a
+# second removal of a rule already gone raises "The requested object could not be found". Each rule
+# is therefore removed once, by name, and that one error is the state removal wants, not a failure.
+_REMOVE_SCRIPT = _PREAMBLE + """
 $exe = {exe}
 $stale = @($({filters}) | Get-NetFirewallRule | Where-Object {{ [string]$_.Direction -eq 'Inbound' }})
 $stale += @(Get-NetFirewallRule -DisplayName {name} -ErrorAction SilentlyContinue)
 $stale += @(Get-NetFirewallRule -DisplayName {pairing_name} -ErrorAction SilentlyContinue)
-if ($stale.Count -gt 0) {{ $stale | Remove-NetFirewallRule }}
+$stale += @(Get-NetFirewallRule -DisplayName {pairing_tcp_name} -ErrorAction SilentlyContinue)
+$stale = @($stale | Sort-Object Name -Unique)
+foreach ($rule in $stale) {{
+    try {{ Remove-NetFirewallRule -Name $rule.Name }}
+    catch {{ if ($_.Exception.Message -notmatch 'could not be found') {{ throw }} }}
+}}
+"""
+
+_ADD_SCRIPT = _PREAMBLE + """
+$exe = {exe}
 New-NetFirewallRule -DisplayName {name} -Direction Inbound -Protocol TCP -LocalPort {port} -Action Allow -Profile {profiles} -Program $exe | Out-Null
 New-NetFirewallRule -DisplayName {pairing_name} -Direction Inbound -Protocol UDP -LocalPort {pairing_port} -Action Allow -Profile {profiles} -Program $exe | Out-Null
+New-NetFirewallRule -DisplayName {pairing_tcp_name} -Direction Inbound -Protocol TCP -LocalPort {pairing_port} -Action Allow -Profile {profiles} -Program $exe | Out-Null
 """
 
 _TRUST_SCRIPT = _PREAMBLE + """
@@ -339,17 +377,21 @@ def repair(exe: str, port: int, profiles: Sequence[str] = ("Private",)) -> None:
     the installer would have. Never Public: that opens the port on every untrusted network the
     machine ever joins, which is the wrong trade for a KVM; trust_network() is the fix for that."""
     wanted = [p for p in profiles if p in ("Private", "Domain")] or ["Private"]
-    _powershell(
-        _REPAIR_SCRIPT.format(
-            exe=_quote(exe),
-            filters=_RULES_FOR_LEAF,
-            name=_quote(RULE_NAME),
-            port=int(port),
-            pairing_name=_quote(PAIRING_RULE_NAME),
-            pairing_port=PAIRING_PORT,
-            profiles=",".join(wanted),
-        )
+    names = dict(
+        exe=_quote(exe),
+        name=_quote(RULE_NAME),
+        pairing_name=_quote(PAIRING_RULE_NAME),
+        pairing_tcp_name=_quote(PAIRING_TCP_RULE_NAME),
     )
+    try:
+        _powershell(_REMOVE_SCRIPT.format(filters=_RULES_FOR_LEAF, **names))
+    except RuntimeError as exc:
+        # Belt and braces for the script's own tolerance: a rule that is already absent must never
+        # stop the new ones being written, or the PC is left with none.
+        if "could not be found" not in str(exc):
+            raise
+        LOGGER.info("A firewall rule was already gone while repairing: %s", exc)
+    _powershell(_ADD_SCRIPT.format(port=int(port), pairing_port=PAIRING_PORT, profiles=",".join(wanted), **names))
 
 
 def trust_network(interface_indexes: Sequence[int]) -> None:

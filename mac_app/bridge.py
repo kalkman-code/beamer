@@ -1,10 +1,10 @@
 import collections
+import copy
 import errno
 import logging
 import platform
 import queue
 import socket
-import struct
 import threading
 import time
 import types
@@ -15,6 +15,7 @@ import objc
 import Quartz
 
 import clipboard_mac
+import config as config_module
 import crossing
 import desktop_mac
 from input_injector_mac import INJECTED_MARK
@@ -22,7 +23,13 @@ import gestures
 from core import ignored
 import keyboard_layout
 import media_keys
+from core import keytable
+from core import link as link_module
+from core import owner as owner_module
+from core import peerlist
 from core import protocol
+from core import receiver
+from pointer_hide import PointerHider
 from key_codes import (
     KEY_NAME_TO_CODE,
     MODIFIER_KEY_CODES,
@@ -40,81 +47,38 @@ except ImportError:  # pragma: no cover - exercised only off macOS
     AppKit = None
 
 
-ACK_TIMEOUT_SECONDS = 2.0
-CONNECT_TIMEOUT_SECONDS = 1.0
-AUTH_TIMEOUT_SECONDS = 2.0
+CONNECT_TIMEOUT_SECONDS = link_module.CONNECT_SECONDS
 SOCKET_IO_TIMEOUT_SECONDS = 0.5
 OUTBOUND_QUEUE_SIZE = 2048
 SSH_FALLBACK_HOST = "127.0.0.1"
 # Below 49152 for the same reason the listening ports are: macOS hands out
 # 49152-65535 itself, and a forward whose local port is taken never comes up.
 SSH_FALLBACK_PORT = 24822
-PING_INTERVAL_SECONDS = 1.0
 DESKTOP_BOUNDS_MAX_AGE_SECONDS = 1.0
 CROSSING_RETRY_SECONDS = 30.0
 ROUND_TRIP_SAMPLES = 8
 ROUND_TRIP_MAX_AGE_SECONDS = 5.0
-# A receiver that accepts the TCP connection but never sends a preamble is, in practice, one
-# running the pre-v4 cleartext protocol: it sits waiting for a hello frame it will never get.
-OLD_RECEIVER_STATUS = "Windows did not answer the handshake — it is probably running an older Beamer; update it"
-AUTH_FAILED_STATUS = "Windows could not be authenticated — check the shared token matches on both sides"
+# A driven Mac that is asked to drive waits this long for its owner to let go (the responder ends
+# the ownership by force after one second), then goes ahead.
+LET_GO_WAIT_SECONDS = 1.3
+OWN_PLATFORM = "macos"
+CAPABILITIES = ("clipboard", "clipboard_image", "gestures", "media_keys", "text", "settings")
+MEDIA_KEY_NAMES = frozenset({"volume_mute", "volume_down", "volume_up", "media_next", "media_prev", "media_stop", "media_play_pause"})
 
-# Messages that must bypass both the outbound gate (they still need to go
-# out when redirecting has just turned off, e.g. the switch-back focus
-# message) and sequence assignment (like ping, they carry no `seq` and are
-# never recorded by the receiver's ProcessedSequence). The sentinel is a
-# purely local marker -- never sent on the wire -- that the outbound worker
-# expands into a real clipboard message (or drops) at send time.
-CONTROL_MESSAGE_TYPES = frozenset({protocol.MSG_FOCUS, protocol.MSG_CLIPBOARD, protocol.MSG_ARRANGEMENT})
+# The local sentinel a clipboard read is deferred with: the event tap must never wait on the
+# pasteboard, so it queues this and the outbound worker reads it, in order with the input behind it.
 _LOCAL_CLIPBOARD_SENTINEL_TYPE = "_local_clipboard"
-_GATE_EXEMPT_TYPES = CONTROL_MESSAGE_TYPES | {_LOCAL_CLIPBOARD_SENTINEL_TYPE}
 
-
-class _HandshakeError(protocol.ProtocolError):
-    """Raised for a handshake that completed but was rejected; carries the
-    exact user-facing status so the generic OSError/ProtocolError handler
-    doesn't wrap it with a less specific message."""
-
-    def __init__(self, status):
-        super().__init__(status)
-        self.status = status
-
-
-def connection_error_message(exc):
-    error_number = getattr(exc, "errno", None)
-    if error_number in {51, 64, 65}:
-        if "Beamer Tunnel.command" in str(exc):
-            return "macOS 27 blocked direct LAN access. Open /Applications/Beamer Tunnel.command."
-        return "Windows is unreachable from this Mac. Check that both devices can communicate on the local network."
-    if error_number == 61:
-        return "Windows is reachable, but Beamer is not listening on this port."
-    if isinstance(exc, (socket.timeout, TimeoutError)):
-        return "Windows did not answer before the connection timed out."
-    return f"Connection failed: {exc}"
-
-
-class FrameDecoder:
-    """Reassembles and opens frames from the raw chunks the reader thread
-    receives. One per connection, like the session it opens frames with."""
-
-    def __init__(self, session):
-        self.session = session
-        self.buffer = bytearray()
-
-    def feed(self, chunk):
-        self.buffer.extend(chunk)
-        messages = []
-        while len(self.buffer) >= protocol.HEADER_SIZE:
-            length = struct.unpack_from(">I", self.buffer)[0]
-            if length < 1 or length > protocol.MAX_FRAME_BYTES:
-                raise protocol.ProtocolError(f"invalid message length: {length}")
-            frame_length = protocol.HEADER_SIZE + length
-            if len(self.buffer) < frame_length:
-                break
-            body = bytes(self.buffer[protocol.HEADER_SIZE:frame_length])
-            del self.buffer[:frame_length]
-            messages.append(self.session.open(body))
-        return messages
+# Why input came home, in words, for the alert. A why that is not here comes home quietly.
+WHY_TEXT = {
+    "owned": "{name} is being driven from another machine",
+    "not_allowed": "{name} does not accept input from this Mac",
+    "busy": "{name} is driving another machine",
+    "malformed": "{name} could not read the request to take it",
+    "refused": "{name} refused the input",
+    "no_answer": "{name} did not answer",
+    "link_lost": "Lost the link to {name}",
+}
 
 
 # NX device-specific modifier bits (IOLLEvent.h), keyed by keycode. Unlike the
@@ -448,7 +412,84 @@ def _default_system_event_converter(cg_event):
     return int(ns_event.subtype()), int(ns_event.data1())
 
 
+def links_from_store(settings_store, app_version):
+    """The book and the identity the links run on, from the settings store; (None, None) when the
+    settings cannot be read, so the controller starts from the defaults instead of failing."""
+    try:
+        settings_store.current()
+    except Exception:
+        logging.getLogger("Beamer").exception("the links start from the defaults, as the settings could not be read")
+        return None, None
+
+    def identity():
+        settings = settings_store.current()
+        name = (settings.get("name") or socket.gethostname().split(".")[0] or "Mac")[:48]
+        return {"id": protocol.read_id(settings["machine_id"]), "name": name, "platform": OWN_PLATFORM, "app": app_version,
+                "caps": list(CAPABILITIES), "port": settings["port"]}
+
+    return settings_store.book(), identity
+
+
+class _Literal(dict):
+    """A message whose key names are the receiver's own words already, which the key table must
+    leave alone: the gestures press the PC's Control for a zoom, and that is Control there."""
+
+
+def _literal(messages):
+    return [_Literal(message) for message in messages]
+
+
+class _MemoryBook(receiver.PeerBook):
+    """The peers a controller built from a Config alone has: peers[0] from the flat fields, nothing
+    on disk. The app hands in the settings store's book instead; this is what the controller has
+    when it is given none, and what keeps `KVMController(cfg)` working for a caller with no store."""
+
+    def __init__(self, cfg):
+        self.data = {"schema": 6, "machine_id": protocol.id_text(_random_id()), "peers": [], "zones": []}
+        super().__init__(lambda: self.data, self._store)
+        self.follow(cfg)
+
+    def _store(self, data):
+        self.data = copy.deepcopy(data)
+
+    def follow(self, cfg):
+        """Keep peers[0] in step with the flat Config the app still speaks."""
+        with self.lock:
+            peers = self.data["peers"]
+            if not cfg.auth_token:
+                peers.clear()
+                return
+            entry = peers[0] if peers and peers[0].get("token") == cfg.auth_token else None
+            if entry is None:
+                entry = {
+                    "id": "", "name": "", "platform": "windows", "token": cfg.auth_token, "host": "", "port": 0, "hw": "",
+                    "send": True, "allow_drive": True, "side": "", "side_set_at": 0, "side_by": "", "paired_with": [],
+                    "paired_at": 0, "linked": False, "from_1_4": True,
+                }
+                peers[:1] = [entry]
+            entry.update(host=cfg.host, port=cfg.port, name=cfg.pc_name or entry["name"], hw=cfg.mac_address,
+                         send=cfg.send_to_windows, allow_drive=cfg.allow_windows_to_drive)
+
+
+def _random_id():
+    import secrets
+    while True:
+        data = secrets.token_bytes(protocol.MACHINE_ID_SIZE)
+        if any(data):
+            return data
+
+
 class KVMController:
+    @property
+    def redirecting(self):
+        return self._redirecting
+
+    @redirecting.setter
+    def redirecting(self, value):
+        self._redirecting = bool(value)
+        if not self._redirecting:
+            self.pointer.show()
+
     def __init__(
         self,
         cfg,
@@ -462,6 +503,10 @@ class KVMController:
         dock_event_reader=None,
         macos_major=None,
         desktop_bounds=None,
+        book=None,
+        identity=None,
+        link_factory=link_module.OutboundLink,
+        hardware=None,
     ):
         self.cfg = cfg
         self.logger = logger or logging.getLogger("Beamer")
@@ -485,58 +530,39 @@ class KVMController:
         # back to this point on every captured mouse move/drag while
         # redirecting. None whenever not redirecting.
         self.cursor_pin_point = None
+        # Hidden for as long as input is on the other machine. Made before `redirecting`, whose
+        # setter shows it: input being local is the one condition under which it is never hidden.
+        self.pointer = PointerHider(quartz, logger=self.logger)
         self._cursor_assoc_status_logged = False
         self._cursor_warp_error_logged = False
         self.redirecting = False
-        # True while the PC is driving this Mac over the other link. The tap
-        # passes everything through while it is, except this Mac's own trigger
-        # key, so the two directions can never both own the keyboard. Set by
-        # the app that owns both halves, which also hands in `send_peer_home`:
-        # the receiver's way of sending the PC's input back to it.
+        # True while another machine is driving this Mac over a link it opened. The tap passes
+        # everything through while it is, except this Mac's own trigger key, so the two directions
+        # can never both own the keyboard. Set by the app that owns both halves, which also hands
+        # in `send_peer_home`: the responder's way of sending its owner back.
         self.receiving = False
+        self.driver = None               # the id text of the machine driving this Mac, set by the app
         self.send_peer_home = None
+        # The responder, once WindowsInput has made it: `driven` is how a take it is deciding is
+        # seen from here (WIRE.md section 4, "a machine never drives and is driven at once").
+        self.responder = None
         self.stop_event = threading.Event()
         self.outbound = queue.Queue(maxsize=OUTBOUND_QUEUE_SIZE)
-        self.socket_lock = threading.RLock()
-        self.sequence_lock = threading.Lock()
-        self.sock = None
-        # Replaced by every _connect_once, so each connection gets a fresh nonce prefix and
-        # counters that start from zero. Sealing happens on the outbound, watchdog and reader
-        # threads only -- the event tap enqueues and never touches it.
-        self.session = protocol.SecureSession(cfg.auth_token)
-        self.last_sent_seq = 0
-        self.last_ack_seq = -1
-        self.last_ack_at = 0.0
-        self.connected_at = 0.0
-        self.last_send_at = 0.0
-        self.redirect_started_at = 0.0
         self.on_user_alert = None
-        # Set by the app: called when Windows says the two machines have moved
-        # in relation to each other.
+        # The peer's arrangement (mac_edge, set_at, by), its settings (data, peer id) and its
+        # `paired` list (peer id, ids), handed to the app, which owns the settings file.
         self.on_arrangement = None
-        # Same on both machines, as the receiver's: `on_settings(data)` for each settings message
-        # from Windows, `announce()` for what to send the moment the link is up, `peer_settings`
-        # whether Windows's welcome said it keeps settings in step.
         self.on_settings = None
+        self.on_paired = None
+        # What to send a peer the moment its link is up: the app's own messages, of which only the
+        # settings state goes on to a peer that keeps it (the arrangement and `paired` are made here).
         self.announce = lambda: []
-        self.peer_settings = None
         self.threads = []
         self.started = False
         self.capture_lock = threading.Lock()
         self.capture_thread = None
         self.input_error = None
-        self.connection_status = "Waiting to connect"
-        # The host, port and token that last completed a handshake. Silence after the preamble
-        # from a PC that has answered this run is a PC too busy to answer (Windows stalls every
-        # app for half a minute while it reconfigures its displays), not an older Beamer. The
-        # token is part of it so a re-pair, even to another PC at the same address, starts clean.
-        self.answered = None
-        # Set while Windows reports it is clearing its lock screen. Beamer
-        # cannot type on the secure desktop, so Windows unlocks first and
-        # drops input meanwhile; without this the switch just looks dead for
-        # the few seconds that takes.
-        self.windows_locked = False
-        self._status_before_unlock = None
+        self._connection_status = "Waiting to connect"
         self.tap_ready = threading.Event()
         self.event_tap = None
         self.tap_source = None
@@ -546,6 +572,7 @@ class KVMController:
         self.trigger_code = KEY_NAME_TO_CODE[cfg.trigger_key]
         self.last_trigger_down = 0.0
         self.trigger_suppressed = False
+        self.redirect_started_at = 0.0
         self.ignore_gate = ignored.Gate(cfg.ignored_inputs)
         # Crossing: the engine is pure and runs on the event-tap thread; the
         # desktop bounds come from CoreGraphics (already in the top-left
@@ -553,12 +580,12 @@ class KVMController:
         # cached because they are read on every local mouse move. The notch
         # range needs NSScreen, so the app measures it on the main thread and
         # assigns it here. on_crossing is fed (kind, step) off the tap and
-        # ack threads for haptics and the glow; the app marshals it.
+        # link threads for haptics and the glow; the app marshals it.
         # A PC whose address changed, after a router restart hands it a new lease, still beacons
-        # under its name. With `discovery` set, a failed connect tries the address the paired PC's
-        # name is heard at, and only once that address has passed the authenticated handshake does
-        # it become cfg.host and reach `on_host_learned(host)` on the connection thread, for the app
-        # to save. A spoofed beacon costs one failed attempt and changes nothing.
+        # under its name. With `discovery` set (anything with `pcs()` or `machines()` giving dicts
+        # of `name` and `address`), a link down for ten seconds tries the address its peer's name
+        # is heard at, and only once that address has passed the authenticated handshake is it
+        # saved (by the link, through the book) and `on_host_learned(host)` called for the app.
         self.discovery = None
         self.on_host_learned = None
         self.crossing = crossing.CrossingEngine.from_config(cfg.crossing)
@@ -577,11 +604,112 @@ class KVMController:
         # while it is full screen, measured by the app on the main thread like notch_range.
         self.crossing_paused = False
         self._full_screen_app = None
-        # Round trip: (seq, sent at) for every input event still unacknowledged, oldest first,
-        # and the last few measured trips. Both under sequence_lock.
-        self._unacked_sent_at = collections.deque()
-        self._round_trips = collections.deque(maxlen=ROUND_TRIP_SAMPLES)
-        self._round_trip_at = 0.0
+        # The links: one outbound link per peer with `send` on, and the owner (WIRE.md sections 4
+        # and 5) that decides where this Mac's input is. Every call into the owner is made under
+        # `_owner_lock`; what a call asks for locally (the pointer, an alert) is done under
+        # `_effects_lock`, taken before the owner's is let go so it runs in the order it was decided.
+        self._memory = None
+        if book is None:
+            self._memory = book = _MemoryBook(cfg)
+        self.book = book
+        self._identity_fn = identity
+        self._hardware = hardware        # host: this Mac's hardware address on the interface towards it
+        self.link_factory = link_factory
+        self.links = {}                  # token: OutboundLink
+        self._peers_up = {}              # peer id: link, while its handshake is done
+        self._up_names = {}
+        self._accepts = {}               # peer id: whether it lets this Mac drive it
+        self._primary_token = None
+        self._primary_link = None
+        self._links_lock = threading.RLock()
+        # Whoever assigns `cfg` or builds a copy of it from the current one: a link thread learning
+        # an address must not put back a settings change the main thread made meanwhile.
+        self._cfg_lock = threading.Lock()
+        self._owner_lock = threading.RLock()
+        self._effects_lock = threading.RLock()
+        self.owner = owner_module.Owner(protocol.id_text(self.identity()["id"]), clock, resistance_px=int(self.crossing.resistance_px))
+        self._clipboard_stamp = None
+        self._paired_ids = ()
+        self._go_generation = 0
+        self._home_notify = True
+        self._home_presses = set()
+        self._letting_go = False
+        self._sync_links()
+
+    # The machine, as its links say it
+
+    def identity(self):
+        """This machine as a `hello` says it: the app's, or a synthetic one for a controller made
+        from a Config alone."""
+        if self._identity_fn is not None:
+            return self._identity_fn()
+        settings = self.book._load() or {}
+        ident = protocol.read_id(settings.get("machine_id")) or _random_id()
+        return {"id": ident, "name": socket.gethostname().split(".")[0] or "Mac", "platform": OWN_PLATFORM,
+                "app": "1.5.0", "caps": list(CAPABILITIES), "port": self.cfg.port}
+
+    @property
+    def own_port(self):
+        """The port this Mac listens on and announces: its own setting, never a machine's."""
+        return int(self.identity()["port"])
+
+    @property
+    def peer_label(self):
+        """The first machine as the window shows it (its name, with the end of its id where two
+        share one); None when nothing is paired."""
+        return self._label(lambda peer: peer.get("token") == self._primary_token)
+
+    @property
+    def on_label(self):
+        """The machine this Mac's input is on, or None at home."""
+        on = self.owner.on
+        return self._label(lambda peer: on is not None and peer.get("id") == on)
+
+    @property
+    def driver_label(self):
+        """The machine driving this Mac, or None."""
+        driver = self.driver
+        return self._label(lambda peer: driver is not None and peer.get("id") == driver)
+
+    def _label(self, wanted):
+        peers = self.book.peers()
+        labels = peerlist.labels(peers)
+        return next((labels[peer["token"]] for peer in peers if wanted(peer)), None)
+
+    @property
+    def connection_status(self):
+        link = self._primary_link
+        if link is not None and link.peer_locked:
+            return f"Unlocking {self.peer_label or 'the other machine'}…"
+        return self._connection_status
+
+    @connection_status.setter
+    def connection_status(self, value):
+        self._connection_status = value
+
+    @property
+    def status_kind(self):
+        """What the primary link last did, as core.link.OutboundLink.kind says it."""
+        link = self._primary_link
+        return link.kind if link is not None else "none"
+
+    @property
+    def via_tunnel(self):
+        link = self._primary_link
+        return bool(link is not None and link.via_tunnel and link.live())
+
+    @property
+    def windows_locked(self):
+        link = self._primary_link
+        return bool(link is not None and link.peer_locked)
+
+    @property
+    def peer_settings(self):
+        """Whether the primary peer keeps Same on all machines, None while there is no link."""
+        link = self._primary_link
+        if link is None or not link.live():
+            return None
+        return "settings" in link.caps
 
     @property
     def full_screen_app(self):
@@ -597,8 +725,8 @@ class KVMController:
 
     @property
     def connected(self):
-        with self.socket_lock:
-            return self.sock is not None
+        link = self._primary_link
+        return link is not None and link.live()
 
     @property
     def input_ready(self):
@@ -607,16 +735,17 @@ class KVMController:
     @property
     def round_trip_ms(self):
         """The smoothed input round trip, or None whenever a figure would not be honest: input
-        is not on Windows, the link is down, or nothing fresh has been acknowledged for a few
-        seconds. The upper median of the last few trips, so an even count rounds towards the
-        slower one. The receiver acknowledges on a timer rather than per event, so each trip
-        includes however long the last event waited for that timer -- pessimistic by design."""
+        is not on another machine, the link is down, or nothing fresh has been acknowledged for a
+        few seconds. The upper median of the last few trips, so an even count rounds towards the
+        slower one. The responder holds each `ack` for however long it waited to batch it and says
+        so (`held_us`), which the link has already taken off."""
         if not self.redirecting or not self.connected:
             return None
-        with self.sequence_lock:
-            trips = sorted(self._round_trips)
-            measured_at = self._round_trip_at
-        if not trips or self.clock() - measured_at > ROUND_TRIP_MAX_AGE_SECONDS:
+        link = self._peers_up.get(self.owner.on) or self._primary_link
+        if link is None:
+            return None
+        trips = sorted(link.round_trips(ROUND_TRIP_MAX_AGE_SECONDS)[-ROUND_TRIP_SAMPLES:])
+        if not trips:
             return None
         return int(round(trips[len(trips) // 2] * 1000))
 
@@ -627,8 +756,6 @@ class KVMController:
         workers = (
             ("connection", self._connection_worker),
             ("outbound", self._outbound_worker),
-            ("ack-receiver", self._ack_worker),
-            ("ack-watchdog", self._watchdog_worker),
         )
         for name, target in workers:
             thread = threading.Thread(
@@ -639,6 +766,8 @@ class KVMController:
             )
             self.threads.append(thread)
             thread.start()
+        for link in list(self.links.values()):
+            link.start()
 
     def start_input_capture(self):
         """Spawn the event-tap thread and return immediately. This must never
@@ -676,8 +805,11 @@ class KVMController:
 
     def stop(self):
         self._return_local()
+        for link in list(self.links.values()):
+            link.flush(0.3)
         self.stop_event.set()
-        self._drop_connection()
+        for link in list(self.links.values()):
+            link.stop()
         run_loop = self.tap_run_loop
         if run_loop is not None:
             try:
@@ -690,7 +822,8 @@ class KVMController:
 
     def update_config(self, cfg):
         self._return_local()
-        self.cfg = cfg
+        with self._cfg_lock:
+            self.cfg = cfg
         self.trigger_code = KEY_NAME_TO_CODE[cfg.trigger_key]
         self.last_trigger_down = 0.0
         self.trigger_suppressed = False
@@ -700,8 +833,16 @@ class KVMController:
         self.ignore_gate.configure(cfg.ignored_inputs)
         self.crossing = crossing.CrossingEngine.from_config(cfg.crossing)
         self._crossing_failed = False
-        self._drop_connection()
+        if self._memory is not None:
+            self._memory.follow(cfg)
         self._drain_outbound()
+        self._sync_links()
+        # A link made to an address that is no longer the saved one goes, and comes back to the new.
+        for link in list(self.links.values()):
+            entry = link.entry()
+            if link.live() and entry is not None and link.dialled != (entry.get("host"), entry.get("port")):
+                link.drop("Settings saved; reconnecting")
+            link.refresh()
         self.connection_status = "Settings saved; reconnecting"
         self.logger.info("settings updated; redirect mode returned to local")
 
@@ -711,74 +852,36 @@ class KVMController:
         window calls this as each control changes; update_config is for a new address or token,
         which has to reconnect."""
         was = self.cfg.crossing.get("edge") if self.cfg is not None else None
-        self.cfg = cfg
+        with self._cfg_lock:
+            self.cfg = cfg
         edge = cfg.crossing.get("edge")
         if edge != was and edge in crossing.EDGES:
             # The arrangement is one value both machines hold. Changing it
-            # here is a change for Windows too, so it travels the moment it
+            # here is a change for the other machine too, so it travels the moment it
             # changes rather than waiting for the next reconnect.
             self.send_arrangement(edge, cfg.crossing.get("arrangement_set_at", 0))
         self.trigger_code = KEY_NAME_TO_CODE[cfg.trigger_key]
         self.ignore_gate.configure(cfg.ignored_inputs)
         self.crossing = crossing.CrossingEngine.from_config(cfg.crossing)
         self._crossing_failed = False
+        if self._memory is not None:
+            self._memory.follow(cfg)
 
     def set_redirecting(self, value, edge=None, offset=None, came_home=True):
-        """`edge` and `offset` are the Windows edge and fraction along it a
-        crossing arrives at; absent for the shortcut, when Windows leaves its
-        pointer where it is. The way home is sent on every switch.
+        """`edge` and `offset` are the edge of the other machine and fraction along it a
+        crossing arrives at; absent for the shortcut, when it leaves its pointer where it is.
 
-        Input coming home this way is a switch, the shortcut, the menu or the
-        PC sending it back, and says so through on_crossing as "home" with
-        where the pointer is, for the arrival that shows it. `came_home` is
-        False for the two ways back that show their own: a crossing that lands
-        here, and the PC taking this Mac over."""
+        Input coming home this way is a switch, the shortcut or the menu, and says so through
+        on_crossing as "home" with where the pointer is, for the arrival that shows it.
+        `came_home` is False for the ways back that show their own: a crossing that lands here
+        (it arrives through the owner as a `switch`), and another machine taking this Mac over."""
         value = bool(value)
+        if not value:
+            self._go_generation += 1
         if value == self.redirecting:
             return False
         if value:
-            if not self.connected:
-                self.logger.warning("cannot redirect: the Windows receiver is not connected")
-                self._alert("Beamer", f"Cannot switch — {self.connection_status}")
-                return False
-            if self.receiving:
-                # The PC is driving this Mac over the other link, so switching
-                # to Windows means sending the PC's input home: the one way
-                # back that does not depend on the PC or on the return edge.
-                send_home = self.send_peer_home
-                if send_home is not None and send_home():
-                    return True
-                self.logger.warning("cannot redirect: Windows is driving this Mac and cannot be reached")
-                return False
-            if not self.cfg.send_to_windows:
-                self.logger.info("cannot redirect: sending this Mac's input to Windows is switched off")
-                return False
-            self.redirect_started_at = self.clock()
-            self.redirecting = True
-            self.cursor_pin_point = self._capture_cursor_pin_point()
-            self._set_cursor_follows_mouse(False)
-            if not self.redirecting:
-                # A link failure on another thread went local in the gap
-                # above; its reassociation must not be the one overwritten.
-                self._set_cursor_follows_mouse(True)
-                self.cursor_pin_point = None
-                return False
-            # The sentinel is expanded into a real clipboard message (or
-            # dropped) by the outbound worker at send time, not here -- this
-            # runs on the event-tap thread and must never block on reading
-            # the pasteboard.
-            self._enqueue_control({"type": _LOCAL_CLIPBOARD_SENTINEL_TYPE, "data": {}})
-            self._enqueue_control(
-                protocol.focus_msg(
-                    "windows",
-                    edge=edge,
-                    offset=offset,
-                    return_edge=edge or self.crossing.home_edge(),
-                    resistance_px=int(self.crossing.resistance_px),
-                )
-            )
-            self.logger.info("redirecting input to Windows")
-            return True
+            return self._redirect(edge, offset)
         self._return_local()
         self.logger.info("input returned to this Mac")
         if came_home:
@@ -787,31 +890,101 @@ class KVMController:
                 self._notify_crossing("home", crossing.Step(pin=(pin[0], pin[1])))
         return True
 
+    def _redirect(self, edge, offset):
+        link = self._primary_link
+        if not self.connected or not link.peer_id:
+            self.logger.warning("cannot redirect: the other machine is not connected")
+            self._alert("Beamer", f"Cannot switch — {self.connection_status}")
+            return False
+        if self.receiving:
+            # Driven, so this Mac sends its owner home first and drives once the owner has let go
+            # (the responder ends it by force after a second): a machine never does both.
+            send_home = self.send_peer_home
+            if send_home is not None and send_home():
+                self._go_after_let_go(edge, offset)
+                return True
+            self.logger.warning("cannot redirect: another machine is driving this Mac and cannot be reached")
+            return False
+        if not self.cfg.send_to_windows:
+            self.logger.info("cannot redirect: sending this Mac's input to the other machine is switched off")
+            return False
+        self.redirect_started_at = self.clock()
+        self._note_clipboard()
+        peer = link.peer_id
+        self._step(lambda owner: owner.go(peer, edge, offset))
+        if not self.redirecting:
+            return False
+        responder = self.responder
+        if responder is not None and responder.driven:
+            # A take on this Mac was being decided as this Mac's own began: it won the race, so
+            # this Mac's input goes home (WIRE.md section 4, "a machine never drives and is driven at once").
+            self.logger.warning("another machine took this Mac as it began to drive; input comes home")
+            self._return_local()
+            return False
+        return True
+
+    def _go_after_let_go(self, edge, offset, step=None):
+        if self._letting_go:
+            return
+        self._letting_go = True
+        generation = self._go_generation
+
+        def wait_then_go():
+            try:
+                end = time.monotonic() + LET_GO_WAIT_SECONDS
+                while self.receiving and not self.stop_event.is_set() and time.monotonic() < end:
+                    self.stop_event.wait(0.02)
+                if generation != self._go_generation:
+                    return
+                if self.receiving or self.stop_event.is_set():
+                    self.logger.warning("the machine driving this Mac did not let go; the move is dropped")
+                    return
+                if self.set_redirecting(True, edge, offset) and step is not None:
+                    self._notify_crossing("cross", step)
+            finally:
+                self._letting_go = False
+
+        threading.Thread(target=wait_then_go, name="Beamer-let-go", daemon=True).start()
+
     def _return_local(self):
         """Every way input comes back to this Mac ends here: the switch home,
         a dropped link, a crashed worker, a disabled tap, a settings change.
         The cursor association is the part that must not be skipped -- a
         path that only cleared `redirecting` left the pointer decoupled from
-        the hand, frozen on screen while the keyboard already worked. Windows
-        is told too, while the link is up: it keeps treating this Mac as
+        the hand, frozen on screen while the keyboard already worked. The machine the
+        input was on is told too, while its link is up: it keeps treating this Mac as
         driving, with whatever keys it was holding still down, until it hears
-        otherwise. On a dead link the receiver hands back by itself."""
-        was_redirecting = self.redirecting
+        otherwise. On a dead link the responder hands back by itself."""
+        effects = []
+        taken = False
+        try:
+            with self._owner_lock:
+                effects = self._execute(self.owner.go(None) if self.owner.away else [])
+                self._effects_lock.acquire()
+                taken = True
+        except Exception:
+            self.logger.exception("telling the other machine its input is home failed")
+        if not taken:
+            self._effects_lock.acquire()
+        try:
+            self._apply_effects(effects)
+        finally:
+            try:
+                self._local_cleanup()
+            finally:
+                self._effects_lock.release()
+
+    def _local_cleanup(self):
         self.redirecting = False
         self._set_cursor_follows_mouse(True)
         self.cursor_pin_point = None
         self.translator.reset_mouse_accumulators()
         self.ignore_gate.reset()
         self.crossing.reset()
-        self._forget_round_trips()
-        if was_redirecting:
-            # Queued after redirecting has already flipped False: only reaches
-            # the wire because the outbound gate exempts control messages.
-            self._enqueue_control(protocol.focus_msg("mac"))
 
     def set_receiving(self, value):
-        """The PC has taken input on this Mac, or given it back. Input is
-        returned to this Mac's own hardware first: whatever the PC is about to
+        """Another machine has taken input on this Mac, or given it back. Input is
+        returned to this Mac's own hardware first: whatever the owner is about to
         do with the pointer, it must not read as a push against the edge."""
         value = bool(value)
         if value == self.receiving:
@@ -822,10 +995,8 @@ class KVMController:
         self.crossing.reset()
 
     def _enqueue_control(self, message):
-        """Enqueue a control message (focus, or the local-clipboard sentinel)
-        from set_redirecting, which runs on the event-tap thread rather than
-        the outbound worker. Best-effort: a momentarily full queue drops the
-        message (logged) instead of blocking the tap thread."""
+        """Queue a local control message (the clipboard sentinel) from the event tap, which must
+        never block. Best-effort: a momentarily full queue drops it (logged)."""
         try:
             self.outbound.put_nowait(message)
         except queue.Full:
@@ -1006,7 +1177,7 @@ class KVMController:
                     and not self._was_injected(event)
                     and self.quartz.CGEventGetIntegerValueField(event, self.quartz.kCGKeyboardEventKeycode) == self.trigger_code
                 ):
-                    result = self.translator.key_result(event_type, event, self.trigger_code, self.cfg.key_map)
+                    result = self.translator.key_result(event_type, event, self.trigger_code, {})
                     if result.is_trigger:
                         return self._handle_trigger(result, event)
                 # And this Mac's own pointer, which can push through the edge to take it back
@@ -1038,10 +1209,12 @@ class KVMController:
                     event_type,
                     event,
                     self.trigger_code,
-                    self.cfg.key_map,
+                    {},
                 )
                 if result.is_trigger:
                     return self._handle_trigger(result, event)
+                had = len(result.messages)
+                result.messages = self._after_home_presses(result.messages)
                 if self.redirecting:
                     keycode = self.quartz.CGEventGetIntegerValueField(event, self.quartz.kCGKeyboardEventKeycode)
                     entry = ignored.key(keycode)
@@ -1054,10 +1227,25 @@ class KVMController:
                     if kept:
                         return event
                 messages = result.messages
+                if had and not messages:
+                    # The release of a key pressed here, while the input was home, stays here.
+                    return event
             else:
-                if not self.redirecting:
-                    return self._handle_local_mouse(event_type, event)
                 button = self.translator.button_of(event_type, event)
+                if not self.redirecting:
+                    if button is not None:
+                        if button[1]:
+                            self._home_presses.add(("button", button[0]))
+                        elif ("button", button[0]) in self._home_presses:
+                            self._home_presses.discard(("button", button[0]))
+                        else:
+                            self._enqueue_control({"type": protocol.MSG_MOUSEUP, "data": {"button": button[0]}})
+                    return self._handle_local_mouse(event_type, event)
+                if button is not None and not button[1] and ("button", button[0]) in self._home_presses:
+                    self._home_presses.discard(("button", button[0]))
+                    return event
+                if button is not None and button[1]:
+                    self._home_presses.discard(("button", button[0]))
                 if button is not None and self.ignore_gate.keeps(ignored.button(button[0]), button[1]):
                     return event
                 messages = self.translator.mouse_messages(event_type, event)
@@ -1066,6 +1254,8 @@ class KVMController:
                     # rather than being swallowed and reaching neither.
                     return event
             if not self.redirecting:
+                for message in messages:
+                    self._enqueue_control(message)
                 return event
             for message in messages:
                 try:
@@ -1082,6 +1272,36 @@ class KVMController:
             self._return_local()
             self.logger.exception("event-tap callback failed; input forced local")
             return event
+
+    def _after_home_presses(self, messages):
+        """A press made while the input was home is released at home: at home its key is noted,
+        and once the input has left, the release of a noted key is taken out of what is sent
+        (WIRE.md section 4, "a key or button pressed on the owner while its input was at home is
+        released at home")."""
+        if not self.redirecting:
+            # What comes back is the releases of keys that were not pressed here: pressed while the
+            # input was away, they are the owner's to match against what it swallows.
+            unmatched = []
+            for message in messages:
+                ident = ("key", message["data"]["key"])
+                if message["type"] == protocol.MSG_KEYDOWN:
+                    self._home_presses.add(ident)
+                elif ident in self._home_presses:
+                    self._home_presses.discard(ident)
+                else:
+                    unmatched.append(message)
+            return unmatched
+        kept = []
+        for message in messages:
+            ident = ("key", message["data"].get("key"))
+            if message["type"] == protocol.MSG_KEYUP and ident in self._home_presses:
+                self._home_presses.discard(ident)
+                continue
+            if message["type"] == protocol.MSG_KEYDOWN:
+                # Pressed now, with the input away: any earlier press of it at home is over.
+                self._home_presses.discard(ident)
+            kept.append(message)
+        return kept
 
     def _was_injected(self, event):
         """Whether this event carries the mark input_injector_mac stamps into
@@ -1145,14 +1365,15 @@ class KVMController:
             return event
         if step.crossed:
             if self.receiving:
-                # The PC is driving this Mac and this Mac's own pointer pushed through: the PC's
-                # input goes home first, over its own link, and this Mac's follows it across. The
-                # PC's focus home clears receiving here too, later, and finds it already clear.
+                # Another machine is driving this Mac and this Mac's own pointer pushed through:
+                # that machine's input goes home first, and this Mac's follows it across once it
+                # has let go (WIRE.md section 4).
                 send_home = self.send_peer_home
                 if send_home is None or not send_home():
-                    self.logger.warning("cannot cross: Windows is driving this Mac and cannot be reached")
+                    self.logger.warning("cannot cross: another machine is driving this Mac and cannot be reached")
                     return event
-                self.receiving = False
+                self._go_after_let_go(step.edge, step.offset, step)
+                return event
             if self.set_redirecting(True, edge=step.edge, offset=step.offset):
                 self._notify_crossing("cross", step)
                 return None
@@ -1224,33 +1445,6 @@ class KVMController:
         against after the last mouse event."""
         return self.crossing.pressure_at(self.clock())
 
-    def _handle_switch(self, data):
-        """Windows asked for input back, having pushed through its return
-        edge. Stop redirecting first, then land the pointer where it left
-        Windows: `edge` is the Mac edge to arrive at and `offset` the fraction
-        along it. A malformed or unknown request is ignored; a switch that
-        arrives while already local still gets the haptic, since the pointer
-        genuinely came home."""
-        if not isinstance(data, dict) or data.get("target") != "mac":
-            return
-        edge = data.get("edge")
-        offset = data.get("offset")
-        crossed = edge in crossing.EDGES and isinstance(offset, (int, float)) and not isinstance(offset, bool)
-        # Without an edge the PC sent this Mac's input home by its own switch: that is a switch
-        # arriving here, and shows where the pointer is.
-        self.set_redirecting(False, came_home=not crossed)
-        point = None
-        if crossed:
-            try:
-                point = crossing.CrossingEngine.arrival_point(
-                    edge, offset, self._current_desktop_bounds(), displays=self._current_displays())
-            except Exception:
-                self.logger.exception("failed to place the pointer on arrival")
-            else:
-                self._warp_cursor_to(point)
-        # `pin` is where the pointer landed, for the arrival effect; None when it was not placed.
-        self._notify_crossing("arrive", crossing.Step(mac_edge=edge if edge in crossing.EDGES else None, pin=point))
-
     def _handle_system_event(self, event):
         """Forward a media/volume key press. Anything that is not one --
         brightness, keyboard backlight, and the undocumented subtypes that
@@ -1272,7 +1466,7 @@ class KVMController:
         if self.ignore_gate.keeps(ignored.media(name), is_down):
             return event
         message_type = protocol.MSG_KEYDOWN if is_down else protocol.MSG_KEYUP
-        wire_name = self.cfg.key_map.get(name, name)
+        wire_name = name
         try:
             self.outbound.put_nowait({"type": message_type, "data": {"key": wire_name}})
         except queue.Full:
@@ -1298,12 +1492,12 @@ class KVMController:
             # would open Mission Control or switch Spaces on the Mac while
             # the user is looking at Windows.
             fields = self._read_dock_event(event)
-            messages = self.dock_classifier.translate(fields) if fields is not None else []
+            messages = _literal(self.dock_classifier.translate(fields) if fields is not None else [])
         else:
             gesture_view = self._convert_gesture_event(event)
             if gesture_view is None:
                 return event
-            messages = self.gesture_translator.translate(event_type, gesture_view)
+            messages = _literal(self.gesture_translator.translate(event_type, gesture_view))
         if not self._gesture_capture_logged:
             self._gesture_capture_logged = True
             self.logger.info("gesture capture active")
@@ -1337,7 +1531,7 @@ class KVMController:
             self._overlay_gesture_capture_logged = True
             self.logger.info("gesture capture active (overlay)")
         try:
-            messages = self.gesture_translator.translate(event_type, gesture_view)
+            messages = _literal(self.gesture_translator.translate(event_type, gesture_view))
         except Exception:
             self.logger.exception("overlay gesture translation failed")
             return
@@ -1404,163 +1598,77 @@ class KVMController:
             self.trigger_suppressed = False
         return None if suppress else event
 
+    # The links, and what the owner decides
+
+    def _sync_links(self):
+        """One link per peer with `send` on, made and ended to match the peers as the book has them
+        now. Cheap, and called every couple of seconds as well as when the settings change."""
+        peers = self.book.peers()
+        wanted = {peer["token"] for peer in peers if peer.get("token") and peer.get("send") is True}
+        first = peers[0].get("token") if peers else None
+        with self._links_lock:
+            gone = [self.links.pop(token) for token in [token for token in self.links if token not in wanted]]
+            if not self.stop_event.is_set():
+                hardware = {"hardware": self._hardware} if self._hardware is not None else {}
+                for token in wanted - set(self.links):
+                    link = self.link_factory(
+                        token, self.book, self.identity,
+                        state=self._link_state, up=self._link_up, message=self._link_message, notice=self._notify_user,
+                        socket_factory=self.socket_factory,
+                        tunnel=self._connect_via_ssh_fallback if token == first else None,
+                        clock=self.clock, reconnect_seconds=self.cfg.reconnect_interval_s, **hardware,
+                        large=lambda link, began: self.owner.expects_clipboard(link.peer_id, began),
+                    )
+                    self.links[token] = link
+                    if self.started:
+                        link.start()
+            self._primary_token = first
+            self._primary_link = self.links.get(first)
+        for link in gone:
+            # Without waiting: a link thread can be in a 3 second connect, and this runs on the
+            # main thread when a window removes or switches off machines.
+            link.stop(wait=False)
+            self._forget_link(link)
+
+    def peers_changed(self):
+        """The peers changed under the links (a pairing made or removed): bring the links in step,
+        and tell every peer we can send to who else this machine has (`paired`)."""
+        self._sync_links()
+        for link in list(self.links.values()):
+            link.refresh()
+            if link.live():
+                self._announce_paired(link)
+        self._paired_ids = self._pairing_ids()
+
+    def _forget_link(self, link):
+        self._drop_up(link)
+
+    def _drop_up(self, link):
+        """The link is no longer one this Mac can send on: forget it and tell the owner."""
+        peer = link.peer_id
+        if peer and self._peers_up.get(peer) is link:
+            self._peers_up.pop(peer, None)
+            self._step(lambda owner: owner.link_down(peer))
+
     def _connection_worker(self):
         while not self.stop_event.is_set():
-            if not self.connected and self._config_ready():
-                if not self._connect_once():
-                    self._follow_the_pc()
+            try:
+                self._sync_links()
+                self._announce_changes()
+                self._follow_the_peers()
+            except Exception:
+                self.logger.exception("keeping the links in step failed")
             self.stop_event.wait(self.cfg.reconnect_interval_s)
 
-    def _follow_the_pc(self):
-        """Try the address the paired PC is beaconing from now, if it is not the saved one."""
-        discovery, cfg = self.discovery, self.cfg
-        if discovery is None or not cfg.pc_name:
+    def _follow_the_peers(self):
+        """A peer that changed address after a router restart still beacons under its name: the link
+        itself decides whether to try that address (down for ten seconds, once in thirty)."""
+        discovery = self.discovery
+        if discovery is None or not self.links:
             return
-        moved = next((pc["address"] for pc in discovery.pcs()
-                      if pc["name"] == cfg.pc_name and pc["port"] == cfg.port and pc["address"] != cfg.host), None)
-        if moved is None or not self._connect_once(host=moved):
-            return
-        self.logger.info("%s moved from %s to %s", cfg.pc_name, cfg.host, moved)
-        self.cfg = dataclasses.replace(self.cfg, host=moved)
-        if self.on_host_learned is not None:
-            try:
-                self.on_host_learned(moved)
-            except Exception:
-                self.logger.exception("saving the PC's new address failed")
-
-    def _config_ready(self):
-        return bool(self.cfg.host and self.cfg.auth_token and 1 <= self.cfg.port <= 65535)
-
-    def _connect_once(self, host=None):
-        sock = None
-        fallback = False
-        # Read once: update_config can replace self.cfg from the AppKit thread mid-handshake.
-        endpoint = (host or self.cfg.host, self.cfg.port, self.cfg.auth_token)
-        # The tunnel leads to the saved address, so a new one is tried directly or not at all.
-        tunnel_allowed = host is None
-        host, port = endpoint[0], endpoint[1]
-        self.connection_status = f"Connecting to {host}:{port}"
-        try:
-            try:
-                sock = self.socket_factory(
-                    (host, port),
-                    timeout=CONNECT_TIMEOUT_SECONDS,
-                )
-            except OSError as exc:
-                if exc.errno != errno.EHOSTUNREACH or not tunnel_allowed:
-                    raise
-                sock = self._connect_via_ssh_fallback()
-                fallback = True
-            sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-            sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
-            session = protocol.SecureSession(endpoint[2])
-            sock.sendall(session.preamble())
-            sock.settimeout(AUTH_TIMEOUT_SECONDS)
-            try:
-                protocol.recv_preamble(sock, session)
-            except socket.timeout:
-                if self.answered == endpoint:
-                    raise _HandshakeError("Windows stopped responding") from None
-                raise _HandshakeError(OLD_RECEIVER_STATUS) from None
-            except protocol.VersionMismatch as exc:
-                raise _HandshakeError(
-                    f"Windows receiver speaks Beamer protocol v{exc.peer_version}, this Mac v{protocol.PROTOCOL_VERSION} — update both apps"
-                ) from None
-            # The way home travels in the hello as well as on every switch,
-            # so Windows knows which of its edges leads back here before this
-            # Mac has ever crossed -- which is what lets the PC push its own
-            # pointer out across that same border first.
-            protocol.send_msg(
-                sock,
-                session,
-                protocol.hello_msg(
-                    return_edge=self.crossing.home_edge(),
-                    resistance_px=int(self.crossing.resistance_px),
-                ),
-            )
-            try:
-                reply = protocol.recv_msg(sock, session)
-            except protocol.ConnectionClosed:
-                # The receiver closes without a word when the first frame fails to authenticate.
-                raise _HandshakeError(AUTH_FAILED_STATUS) from None
-            except protocol.AuthenticationError:
-                raise _HandshakeError(AUTH_FAILED_STATUS) from None
-            reply_type = reply.get("type")
-            if reply_type != protocol.MSG_WELCOME:
-                raise protocol.ProtocolError("receiver did not confirm authentication")
-            welcome_data = reply.get("data")
-            if not isinstance(welcome_data, dict):
-                raise protocol.ProtocolError("welcome message missing data")
-            error = welcome_data.get("error")
-            if error == "version_mismatch":
-                raise _HandshakeError(OLD_RECEIVER_STATUS)
-            if error:
-                raise _HandshakeError(f"Windows rejected the connection: {error}")
-            if welcome_data.get("version") != protocol.PROTOCOL_VERSION:
-                raise _HandshakeError(OLD_RECEIVER_STATUS)
-            self.peer_settings = protocol.keeps_settings(welcome_data)
-            sock.settimeout(SOCKET_IO_TIMEOUT_SECONDS)
-        except _HandshakeError as exc:
-            self.redirecting = False
-            self.connection_status = exc.status
-            if sock is not None:
-                try:
-                    sock.close()
-                except OSError:
-                    pass
-            self.logger.warning("connection to Windows failed: %s", exc.status)
-            return False
-        except protocol.ConnectionClosed:
-            self.redirecting = False
-            self.connection_status = "Windows closed the connection during the handshake."
-            if sock is not None:
-                try:
-                    sock.close()
-                except OSError:
-                    pass
-            self.logger.warning(self.connection_status)
-            return False
-        except (OSError, protocol.ProtocolError) as exc:
-            self.redirecting = False
-            self.connection_status = connection_error_message(exc)
-            if sock is not None:
-                try:
-                    sock.close()
-                except OSError:
-                    pass
-            self.logger.warning("connection to Windows failed: %s", exc)
-            return False
-        with self.socket_lock:
-            if self.stop_event.is_set() or self.sock is not None:
-                try:
-                    sock.close()
-                except OSError:
-                    pass
-                return False
-            self.sock = sock
-            self.session = session
-        self.clipboard.forget_sync()
-        now = self.clock()
-        with self.sequence_lock:
-            self.last_ack_seq = -1
-            self.last_ack_at = now
-        self.connected_at = now
-        self.last_send_at = now
-        self.answered = endpoint
-        if fallback:
-            self.connection_status = "Connected to Windows via secure macOS 27 fallback"
-            self.logger.info("connected to Windows through the SSH fallback")
-        else:
-            self.connection_status = f"Connected to {host}:{port}"
-            self.logger.info("connected to Windows at %s:%s", host, port)
-        try:
-            announcements = list(self.announce())
-        except Exception:
-            self.logger.exception("announce failed")
-            announcements = []
-        for announcement in announcements:
-            self._send_raw(announcement)
-        return True
+        machines = list(discovery.pcs())
+        for link in list(self.links.values()):
+            link.follow(machines)
 
     def _connect_via_ssh_fallback(self):
         try:
@@ -1574,50 +1682,325 @@ class KVMController:
                 "Open /Applications/Beamer Tunnel.command",
             ) from exc
 
-    def _outbound_worker(self):
-        while not self.stop_event.is_set():
+    def _notify_user(self, text):
+        self.logger.info("%s", text)
+        self._alert("Beamer", text)
+
+    def _name_of(self, peer):
+        return self._label(lambda entry: entry.get("id") == peer) or self._up_names.get(peer) or "the other machine"
+
+    # Link callbacks: each on a link's own thread
+
+    def _link_state(self, link, up, text):
+        if link.token == self._primary_token:
+            self.connection_status = text
+        if up:
+            return
+        self.logger.warning("link to %s: %s", link.peer_name or link.token[:6], text)
+        self._drop_up(link)
+
+    def _link_up(self, link, fields):
+        if self.links.get(link.token) is not link:
+            # Its machine went while the handshake finished: it must not take a place in the owner.
+            return
+        peer = protocol.id_text(fields["id"])
+        self._up_names[peer] = fields["name"]
+        self._accepts[peer] = bool(fields["accepts"])
+        self._peers_up[peer] = link
+        forget = getattr(self.clipboard, "forget_sync", None)
+        if forget is not None:
+            forget()
+        self._step(lambda owner: owner.link_up(peer, fields["accepts"]))
+        if self.links.get(link.token) is not link:
+            # Its machine went after the check above, and `_sync_links` ran its `_drop_up` before
+            # this registered the link: undo what that could not see.
+            if self._peers_up.get(peer) is link:
+                del self._peers_up[peer]
+            self._step(lambda owner: owner.link_down(peer))
+            return
+        self.logger.info("connected to %s", fields["name"])
+        self._announce_to(link, fields)
+        if link.token == self._primary_token:
+            self._primary_up(link, fields)
+
+    def _primary_up(self, link, fields):
+        """The primary peer's link is up: its saved address is the one now in use. A hook for
+        WakingController, which learns the hardware address."""
+        entry = link.entry() or {}
+        host = entry.get("host")
+        with self._cfg_lock:
+            changed = bool(host) and host != self.cfg.host
+            if changed:
+                self.cfg = dataclasses.replace(self.cfg, host=host)
+        if changed:
+            callback = self.on_host_learned
+            if callback is not None:
+                try:
+                    callback(host)
+                except Exception:
+                    self.logger.exception("saving the peer's new address failed")
+
+    def _announce_to(self, link, fields):
+        """What this Mac tells a peer the moment the link is up (WIRE.md section 3)."""
+        entry = link.entry() or {}
+        own = bytes(self.identity()["id"])
+        if entry.get("side") in crossing.EDGES:
+            by = protocol.read_id(entry.get("side_by")) or own
+            link.post(protocol.arrangement_v6(entry["side"], entry.get("side_set_at", 0), by))
+        if "settings" in link.caps:
             try:
-                message = self.outbound.get(timeout=0.2)
-            except queue.Empty:
+                announcements = list(self.announce())
+            except Exception:
+                self.logger.exception("announce failed")
+                announcements = []
+            for message in announcements:
+                if message.get("type") == protocol.MSG_SETTINGS:
+                    link.post(message)
+        self._announce_paired(link)
+
+    def _pairing_ids(self):
+        return tuple(peer.get("id") for peer in self.book.peers() if protocol.read_id(peer.get("id")) is not None)
+
+    def _announce_paired(self, link):
+        ids = [protocol.read_id(peer.get("id")) for peer in self.book.peers() if peer.get("id") != link.peer_id]
+        ids = [ident for ident in ids if ident is not None][:protocol.MAX_PEERS]
+        link.post(protocol.paired_msg(ids))
+
+    def _announce_changes(self):
+        """Who this Mac has changed (a pairing made or removed): every live peer is told again."""
+        ids = self._pairing_ids()
+        if ids == self._paired_ids:
+            return
+        self._paired_ids = ids
+        for link in list(self.links.values()):
+            if link.live():
+                self._announce_paired(link)
+
+    def _link_message(self, link, message):
+        kind = message.get("type")
+        peer = link.peer_id
+        try:
+            if kind == protocol.MSG_SWITCH:
+                read = protocol.read_switch(message)
+                if read is not None:
+                    data = {"route": read["route"], "next": protocol.id_text(read["next"]),
+                            "edge": read["edge"], "offset": read["offset"]}
+                    self._step(lambda owner: owner.switch(peer, data))
+            elif kind == protocol.MSG_ACCEPT:
+                read = protocol.read_accept(message)
+                if read is not None:
+                    self._step(lambda owner: owner.accept(peer, read))
+            elif kind == protocol.MSG_REFUSE:
+                read = protocol.read_refuse(message)
+                if read is not None:
+                    self._step(lambda owner: owner.refuse(peer, read))
+            elif kind == protocol.MSG_ACCEPTS:
+                read = protocol.read_accepts(message)
+                if read is not None:
+                    self._accepts[peer] = read["accepts"]
+                    self._step(lambda owner: owner.accepts(peer, read["accepts"]))
+            elif kind == protocol.MSG_CLIPBOARD:
+                began = getattr(message, "began_at", self.clock())
+                read = protocol.read_clipboard(message)
+                if read is not None:
+                    # Rebuilt from what was read: the owner sends it on to the machine input is on.
+                    clean = protocol.clipboard_msg(read["text"], read["image"])
+                    self._step(lambda owner: owner.clipboard_arrived(peer, began, clean))
+            elif kind == protocol.MSG_ARRANGEMENT:
+                self._handle_arrangement(message, peer)
+            elif kind == protocol.MSG_SETTINGS:
+                data = message.get("data")
+                if isinstance(data, dict) and "settings" in link.caps and self.on_settings is not None:
+                    self.on_settings(data, peer)
+            elif kind == protocol.MSG_PAIRED:
+                ids = protocol.read_paired(message)
+                if ids is not None:
+                    texts = [protocol.id_text(ident) for ident in ids]
+                    self.book.store_paired(peer, texts)
+                    if self.on_paired is not None:
+                        self.on_paired(peer, texts)
+            else:
+                self.logger.debug("ignoring inbound message of type %r", kind)
+        except Exception:
+            self.logger.exception("handling a %r from the other machine failed", kind)
+
+    def _handle_arrangement(self, message, peer):
+        """The peer changed which edge of its screen faces this one. Handed to the app, which owns
+        the settings file, as the edge of THIS Mac that leads to the peer; nothing is applied here.
+        The app's flat settings hold the first peer's side only, so another's is not applied."""
+        read = protocol.read_arrangement_v6(message, time.time())
+        if read is None or self.on_arrangement is None:
+            return
+        peers = self.book.peers()
+        if not peers or peers[0].get("id") != peer:
+            self.logger.info("an arrangement from a peer other than the first is not applied yet")
+            return
+        self.on_arrangement(crossing.OPPOSITE[read["edge"]], read["set_at"], protocol.id_text(read["by"]))
+
+    def send_arrangement(self, mac_edge, set_at):
+        """Tell the primary peer which edge of this Mac faces it, when the change was made here.
+        Sent straight out: it is not input, and it goes whether or not input is redirected."""
+        link = self._primary_link
+        if link is None or not link.live():
+            return False
+        return link.post(protocol.arrangement_v6(mac_edge, int(set_at), bytes(self.identity()["id"])))
+
+    def send_settings(self, data, source=None):
+        """Tell every peer that keeps Same on all machines this Mac's state, but `source` (the peer
+        it came from, when this is a newer state passed on)."""
+        sent = False
+        for peer, link in list(self._peers_up.items()):
+            if peer != source and "settings" in link.caps and link.live():
+                sent = link.post(protocol.settings_msg(data)) or sent
+        return sent
+
+    # The owner
+
+    def _step(self, call):
+        """One call into the owner, its messages sent, and then what it asks for here (the
+        pointer, an alert) done in the order it was decided in, whichever thread decided it."""
+        with self._owner_lock:
+            self.owner.resistance_px = int(self.crossing.resistance_px)
+            effects = self._execute(call(self.owner))
+            self._effects_lock.acquire()
+        try:
+            self._apply_effects(effects)
+        finally:
+            self._effects_lock.release()
+
+    def _execute(self, actions):
+        """Under `_owner_lock`: send what the owner says to send, and return the rest."""
+        effects = []
+        for action in actions:
+            if not isinstance(action, (owner_module.Send, owner_module.SendClipboard, owner_module.SetClipboard)):
+                effects.append(action)
                 continue
             try:
-                self._process_outbound(message)
+                if isinstance(action, owner_module.Send):
+                    self._deliver(action)
+                elif isinstance(action, owner_module.SendClipboard):
+                    if threading.current_thread() is self.capture_thread:
+                        self._enqueue_control({"type": _LOCAL_CLIPBOARD_SENTINEL_TYPE, "data": {}, "peer": action.peer})
+                    else:
+                        self._send_clipboard(action.peer)
+                else:
+                    self._set_clipboard(action.message)
             except Exception:
-                # One bad message must not end the only thread that drains
-                # this queue: nothing restarts it, and the tap would keep
-                # swallowing input into a queue nobody reads.
-                self._force_local(f"outbound message {message.get('type')!r} failed")
-                self.logger.exception("outbound worker recovered")
-            finally:
-                self.outbound.task_done()
+                # One message that cannot go must not stop the move it belongs to: its Moved is next.
+                self.logger.exception("carrying out %s failed", type(action).__name__)
+        return effects
 
-    def _process_outbound(self, message):
-        """Handle one dequeued outbound item. Control messages (focus,
-        clipboard, and the local-clipboard sentinel) are exempt from the
-        `not redirecting` gate -- otherwise the switch-back focus message
-        would be dropped, since set_redirecting(False) closes the gate
-        before this worker gets to dequeue it -- and bypass sequence
-        assignment entirely, the same way ping does via _send_raw."""
-        message_type = message.get("type")
-        if message_type not in _GATE_EXEMPT_TYPES and not self.redirecting:
-            return
-        if message_type == _LOCAL_CLIPBOARD_SENTINEL_TYPE:
-            self._send_local_clipboard()
-            return
-        if message_type in CONTROL_MESSAGE_TYPES:
-            self._send_raw(message)
-            return
-        prepared = self._prepare_outbound(message)
-        self._send_prepared(prepared)
+    def _apply_effects(self, effects):
+        for effect in effects:
+            if isinstance(effect, owner_module.Moved):
+                self._on_moved(effect)
+            elif isinstance(effect, owner_module.Unreachable):
+                self._on_unreachable(effect)
 
-    def _send_local_clipboard(self):
-        """Expand the local-clipboard sentinel: read this Mac's clipboard and
-        send it as a clipboard message, unless it is unchanged since it was
-        last sent or written from the PC. Text over CLIPBOARD_MAX_BYTES and an
-        image over CLIPBOARD_IMAGE_MAX_BYTES are each dropped on their own,
-        so an oversized screenshot still lets its text through; with nothing
-        left the message is skipped and the focus message still goes out."""
-        text, image = self.clipboard.changed_contents()
+    def _deliver(self, send):
+        link = self._peers_up.get(send.peer)
+        if link is None:
+            return
+        message = send.message
+        if message.get("type") in protocol.INPUT_TYPES:
+            message = self._for_peer(message, link)
+            if message is None:
+                return
+            sent = link.send_input(message)
+        else:
+            sent = link.post(message)
+        if not sent and link.live():
+            link.drop("The outbound queue filled")
+
+    def _key_style(self):
+        return config_module.key_map_style(self.cfg.key_map) or self.cfg.key_map
+
+    def _for_peer(self, message, link):
+        """A captured input message as the peer it is going to names it: modifiers by the key
+        table (WIRE.md section 7), and media keys only to a peer that acts on them."""
+        if message.get("type") not in (protocol.MSG_KEYDOWN, protocol.MSG_KEYUP) or isinstance(message, _Literal):
+            return message
+        data = dict(message["data"])
+        key = data.get("key")
+        if key in MEDIA_KEY_NAMES:
+            return message if "media_keys" in link.caps else None
+        data["key"] = keytable.wire_name(key, OWN_PLATFORM, link.peer_platform, self._key_style())
+        return {"type": message["type"], "data": data}
+
+    def _on_moved(self, moved):
+        if moved.to is not None:
+            if not self.redirecting:
+                self.redirect_started_at = self.clock()
+                self.redirecting = True
+                self.cursor_pin_point = self._capture_cursor_pin_point()
+                self._set_cursor_follows_mouse(False)
+                self.pointer.hide()
+            self.logger.info("redirecting input to %s", self._name_of(moved.to))
+            return
+        self._local_cleanup()
+        why = WHY_TEXT.get(moved.why)
+        if why is not None:
+            text = why.format(name=self._name_of(moved.left))
+            self.logger.warning("%s; input returned to this Mac", text)
+            self._alert("Beamer", text)
+        if moved.why == "switch":
+            self._arrive(moved.edge, moved.offset)
+
+    def _arrive(self, edge, offset):
+        """The other machine sent input back: land the pointer where it left, `edge` being the edge
+        of this Mac to arrive at and `offset` the fraction along it. Without an edge the pointer
+        stays where it was and the arrival says so."""
+        crossed = edge in crossing.EDGES and isinstance(offset, (int, float)) and not isinstance(offset, bool)
+        point = None
+        if crossed:
+            try:
+                point = crossing.CrossingEngine.arrival_point(
+                    edge, offset, self._current_desktop_bounds(), displays=self._current_displays())
+            except Exception:
+                self.logger.exception("failed to place the pointer on arrival")
+            else:
+                self._warp_cursor_to(point)
+        # `pin` is where the pointer landed, for the arrival effect; None when it was not placed.
+        self._notify_crossing("arrive", crossing.Step(mac_edge=edge if edge in crossing.EDGES else None, pin=point))
+
+    def _on_unreachable(self, unreachable):
+        name = self._name_of(unreachable.peer)
+        why = unreachable.why
+        if why == "unreachable" and self._accepts.get(unreachable.peer) is False:
+            why = "not_allowed"
+        text = WHY_TEXT.get(why, "{name} could not be reached").format(name=name)
+        self.logger.warning("%s", text)
+        self._alert("Beamer", text)
+
+    # The clipboard (WIRE.md section 5)
+
+    def _clipboard_stamp_now(self):
+        stamp = getattr(self.clipboard, "change_stamp", None)
+        if stamp is None:
+            return None
+        try:
+            return stamp()
+        except Exception:
+            self.logger.exception("could not read the clipboard's change stamp")
+            return None
+
+    def _note_clipboard(self):
+        """Before this Mac takes a peer: if the clipboard changed by its owner's hand since this
+        Mac last wrote it from a peer, no peer holds what it holds now."""
+        stamp = self._clipboard_stamp_now()
+        if stamp != self._clipboard_stamp:
+            self._clipboard_stamp = stamp
+            with self._owner_lock:
+                self.owner.clipboard_changed()
+
+    def _send_clipboard(self, peer):
+        """Read this Mac's clipboard and send it as a clipboard message. Text over CLIPBOARD_MAX_BYTES
+        and an image over CLIPBOARD_IMAGE_MAX_BYTES are each dropped on their own, so an oversized
+        screenshot still lets its text through; with nothing left nothing is sent."""
+        link = self._peers_up.get(peer)
+        if link is None:
+            return
+        text, image = self.clipboard.get_contents()
         if text and len(text.encode("utf-8")) > protocol.CLIPBOARD_MAX_BYTES:
             self.logger.warning("local clipboard text is too large; skipping the text")
             text = None
@@ -1629,276 +2012,76 @@ class KVMController:
             )
             image = None
         if not text and image is None:
-            self.logger.debug("local clipboard is empty or unchanged since the last sync; not sending it")
+            self.logger.debug("local clipboard is empty; not sending it")
             return
-        self._send_raw(protocol.clipboard_msg(text or None, image))
+        link.post(protocol.clipboard_msg(text or None, image))
 
-    def _prepare_outbound(self, message):
-        with self.sequence_lock:
-            self.last_sent_seq += 1
-            seq = self.last_sent_seq
-        data = dict(message.get("data", {}))
-        data["seq"] = seq
-        return {"type": message["type"], "data": data}
-
-    def _send_prepared(self, message):
-        with self.socket_lock:
-            sock = self.sock
-            if sock is None:
-                self._connection_failed("connection disappeared before an input event could be sent")
-                return False
-            try:
-                protocol.send_msg(sock, self.session, message)
-                self.last_send_at = self.clock()
-            except (OSError, protocol.ProtocolError) as exc:
-                self._connection_failed(f"send failed: {exc}", expected_socket=sock)
-                return False
-            with self.sequence_lock:
-                self._unacked_sent_at.append((message["data"]["seq"], self.last_send_at))
-            return True
-
-    def _send_raw(self, message):
-        """Serialize and send `message` directly under socket_lock, bypassing
-        the outbound queue and its redirecting gate. Used for the idle
-        heartbeat ping, which must go out whether or not input is redirected."""
-        with self.socket_lock:
-            sock = self.sock
-            if sock is None:
-                return False
-            try:
-                protocol.send_msg(sock, self.session, message)
-                self.last_send_at = self.clock()
-                return True
-            except (OSError, protocol.ProtocolError) as exc:
-                self._connection_failed(f"send failed: {exc}", expected_socket=sock)
-                return False
-
-    def _ack_worker(self):
-        active_socket = None
-        decoder = None
-        while not self.stop_event.is_set():
-            with self.socket_lock:
-                sock = self.sock
-                session = self.session
-            if sock is None:
-                active_socket = None
-                decoder = None
-                self.stop_event.wait(0.1)
-                continue
-            if sock is not active_socket:
-                active_socket = sock
-                decoder = FrameDecoder(session)
-            try:
-                chunk = sock.recv(4096)
-            except socket.timeout:
-                continue
-            except OSError as exc:
-                self._connection_failed(f"ACK receive failed: {exc}", expected_socket=sock)
-                active_socket = None
-                continue
-            if not chunk:
-                self._connection_failed("Windows closed the connection", expected_socket=sock)
-                active_socket = None
-                continue
-            try:
-                messages = decoder.feed(chunk)
-                for message in messages:
-                    self._handle_inbound(message)
-            except protocol.AuthenticationError:
-                self._connection_failed(AUTH_FAILED_STATUS, expected_socket=sock)
-                active_socket = None
-            except protocol.ProtocolError as exc:
-                self._connection_failed(f"invalid ACK stream: {exc}", expected_socket=sock)
-                active_socket = None
-            except Exception as exc:
-                # The same outcome as a malformed frame: this connection goes,
-                # the thread stays, and the next connection gets a reader.
-                self.logger.exception("inbound handling failed")
-                self._connection_failed(f"inbound message failed: {exc}", expected_socket=sock)
-                active_socket = None
-
-    def _handle_inbound(self, message):
-        """Dispatch one inbound message. `ack` updates the sequence bookkeeping
-        the watchdog relies on; any other well-formed message (a dict with a
-        known "type" string) still refreshes liveness — bytes arriving at all
-        prove the connection is alive — and is otherwise ignored, except for
-        `clipboard`, which is applied to the local pasteboard. Malformed
-        frames still drop the connection, since they mean the stream can no
-        longer be trusted."""
-        if message.get("type") == protocol.MSG_ACK:
-            self._record_ack(message)
+    def _set_clipboard(self, message):
+        read = protocol.read_clipboard(message)
+        if read is None or (read["text"] is None and read["image"] is None):
             return
-        message_type = message.get("type")
-        if not isinstance(message_type, str) or not message_type:
-            raise protocol.ProtocolError(f"malformed inbound message: {message!r}")
-        with self.sequence_lock:
-            self.last_ack_at = self.clock()
-        if message_type == protocol.MSG_CLIPBOARD:
-            self._apply_inbound_clipboard(message.get("data", {}))
-            return
-        if message_type == protocol.MSG_SWITCH:
-            self._handle_switch(message.get("data", {}))
-            return
-        if message_type == protocol.MSG_ARRANGEMENT:
-            self._handle_arrangement(message.get("data", {}))
-            return
-        if message_type == protocol.MSG_SETTINGS:
-            data = message.get("data")
-            if isinstance(data, dict) and self.on_settings is not None:
-                try:
-                    self.on_settings(data)
-                except Exception:
-                    self.logger.exception("settings handler failed")
-            return
-        self.logger.debug("ignoring inbound message of type %r", message_type)
-
-    def _handle_arrangement(self, data):
-        """Windows changed which edge of this Mac leads to it. Handed to the
-        app, which owns the settings file; nothing is applied here."""
-        read = protocol.read_arrangement(data)
-        if read is None or self.on_arrangement is None:
-            return
-        try:
-            self.on_arrangement(*read)
-        except Exception:
-            self.logger.exception("arrangement handler failed")
-
-    def send_arrangement(self, mac_edge, set_at):
-        """Tell Windows where the machines are, when the change was made here.
-        Sent straight out rather than queued: it is not input, and it must go
-        whether or not input is currently redirected."""
-        return self._send_raw(protocol.arrangement_msg(mac_edge, int(set_at)))
-
-    def send_settings(self, data):
-        """Tell Windows this Mac's settings state, straight out like the arrangement."""
-        return self._send_raw(protocol.settings_msg(data))
-
-    def _apply_inbound_clipboard(self, data):
-        if not isinstance(data, dict):
-            return
-        text = data.get("text")
-        if not isinstance(text, str) or not text:
-            text = None
-        elif len(text.encode("utf-8")) > protocol.CLIPBOARD_MAX_BYTES:
-            self.logger.warning("ignoring oversized inbound clipboard text")
-            text = None
-        image = protocol.clipboard_image(data)
-        if text is None and image is None:
-            return
-        if not self.clipboard.set_contents(text, image):
+        if not self.clipboard.set_contents(read["text"], read["image"]):
             self.logger.warning("failed to set the local clipboard from an inbound message")
+        self._clipboard_stamp = self._clipboard_stamp_now()
 
-    def _record_ack(self, message):
-        if message.get("type") != protocol.MSG_ACK:
-            raise protocol.ProtocolError(f"unexpected inbound message type: {message.get('type')!r}")
-        data = message.get("data")
-        if not isinstance(data, dict):
-            raise protocol.ProtocolError("ACK data must be a JSON object")
-        seq = data.get("seq")
-        if isinstance(seq, bool) or not isinstance(seq, int) or seq < 0:
-            raise protocol.ProtocolError("ACK seq must be a non-negative integer")
-        with self.sequence_lock:
-            if seq < self.last_ack_seq:
-                raise protocol.ProtocolError("ACK seq moved backwards")
-            if seq > self.last_sent_seq:
-                raise protocol.ProtocolError("ACK seq is ahead of the sender")
-            advanced = seq > self.last_ack_seq
-            self.last_ack_seq = seq
-            self.last_ack_at = self.clock()
-            if advanced:
-                self._measure_round_trip(seq, self.last_ack_at)
-        self._note_windows_lock(data.get("locked") is True)
+    # The outbound worker
 
-    def _measure_round_trip(self, seq, now):
-        """Under sequence_lock. Measured from the send of the event the ACK names, not the
-        oldest one it covers: the receiver acknowledges the highest seq it has processed on a
-        timer, so the oldest would only ever measure that timer. An ACK that repeats a seq --
-        every idle heartbeat does -- finds nothing left to measure and adds no sample."""
-        sent_at = None
-        while self._unacked_sent_at and self._unacked_sent_at[0][0] <= seq:
-            sent_seq, at = self._unacked_sent_at.popleft()
-            if sent_seq == seq:
-                sent_at = at
-        if sent_at is not None:
-            self._round_trips.append(now - sent_at)
-            self._round_trip_at = now
+    def _outbound_worker(self):
+        while not self.stop_event.is_set():
+            message = None
+            try:
+                try:
+                    message = self.outbound.get(timeout=0.05)
+                except queue.Empty:
+                    self._owner_tick()
+                    continue
+                try:
+                    self._process_outbound(message)
+                finally:
+                    self.outbound.task_done()
+                self._owner_tick()
+            except Exception:
+                # One bad message or tick must not end the only thread that drains this queue:
+                # nothing restarts it, and the tap would keep swallowing input into a queue nobody reads.
+                self._force_local(f"outbound message {message.get('type')!r} failed" if message else "the owner's timer failed")
+                self.logger.exception("outbound worker recovered")
 
-    def _forget_round_trips(self):
-        with self.sequence_lock:
-            self._unacked_sent_at.clear()
-            self._round_trips.clear()
-            self._round_trip_at = 0.0
+    def _owner_tick(self):
+        deadline = self.owner.deadline()
+        if deadline is not None and self.clock() >= deadline:
+            self._step(lambda owner: owner.tick())
 
-    def _note_windows_lock(self, locked):
-        """Surface Windows clearing its lock screen, on the transitions only:
-        an ACK arrives every 400ms and must not restate the status each time.
-        The previous status is restored verbatim rather than rebuilt, so the
-        macOS 27 SSH-fallback wording survives an unlock."""
-        if locked == self.windows_locked:
+    def _process_outbound(self, message):
+        """Handle one dequeued item: the clipboard sentinel, or input the tap captured, which the
+        owner routes (to the machine it is on, held for a hand-over, or dropped when it has
+        already come home)."""
+        kind = message.get("type")
+        if kind == _LOCAL_CLIPBOARD_SENTINEL_TYPE:
+            self._send_clipboard(message["peer"])
             return
-        self.windows_locked = locked
-        if locked:
-            self._status_before_unlock = self.connection_status
-            self.connection_status = "Unlocking Windows…"
-            self.logger.info("Windows is on the lock screen; it is unlocking itself")
-        else:
-            if self._status_before_unlock is not None:
-                self.connection_status = self._status_before_unlock
-                self._status_before_unlock = None
-
-    def _watchdog_worker(self):
-        while not self.stop_event.wait(0.1):
-            self._watchdog_tick()
-
-    def _watchdog_tick(self):
-        """Runs at all times a socket exists, not just while redirecting, so a
-        half-open connection can't hide behind an idle UI: it is detected and
-        torn down the same way whether or not input is currently redirected.
-        Also drives the idle heartbeat ping so a silent connection is proven
-        alive well before the peer's own read timeout could fire."""
-        with self.socket_lock:
-            sock = self.sock
-        if sock is None:
-            return False
-        now = self.clock()
-        with self.sequence_lock:
-            last_heartbeat = max(self.last_ack_at, self.connected_at)
-        if now - last_heartbeat > ACK_TIMEOUT_SECONDS:
-            self._connection_failed("Windows stopped responding")
-            return True
-        if now - self.last_send_at >= PING_INTERVAL_SECONDS:
-            self._send_raw(protocol.ping_msg())
-        return False
+        if kind in (protocol.MSG_KEYUP, protocol.MSG_MOUSEUP):
+            # Whether or not the input is away: the release of a key pressed there that arrives
+            # after it came home is what lets the owner stop swallowing it.
+            self._step(lambda owner: owner.input(message))
+            return
+        if not self.redirecting:
+            return
+        self._step(lambda owner: owner.input(message) if owner.away else [])
 
     def _force_local(self, reason):
         self._return_local()
         self.logger.error("%s; input forced local", reason)
 
-    def _connection_failed(self, reason, expected_socket=None):
+    def _connection_failed(self, reason):
         was_redirecting = self.redirecting
+        link = self._peers_up.get(self.owner.on) or self._primary_link
         self._return_local()
         self.connection_status = reason
-        self._drop_connection(expected_socket)
+        if link is not None:
+            link.drop(reason)
         self.logger.error("%s; connection dropped and input forced local", reason)
         if was_redirecting:
             self._alert("Beamer", "Input returned to this Mac")
-
-    def _drop_connection(self, expected_socket=None):
-        with self.socket_lock:
-            if expected_socket is not None and self.sock is not expected_socket:
-                return
-            sock = self.sock
-            self.sock = None
-        self._forget_round_trips()
-        if sock is not None:
-            try:
-                sock.shutdown(socket.SHUT_RDWR)
-            except OSError:
-                pass
-            try:
-                sock.close()
-            except OSError:
-                pass
 
     def _drain_outbound(self):
         while True:

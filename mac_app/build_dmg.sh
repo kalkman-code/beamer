@@ -195,15 +195,21 @@ codesign --verify --deep --strict --verbose=2 "$APP"
 codesign -dvv "$APP" 2>&1 | grep -E '^(Identifier|Signature|Authority|Timestamp|CodeDirectory)' || true
 
 # The bundle's own python runs under the same hardened runtime as the app, so code that needs an
-# entitlement fails here rather than at a user's first launch.
-env -i HOME="$HOME" PATH=/usr/bin:/bin PYTHONHOME="$APP/Contents/Resources" \
-    "$APP/Contents/MacOS/python" "$PROJECT_DIR/tools/runtime_probe.py"
-# The same probe as an Intel Mac would run it, where Rosetta is here to run it.
-if /usr/bin/arch -x86_64 /usr/bin/true 2>/dev/null; then
-    env -i HOME="$HOME" PATH=/usr/bin:/bin PYTHONHOME="$APP/Contents/Resources" \
-        /usr/bin/arch -x86_64 "$APP/Contents/MacOS/python" "$PROJECT_DIR/tools/runtime_probe.py"
+# entitlement fails here rather than at a user's first launch. The probe lives with the project's
+# own tools, which the public source does not carry; a build from that source says so and goes on.
+PROBE="$PROJECT_DIR/tools/runtime_probe.py"
+if [ ! -f "$PROBE" ]; then
+    echo "No runtime probe in this source tree: the hardened-runtime probe was not run" >&2
 else
-    echo "Rosetta is not installed here: the x86_64 half of the bundle was not run" >&2
+    env -i HOME="$HOME" PATH=/usr/bin:/bin PYTHONHOME="$APP/Contents/Resources" \
+        "$APP/Contents/MacOS/python" "$PROBE"
+    # The same probe as an Intel Mac would run it, where Rosetta is here to run it.
+    if /usr/bin/arch -x86_64 /usr/bin/true 2>/dev/null; then
+        env -i HOME="$HOME" PATH=/usr/bin:/bin PYTHONHOME="$APP/Contents/Resources" \
+            /usr/bin/arch -x86_64 "$APP/Contents/MacOS/python" "$PROBE"
+    else
+        echo "Rosetta is not installed here: the x86_64 half of the bundle was not run" >&2
+    fi
 fi
 
 notarise() {

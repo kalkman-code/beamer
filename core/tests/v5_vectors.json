@@ -1,0 +1,80 @@
+{
+  "protocol_version": 5,
+  "preamble": {
+    "protocol_version": 5,
+    "wire_magic_ascii": "BEAMY",
+    "nonce_prefix_hex": "0102030405060708",
+    "preamble_hex": "4245414d59050102030405060708"
+  },
+  "derive_key": {
+    "token": "vector-derive-key-token-1",
+    "salt_ascii": "beamer-link-v5",
+    "info_label_ascii": "beamer-frames",
+    "sender_prefix_hex": "1112131415161718",
+    "receiver_prefix_hex": "2122232425262728",
+    "key_hex": "375170b83750f70d7137cbbc82c5b59b2f8f4f3491e0fb001078d9bcbe2d13d3"
+  },
+  "frames": {
+    "token": "vector-frame-token-1",
+    "sender_prefix_hex": "1112131415161718",
+    "receiver_prefix_hex": "2122232425262728",
+    "frames": [
+      {
+        "direction": "a_to_b",
+        "counter": 1,
+        "plaintext": {
+          "type": "hello",
+          "data": {
+            "version": 5
+          }
+        },
+        "frame_hex": "0000003d0000000155323653ac7dd02321cbec63dabdced30ad7f3f69b841d98b5c5b71b60f0b8bb78165486e538e5e61119e9e8263907cd3602812928773f3176"
+      },
+      {
+        "direction": "b_to_a",
+        "counter": 1,
+        "plaintext": {
+          "type": "welcome",
+          "data": {
+            "version": 5
+          }
+        },
+        "frame_hex": "0000003f0000000140067e5e49a785b19954f9331b3910855d3a3724fae7b1fc09615f215af4aaf898322743a4e3d660eb73b38dfcec7acbf6e5e740d532b4c678f162"
+      },
+      {
+        "direction": "a_to_b",
+        "counter": 2,
+        "plaintext": {
+          "type": "mousemove",
+          "data": {
+            "dx": 12,
+            "dy": -7
+          }
+        },
+        "frame_hex": "0000004700000002ab3af75a2d76f690a8a67a12952825f4c114f3dde5129fbe078bb8697e7431fb87cf80cc29f81e13e7b9362465aad14ab9da5dd3c323ac00063444c8967b457b60ea0c"
+      },
+      {
+        "direction": "b_to_a",
+        "counter": 2,
+        "plaintext": {
+          "type": "ack",
+          "data": {
+            "seq": 3
+          }
+        },
+        "frame_hex": "0000003700000002735a8dea0c001239acb6102889a0e4019c90e1c741d5bb76330e57e6df357b5a907368dd2557f1d1add9740a71e7eafa47bb82"
+      },
+      {
+        "direction": "a_to_b",
+        "counter": 3,
+        "plaintext": {
+          "type": "keydown",
+          "data": {
+            "key": "a"
+          }
+        },
+        "frame_hex": "0000003d00000003e30b36c07340b022676aed58f84ba531a84b8b02c773e823be02d54825a5a0d59bb8e5a1a72199f447a817908f735f4f4cd1b9c70faeb173fd"
+      }
+    ]
+  }
+}

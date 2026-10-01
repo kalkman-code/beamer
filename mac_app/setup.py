@@ -25,18 +25,27 @@ setup(
         "config",
         "crossing",
         "desktop_mac",
+        "diagram",
         "effects_overlay",
         "gestures",
+        "hardware_mac",
+        "ignored_titles",
         "input_injector_mac",
         "key_codes",
         "keyboard_layout",
         "link_state",
+        "login_item",
+        "machines",
+        "machines_panel",
         "media_keys",
+        "motion",
         "notch_beam",
         "notch_island",
         "pages",
+        "pointer_hide",
         "previews",
         "no_unlock",
+        "qr",
         "settings_store",
         "theme",
         "tokens",
@@ -63,10 +72,13 @@ setup(
             "packages": ["rumps", "cffi", "nacl"],
             # core/effects.py imports its fx_* modules by name at first use, which py2app's import
             # scan cannot see, so they are named here or the bundle ships without a single effect.
-            # The rest of core/ is found by the scan, through the repo root put on sys.path above;
-            # naming the package whole would ship its tests too.
+            # The rest of core/ is named too, through the repo root put on sys.path above, so a module
+            # the scan misses cannot drop out; naming the package whole would ship its tests too.
             "includes": [
                 "objc", "AppKit", "ApplicationServices", "Quartz",
+                "core.effects", "core.ignored", "core.keytable", "core.link", "core.owner", "core.pairing",
+                "core.peerlist", "core.protocol", "core.receiver", "core.return_edge", "core.settings_sync",
+                "core.updates", "core.wol",
                 "core.fx_ink", "core.fx_instrument", "core.fx_membrane", "core.fx_sparks", "core.fx_warp",
             ],
             "iconfile": "../Beamer.icns",

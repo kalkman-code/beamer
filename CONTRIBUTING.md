@@ -12,8 +12,9 @@ They hold your machines' names and local network addresses, so look them over fi
 ## Feature requests
 
 Use the feature request form, or add a reaction to an existing request rather than a "+1"
-comment. There is no roadmap and no promise that anything gets built. Some things are out of scope
-by design: Beamer is one Mac and one Windows PC, so a third machine and Linux are not planned.
+comment. There is no roadmap and no promise that anything gets built. Linux, Intel Macs, two Macs
+or two PCs, and three machines at once are being built for 1.5.0; test builds appear on the
+releases page as pre-releases.
 
 ## Pull requests
 

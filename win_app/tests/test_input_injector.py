@@ -468,3 +468,28 @@ class InjectedMarkTests(unittest.TestCase):
     def test_a_key_input_is_stamped(self):
         item = input_injector._keybd_input(0x41, 0x1E, 0)
         self.assertEqual(item.union.ki.dwExtraInfo, input_injector.INJECTED_MARK)
+
+
+class InjectTextTests(unittest.TestCase):
+    """WIRE.md section 10: a `text` message is typed as characters, never as keys."""
+
+    def test_each_character_is_a_unicode_down_and_up_pair(self):
+        plan = input_injector.plan_text_inputs("aé")
+        down, up = KEYEVENTF_UNICODE, KEYEVENTF_UNICODE | KEYEVENTF_KEYUP
+        self.assertEqual(plan, [(0, ord("a"), down), (0, ord("a"), up), (0, ord("é"), down), (0, ord("é"), up)])
+
+    def test_a_character_outside_the_bmp_goes_as_its_surrogate_pair(self):
+        plan = input_injector.plan_text_inputs("\U0001F600")
+        self.assertEqual([scan for _vk, scan, _flags in plan], [0xD83D, 0xD83D, 0xDE00, 0xDE00])
+
+    def test_injecting_text_sends_one_batch_stamped_with_the_mark(self):
+        sent = []
+        with mock.patch.object(input_injector, "_send_input", lambda *items: sent.extend(items)):
+            input_injector.inject_text("hi")
+        self.assertEqual(len(sent), 4)
+        self.assertTrue(all(item.union.ki.dwExtraInfo == input_injector.INJECTED_MARK for item in sent))
+        self.assertEqual([item.union.ki.wScan for item in sent], [ord("h"), ord("h"), ord("i"), ord("i")])
+
+    def test_empty_text_sends_nothing(self):
+        with mock.patch.object(input_injector, "_send_input", lambda *items: self.fail("nothing to send")):
+            input_injector.inject_text("")

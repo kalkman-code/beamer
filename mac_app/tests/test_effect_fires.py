@@ -5,7 +5,7 @@ EffectsOverlay / EdgeGlow / NotchBeam / NotchIsland.
 
 bridge.py raising each crossing kind ("pressure", "tick", "cross", "arrive", "home") with the
 right Step fields (region, pin, via, mac_edge) is already proven by test_bridge.py's
-CrossingWiringTests and the switch_msg("mac", ...) tests around line 1920 -- not repeated here.
+CrossingWiringTests and core/tests/test_owner.py -- not repeated here.
 This file starts from a Step already shaped the way bridge.py builds one, and checks where it
 lands."""
 
@@ -208,7 +208,7 @@ class HomeArrivalTest(unittest.TestCase):
 
 
 class DrivenReturnEdgeTest(unittest.TestCase):
-    """The PC-driven return edge: receiver.py's pressure_callback and arrival_callback, wired in
+    """The PC-driven return edge: LinkResponder's pressure_callback and arrival_callback, wired in
     kvm_bridge_app.py's TrayApp.__init__ as WindowsInput(pressure_callback=self._driven_pressure,
     arrival_callback=self._driven_arrival), land here after the main-thread hop proved above."""
 
@@ -300,7 +300,7 @@ class EdgeGlowDrawTest(unittest.TestCase):
 
 
 class MenuBarArmTest(unittest.TestCase):
-    """Toby, 28-09-2026: the Mac's Glow corner was lopsided, the top arm a faint stripe inside the
+    """Reported 28-09-2026: the Mac's Glow corner was lopsided, the top arm a faint stripe inside the
     menu bar beside a full side arm. Both arms measured the same 18.5pt on film, half the 37pt bar."""
 
     BOUNDS = (0.0, 0.0, 1728.0, 1117.0)

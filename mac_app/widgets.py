@@ -505,6 +505,20 @@ class _Target(AppKit.NSObject):
         self.callback(sender)
 
 
+def callback_target(callback):
+    """A target for a control whose action should call `callback()`. The control holds its target
+    weakly, so the caller keeps this."""
+    return _Target.alloc().initWithCallback_(lambda _sender: callback())
+
+
+def action_button(title, callback, **options):
+    """A Button that calls `callback()`, for the buttons a window builds as it goes."""
+    target = callback_target(callback)
+    button = Button(title, target, "fire:", **options)
+    button.target = target
+    return button
+
+
 class _CentredCell(AppKit.NSTextFieldCell):
     """Text centred in the cell's height, at rest and while typed into, since the field editor lays
     itself out in drawingRectForBounds too."""

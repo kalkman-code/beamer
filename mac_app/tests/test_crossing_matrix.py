@@ -1,23 +1,28 @@
-"""Every way in on this Mac, on each arrangement and in each state, both directions, against the
-PC's own code over loopback. What each row proves, and which setting governs it, is written up in
-docs/crossing-matrix-28-09-2026.md."""
+"""Every way in on this Mac, on each arrangement and in each state, both directions, against a
+version 6 PC over loopback: the Mac's real controller driving a real LinkResponder (the PC), and
+the Mac's real responder driven by a scripted initiator (the PC's own pointer and take). The v6
+differences are named where a test pins one."""
 
 import itertools
 import os
+import sys
 import types
 import unittest
-import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
+from bridge_fakes import FakeQuartz, crossing_config
+from core import protocol
+from core.tests.responder_harness import HERE
 from crossing import CORNERS, EDGES, OPPOSITE, CrossingEngine
 from settings_store import config_to_raw
-from test_bridge import FakeQuartz, crossing_config
 from two_machines import Duo, wait_for
 
 BOUNDS = (0, 0, 1728, 1117)
 NOTCH = (782.0, 946.0)
 THIRDS = {"start": 0.17, "middle": 0.5, "end": 0.83}
+PC_EDGE_POINT = {"left": (0, 540), "right": (1919, 540), "top": (960, 0), "bottom": (960, 1079)}
+MAC_EDGE_POINT = {"left": (0, 558), "right": (1727, 558), "top": (863, 0), "bottom": (863, 1116)}
 
 
 def side_point(side, third):
@@ -139,38 +144,6 @@ class MacWaysInTests(unittest.TestCase):
                 self.assertAlmostEqual(step.offset, fraction, places=2)
 
 
-class MacWayHomeNamedInTheHelloTests(unittest.TestCase):
-    """`home_edge` is the PC edge facing this Mac: what the hello tells the PC, and what a
-    shortcut switch arms as the PC's way home."""
-
-    def home(self, methods, edge="right", corner="top_right"):
-        return CrossingEngine(methods=methods, edge=edge, corner=corner).home_edge()
-
-    def test_the_arrangement_side_is_the_way_home_for_edge_part_and_shortcut(self):
-        for methods in (("edge",), ("part",), ("shortcut",), ("shortcut", "edge"), ("shortcut", "part"), ("edge", "corner")):
-            for edge in EDGES:
-                with self.subTest(methods=methods, edge=edge):
-                    self.assertEqual(self.home(methods, edge), OPPOSITE[edge])
-
-    def test_the_notch_alone_names_the_pcs_bottom_edge_whatever_the_arrangement_says(self):
-        for edge in EDGES:
-            self.assertEqual(self.home(("notch",), edge), "bottom")
-            self.assertEqual(self.home(("notch", "shortcut"), edge), "bottom")
-
-    def test_a_corner_alone_names_the_side_of_the_corner_whatever_the_arrangement_says(self):
-        for edge in EDGES:
-            for corner in CORNERS:
-                self.assertEqual(self.home(("corner",), edge, corner), OPPOSITE[corner.split("_")[1]])
-
-    def test_with_the_edge_on_too_the_arrangement_wins_and_the_notch_and_corner_arrive_elsewhere(self):
-        # Pinned known gap (G6 in the report): the way home differs by how the pointer left.
-        engine = CrossingEngine(methods=("edge", "notch", "corner"), edge="right", corner="top_left", resistance_px=40)
-        self.assertEqual(engine.home_edge(), "left")
-        by_notch = push_on_engine(engine, 850.0, 0.0, 0, -30)
-        by_corner = push_on_engine(engine, 0.0, 0.0, -30, -30)
-        self.assertEqual((by_notch.edge, by_corner.edge), ("bottom", "right"))
-
-
 class ArrangementFromEitherSideTests(unittest.TestCase):
     """The arrangement is one value both machines hold: which Mac edge leads to the PC. One that
     arrives from the PC is applied by ControlWindow.apply_arrangement, the side that owns the
@@ -226,28 +199,67 @@ class ArrangementFromEitherSideTests(unittest.TestCase):
 
 
 class ArrangementOverTheLinksTests(unittest.TestCase):
-    def test_a_change_reaches_the_other_machine_over_either_link(self):
-        duo = Duo().listen()
+    """One change reaches the other machine over whichever link is up, never over both: the link a
+    machine opened carries what it says, and the one the other opened carries it only while it has
+    none of its own open."""
+
+    def duo(self, **options):
+        duo = Duo(**options).listen()
         self.addCleanup(duo.close)
+        return duo
+
+    @staticmethod
+    def heard(duo, set_at):
+        return [(peer, read) for peer, read in duo.pc_responder.arrangements if read["set_at"] == set_at]
+
+    def test_a_change_made_here_goes_over_this_macs_own_link(self):
+        duo = self.duo()
+        duo.link_mac_to_pc()
+        self.assertTrue(duo.mac.send_arrangement("left", 500))
+        self.assertTrue(wait_for(lambda: self.heard(duo, 500)), "the PC never heard the arrangement")
+        peer, read = self.heard(duo, 500)[0]
+        self.assertEqual((peer, read["edge"], read["by"]), (duo.mac_id, "left", duo.mac_id))
+
+    def test_with_no_link_of_its_own_open_it_goes_over_the_link_the_pc_opened(self):
+        duo = self.duo()
+        duo.link_pc_to_mac()
+        self.assertTrue(duo.mac_input.send_arrangement("left", 500))
+        message = duo.pc.expect(protocol.MSG_ARRANGEMENT, where=lambda data: data["set_at"] == 500)
+        self.assertEqual((message["edge"], message["by"]), ("left", duo.mac_text))
+
+    def test_with_both_links_open_it_goes_over_this_macs_own_only(self):
+        duo = self.duo()
         duo.link_mac_to_pc()
         duo.link_pc_to_mac()
-        # From the Mac: over its own link, and over the link the PC opened to it.
+        self.assertFalse(duo.mac_input.send_arrangement("left", 500))
         self.assertTrue(duo.mac.send_arrangement("left", 500))
-        self.assertTrue(duo.mac_server.send_arrangement("left", 500))
-        self.assertTrue(wait_for(lambda: len(duo.pc_arrangements) == 2), duo.pc_arrangements)
-        self.assertEqual(set(duo.pc_arrangements), {("left", 500)})
-        # From the PC, the same two ways.
-        self.assertTrue(duo.pc.send_arrangement("top", 600))
-        self.assertTrue(duo.pc_server.send_arrangement("top", 600))
-        self.assertTrue(wait_for(lambda: len(duo.mac_arrangements) == 2), duo.mac_arrangements)
-        self.assertEqual(set(duo.mac_arrangements), {("top", 600)})
+        self.assertTrue(wait_for(lambda: self.heard(duo, 500)))
+        self.assertIsNone(duo.pc.expect(protocol.MSG_ARRANGEMENT, 0.3))
 
-    def test_the_hello_carries_the_way_home_and_the_resistance_and_no_stamp(self):
-        duo = Duo(crossing={"methods": ["notch", "shortcut"], "edge": "top", "resistance_px": 96}).listen()
-        self.addCleanup(duo.close)
+    def test_a_change_made_on_the_pc_reaches_the_app_as_this_macs_edge_over_either_link(self):
+        duo = self.duo()
         duo.link_mac_to_pc()
-        self.assertTrue(wait_for(lambda: duo.pc_peer))
-        self.assertEqual(duo.pc_peer[0][1:], ("bottom", 96))
+        duo.link_pc_to_mac()
+        # Over the link the PC opened, and over the one this Mac opened to it.
+        duo.pc.send(protocol.arrangement_v6("right", 600, HERE))
+        self.assertTrue(duo.pc_responder.responder.send(duo.mac_id, protocol.arrangement_v6("right", 700, HERE)))
+        self.assertTrue(wait_for(lambda: len(duo.mac_arrangements) == 2), duo.mac_arrangements)
+        self.assertEqual(sorted(duo.mac_arrangements), [("left", 600, protocol.id_text(HERE)), ("left", 700, protocol.id_text(HERE))])
+
+    def test_a_link_coming_up_announces_the_saved_side_with_its_stamp_and_who_made_it(self):
+        duo = self.duo(side="top", side_stamp=300, side_by=protocol.id_text(HERE))
+        duo.link_mac_to_pc()
+        self.assertTrue(wait_for(lambda: duo.pc_responder.arrangements))
+        peer, read = duo.pc_responder.arrangements[0]
+        self.assertEqual((read["edge"], read["set_at"], read["by"]), ("top", 300, HERE))
+
+    def test_a_side_never_learnt_is_announced_as_nothing(self):
+        duo = self.duo(side="")
+        duo.link_mac_to_pc()
+        # What a link announces goes before anything sent after it, so this one is the fence.
+        self.assertTrue(duo.mac.send_arrangement("left", 9))
+        self.assertTrue(wait_for(lambda: self.heard(duo, 9)))
+        self.assertEqual([read["set_at"] for _, read in duo.pc_responder.arrangements], [9])
 
 
 class WhatIsSharedTests(unittest.TestCase):
@@ -265,205 +277,257 @@ def pc_at_edge(duo, edge):
 
 
 class MacToPcTests(unittest.TestCase):
-    """This Mac's own pointer out to the PC, and home again through the PC's edge while it drives."""
+    """This Mac's own pointer out to the PC, and home again through the PC's zone while it drives.
+    The PC's way home is the zones it keeps for this Mac (WIRE.md section 8), not anything this
+    Mac chose."""
 
-    def duo(self, **crossing):
-        crossing.setdefault("resistance_px", 40)
-        duo = Duo(crossing=crossing).listen()
+    def duo(self, crossing=None, **options):
+        duo = Duo(crossing={"resistance_px": 40, **(crossing or {})}, **options).listen()
         self.addCleanup(duo.close)
         return duo
 
-    def cross(self, duo, edge):
-        x, y = side_point(edge, "middle")
-        self.assertTrue(duo.mac_push(x, y, *outward(edge)), "the push never crossed")
-        self.assertTrue(wait_for(lambda: duo.pc_server.return_edge is not None), "the PC was never armed")
+    def arrival(self, duo):
+        """The step the pointer's arrival home was shown with."""
+        self.assertTrue(wait_for(lambda: duo.feedback and duo.feedback[-1][0] == "arrive"), "no arrival was shown")
+        return duo.feedback[-1][1]
 
-    def test_each_arrangement_crosses_to_the_opposite_edge_and_arms_that_edge_as_the_way_home(self):
+    def cross(self, duo, edge, times=12):
+        x, y = side_point(edge, "middle")
+        self.assertTrue(duo.mac_push(x, y, *outward(edge), times=times), "the push never crossed")
+        self.assertTrue(wait_for(lambda: duo.pc_responder.responder.owner == duo.mac_id), "the PC was never taken")
+        self.assertTrue(wait_for(lambda: duo.pc_responder.arrivals), "the pointer never landed on the PC")
+
+    def test_each_arrangement_crosses_to_the_opposite_edge_and_that_edge_leads_home(self):
         for edge in EDGES:
             with self.subTest(pc_is=edge):
-                duo = self.duo(edge=edge)
+                duo = self.duo(crossing={"edge": edge})
                 duo.link_mac_to_pc()
                 self.cross(duo, edge)
                 self.assertTrue(pc_at_edge(duo, OPPOSITE[edge]))
-                self.assertEqual(duo.pc_server.return_edge, OPPOSITE[edge])
+                self.assertEqual(duo.pc_responder.arrivals[-1][0], OPPOSITE[edge])
+                self.assertTrue(duo.mac_lean(*outward(OPPOSITE[edge])), "the PC's edge facing this Mac never led home")
+                self.assertEqual(self.arrival(duo).mac_edge, edge)
                 duo.close()
 
-    def test_the_way_home_uses_the_resistance_this_mac_sends_with_the_switch(self):
-        # 77 is neither the default nor the PC's own 400: the PC's setting is never consulted.
-        duo = Duo(crossing={"resistance_px": 77}, pc={"crossing_resistance_px": 400}).listen()
-        self.addCleanup(duo.close)
+    def test_the_way_home_uses_the_resistance_this_mac_sends_with_the_take(self):
+        # 50 and 400 sit either side of the 120 the PC assumes when none is sent, so neither
+        # passing nor failing to pass could be the default.
+        duo = self.duo(crossing={"resistance_px": 50})
         duo.link_mac_to_pc()
         self.cross(duo, "right")
-        self.assertEqual(duo.pc_server.return_resistance, 77)
+        self.assertTrue(duo.mac_lean(-30, times=4), "50 px of resistance did not give within four pushes")
+        duo = self.duo(crossing={"resistance_px": 400})
+        duo.link_mac_to_pc()
+        self.cross(duo, "right", times=60)
+        self.assertFalse(duo.mac_lean(-30, times=6), "400 px of resistance gave to 180 px of push")
+        self.assertTrue(duo.mac.redirecting)
 
-    def test_home_through_any_part_of_the_pcs_edge_whatever_the_pcs_own_ways_are(self):
-        pc = {"crossing_methods": ["corner"], "crossing_corner": "bottom_right", "mac_return_edge": "top"}
+    def test_home_through_any_third_of_an_edge_zone(self):
         for third in THIRDS:
             with self.subTest(third=third):
-                duo = Duo(crossing={"resistance_px": 40}, pc=pc).listen()
-                self.addCleanup(duo.close)
+                duo = self.duo()
                 duo.link_mac_to_pc()
                 self.cross(duo, "right")
-                x, y = 0, int(THIRDS[third] * 1079)
-                duo.pc_desktop.cursor = (x, y)
-                for _ in range(6):
-                    duo.mac_move(1727.0, 558.0, -30)
-                    if not duo.mac.redirecting:
-                        break
-                    wait_for(lambda: False, 0.02)
-                self.assertTrue(wait_for(lambda: not duo.mac.redirecting), "the push through the PC's left edge never came home")
+                duo.pc_desktop.cursor = (0, int(THIRDS[third] * 1079))
+                self.assertTrue(duo.mac_lean(-30), "the push through the PC's left edge never came home")
                 duo.close()
 
-    def test_a_push_along_the_way_home_is_the_pcs_edge_facing_this_mac_even_with_only_the_shortcut_on(self):
-        duo = self.duo(methods=["shortcut"], edge="top")
+    def test_a_part_zone_leads_home_only_through_its_thirds(self):
+        duo = self.duo(pc_zones=[{"peer": "mac", "kind": "part", "parts": ["middle"]}])
         duo.link_mac_to_pc()
-        duo.mac.set_redirecting(True)
-        self.assertTrue(wait_for(lambda: duo.pc_server.return_edge == "bottom"))
+        self.cross(duo, "right")
+        duo.pc_desktop.cursor = (0, int(THIRDS["start"] * 1079))
+        self.assertFalse(duo.mac_lean(-30, times=4), "the start third is outside the zone and still led home")
+        duo.pc_desktop.cursor = (0, int(THIRDS["middle"] * 1079))
+        self.assertTrue(duo.mac_lean(-30), "the middle third did not lead home")
+
+    def test_a_corner_zone_leads_home_through_its_corner_and_only_by_a_diagonal_push(self):
+        duo = self.duo(pc_zones=[{"peer": "mac", "kind": "corner", "corner": "top_left", "edge": "left"}])
+        duo.link_mac_to_pc()
+        self.cross(duo, "right")
+        duo.pc_desktop.cursor = (0, 0)
+        self.assertFalse(duo.mac_lean(-30, 0, times=4), "a straight push into the corner led home")
+        self.assertTrue(duo.mac_lean(-30, -30), "the diagonal push into the corner did not lead home")
+
+    def test_a_shortcut_take_names_no_position_and_the_pcs_zone_still_leads_home(self):
+        # Whatever the Mac's own ways are: its engine arms nothing here, the PC's zone does.
+        duo = self.duo(crossing={"methods": ["shortcut"], "edge": "top"})
+        duo.link_mac_to_pc()
+        self.assertTrue(duo.mac.set_redirecting(True))
+        self.assertTrue(wait_for(lambda: duo.pc_responder.responder.owner == duo.mac_id))
+        self.assertTrue(wait_for(lambda: duo.pc_responder.arrivals))
+        self.assertEqual(duo.pc_responder.arrivals[-1][0], None)
+        duo.pc_desktop.cursor = (960, 1079)
+        self.assertTrue(duo.mac_lean(0, 30), "the PC's bottom edge, facing this Mac, never led home")
+        self.assertEqual(self.arrival(duo).mac_edge, "top")
+
+    def test_a_notch_crossing_lands_on_the_pcs_bottom_edge_and_the_way_home_is_still_the_zone(self):
+        # Replaces the 1.4.x gap G6: the way home no longer depends on how the pointer left. It is
+        # the PC's zone for this Mac, so the edge the pointer arrived by is only where it landed.
+        duo = self.duo(crossing={"methods": ["edge", "notch"], "edge": "right"}, notch=NOTCH)
+        duo.link_mac_to_pc()
+        self.assertTrue(duo.mac_push(850.0, 0.0, 0, -30), "the push into the notch never crossed")
+        self.assertTrue(wait_for(lambda: duo.pc_responder.arrivals))
+        self.assertEqual(duo.pc_responder.arrivals[-1][0], "bottom")
+        duo.pc_desktop.cursor = (960, 1079)
+        self.assertFalse(duo.mac_lean(0, 30, times=6), "the edge it landed by led home")
+        duo.pc_desktop.cursor = (0, 540)
+        self.assertTrue(duo.mac_lean(-30), "the zone's edge did not lead home")
 
     def test_nothing_crosses_while_the_link_is_down_and_nothing_is_swallowed(self):
-        duo = self.duo(edge="right")
+        duo = self.duo(crossing={"edge": "right"})
         for _ in range(12):
             event = {"location": (1727.0, 558.0), FakeQuartz.kCGMouseEventDeltaX: 30, FakeQuartz.kCGMouseEventDeltaY: 0}
             self.assertIs(duo.mac._event_tap_callback(None, FakeQuartz.kCGEventMouseMoved, event, None), event)
         self.assertFalse(duo.mac.redirecting)
         self.assertEqual(FakeQuartz.warp_calls, [])
 
-    def test_this_macs_direction_switch_off_stops_every_way_out_but_not_the_way_back_by_shortcut(self):
-        duo = self.duo(edge="right")
+    def test_this_macs_direction_switch_off_stops_every_way_out(self):
+        duo = self.duo(crossing={"edge": "right"})
         duo.link_mac_to_pc()
         duo.mac.cfg.send_to_windows = False
         x, y = side_point("right", "middle")
         self.assertFalse(duo.mac_push(x, y, 30))
         self.assertFalse(duo.mac.set_redirecting(True))
+        self.assertIsNone(duo.pc_responder.responder.owner)
+
+    def test_a_pc_that_does_not_allow_this_mac_to_drive_it_is_never_taken(self):
+        duo = self.duo(crossing={"edge": "right"})
+        duo.pc_responder.settings.peer(duo.mac_text)["allow_drive"] = False
+        duo.link_mac_to_pc()
+        self.assertTrue(wait_for(lambda: duo.mac._accepts.get(protocol.id_text(HERE)) is False))
+        x, y = side_point("right", "middle")
+        self.assertFalse(duo.mac_push(x, y, 30))
+        self.assertIsNone(duo.pc_responder.responder.owner)
+        self.assertIn("does not accept input from this Mac", duo.alerts[-1])
 
     def test_paused_and_full_screen_hold_the_mac_pointer_but_not_the_pc_pointer_coming_home(self):
         for held in ("crossing_paused", "full_screen_app"):
             with self.subTest(held=held):
-                duo = self.duo(edge="right")
+                duo = self.duo(crossing={"edge": "right"})
                 duo.link_mac_to_pc()
                 self.cross(duo, "right")
                 setattr(duo.mac, held, True if held == "crossing_paused" else "Steam")
                 duo.pc_desktop.cursor = (0, 540)
-                for _ in range(6):
-                    duo.mac_move(1727.0, 558.0, -30)
-                    wait_for(lambda: False, 0.02)
-                    if not duo.mac.redirecting:
-                        break
-                self.assertTrue(wait_for(lambda: not duo.mac.redirecting), "the PC's edge stopped leading home while held")
+                self.assertTrue(duo.mac_lean(-30), "the PC's edge stopped leading home while held")
                 duo.close()
 
 
-def mac_at_edge(duo, edge):
-    x, y = duo.mac_desktop.cursor
-    return {"left": x == 0, "right": x == 1727, "top": y == 0, "bottom": y == 1116}[edge]
+class MacDrivenTests(unittest.TestCase):
+    """The PC's pointer and take arriving on this Mac, which a scripted initiator stands in for,
+    and home again through this Mac's zone for the PC. The PC's own zones, its resistance and its
+    settings are the PC's; what is proved here is what this Mac's responder does with them."""
 
-
-def pc_settings(edge, **more):
-    return dict(mac_return_edge=edge, crossing_methods=["edge"], **more)
-
-
-class PcToMacTests(unittest.TestCase):
-    """The PC's own mouse out to this Mac, and home again through this Mac's edge while the PC
-    drives."""
-
-    def duo(self, pc=None, **crossing):
-        crossing.setdefault("resistance_px", 40)
-        duo = Duo(crossing=crossing, pc=pc).listen()
+    def duo(self, crossing=None, **options):
+        duo = Duo(crossing={"resistance_px": 40, **(crossing or {})}, **options).listen()
         self.addCleanup(duo.close)
         return duo
 
-    def cross(self, duo, pc_edge):
-        x, y = {"left": (0, 540), "right": (1919, 540), "top": (960, 0), "bottom": (960, 1079)}[pc_edge]
-        self.assertTrue(duo.pc_push(x, y, *outward(pc_edge)), "the PC's push never crossed")
-        self.assertTrue(wait_for(lambda: duo.mac_server.return_edge is not None), "the Mac was never armed")
+    def drive(self, duo, side):
+        duo.link_pc_to_mac()
+        duo.pc_drives(side, 0.5)
+        self.assertTrue(wait_for(lambda: duo.mac_arrivals), "the pointer never landed on the Mac")
 
-    def test_each_arrangement_crosses_to_the_opposite_mac_edge_and_arms_it_as_the_way_home(self):
-        for edge in EDGES:
-            with self.subTest(mac_is=edge):
-                duo = self.duo(pc=pc_settings(edge, crossing_resistance_px=40))
-                duo.link_pc_to_mac()
-                self.cross(duo, edge)
-                self.assertTrue(wait_for(lambda: mac_at_edge(duo, OPPOSITE[edge])))
-                self.assertEqual(duo.mac_server.return_edge, OPPOSITE[edge])
+    def at_edge(self, duo, edge):
+        x, y = duo.mac_desktop.cursor
+        return {"left": x == 0, "right": x == 1727, "top": y == 0, "bottom": y == 1116}[edge]
+
+    def test_each_arrangement_lands_on_the_edge_facing_the_pc_and_that_edge_leads_home(self):
+        for side in EDGES:
+            with self.subTest(pc_is=side):
+                duo = self.duo(crossing={"edge": side})
+                self.drive(duo, side)
+                self.assertTrue(self.at_edge(duo, side))
+                self.assertEqual(duo.mac_responder.owner, HERE)
+                duo.pc_leans(MAC_EDGE_POINT[side], *outward(side), times=3)
+                switch = duo.pc_switch()
+                self.assertEqual((switch["next"], switch["edge"]), (protocol.id_text(HERE), OPPOSITE[side]))
+                duo.pc.let_go()
+                self.assertTrue(wait_for(lambda: not duo.mac.receiving))
                 duo.close()
 
-    def test_the_way_home_uses_the_resistance_the_pc_sends_with_the_switch(self):
-        duo = self.duo(pc=pc_settings("right", crossing_resistance_px=77, mac_resistance_px=5), resistance_px=400)
+    def test_the_way_home_uses_the_resistance_the_pc_sends_with_the_take(self):
+        # 50 against this Mac's own 400, and the 120 assumed when none is sent.
+        duo = self.duo(crossing={"resistance_px": 400})
         duo.link_pc_to_mac()
-        self.cross(duo, "right")
-        self.assertEqual(duo.mac_server.return_resistance, 77)
+        duo.pc_drives("right", 0.5, resistance_px=50)
+        duo.pc_leans(MAC_EDGE_POINT["right"], 30)
+        self.assertIsNone(duo.pc_switch(0.05), "30 px gave against 50 px of resistance")
+        duo.pc_leans(MAC_EDGE_POINT["right"], 30, times=2)
+        self.assertIsNotNone(duo.pc_switch(), "90 px did not give against 50 px of resistance")
 
-    def test_home_through_this_macs_arrival_edge_whatever_this_macs_own_ways_and_arrangement_are(self):
+    def test_home_through_this_macs_zone_whatever_this_macs_own_ways_and_arrangement_are(self):
         for methods in (["notch"], ["corner"], ["part"], ["shortcut"]):
             with self.subTest(macs_ways=methods):
-                duo = self.duo(pc=pc_settings("right", crossing_resistance_px=40), methods=methods, edge="top")
-                duo.link_pc_to_mac()
-                self.cross(duo, "right")
-                duo.mac_desktop.cursor = (0.0, 558.0)
-                for _ in range(6):
-                    duo.pc.on_motion(-30, 0)
-                    wait_for(lambda: False, 0.02)
-                    if not duo.pc.redirecting:
-                        break
-                self.assertTrue(wait_for(lambda: not duo.pc.redirecting), "the Mac's left edge never led home")
+                duo = self.duo(crossing={"methods": methods, "edge": "top"}, side="left")
+                self.drive(duo, "left")
+                duo.pc_leans(MAC_EDGE_POINT["left"], -30, times=3)
+                self.assertIsNotNone(duo.pc_switch(), "this Mac's left edge never led home")
                 duo.close()
 
-    def test_a_pc_that_has_learned_no_edge_has_no_way_out_however_it_is_pushed(self):
-        duo = self.duo(pc=pc_settings("", crossing_resistance_px=40))
+    def test_a_mac_that_has_learned_no_side_for_the_pc_has_no_way_home_however_it_is_pushed(self):
+        duo = self.duo(side="")
         duo.link_pc_to_mac()
+        duo.pc_drives("left", 0.5)
         for edge in EDGES:
-            x, y = {"left": (0, 540), "right": (1919, 540), "top": (960, 0), "bottom": (960, 1079)}[edge]
-            self.assertFalse(duo.pc_push(x, y, *outward(edge)), edge)
-        self.assertFalse(duo.pc.redirecting)
+            duo.pc_leans(MAC_EDGE_POINT[edge], *outward(edge), times=3)
+            self.assertIsNone(duo.pc_switch(0.2), edge)
+        self.assertTrue(duo.mac.receiving)
 
-    def test_no_link_no_crossing_and_the_pc_says_nothing(self):
-        duo = self.duo(pc=pc_settings("right"))
-        self.assertFalse(duo.pc_push(1919, 540, 30))
-        self.assertFalse(duo.pc.redirecting)
-        self.assertEqual(duo.pc.status, "Not connected to the Mac")
+    def test_a_pc_this_mac_does_not_allow_to_drive_it_is_refused(self):
+        duo = self.duo(allow_drive=False)
+        duo.link_pc_to_mac()
+        route = duo.pc_takes("left", 0.5)
+        self.assertEqual(duo.pc.answer(route), (protocol.MSG_REFUSE, {"route": route, "why": "not_allowed"}))
+        self.assertFalse(duo.mac.receiving)
 
-    def test_a_mac_that_is_not_listening_leaves_the_pc_with_no_link(self):
-        duo = Duo(pc=pc_settings("right"))
-        self.addCleanup(duo.close)
-        duo.pc.start(duo.pc_config)
-        self.assertFalse(wait_for(lambda: duo.pc.connected, 0.5))
-        self.assertFalse(duo.pc_push(1919, 540, 30))
-
-    def test_the_pcs_pause_and_full_screen_hold_its_own_edges(self):
+    def test_the_macs_pause_and_full_screen_hold_its_edges_against_the_pcs_pointer(self):
+        # 1.5.0 differs from 1.4.x here: the Mac's responder takes the hold, so the PC's pointer
+        # no longer passes a held edge. Lifted, the same push leads home.
         for held in ("crossing_paused", "full_screen_app"):
             with self.subTest(held=held):
-                duo = self.duo(pc=pc_settings("right"))
-                duo.link_pc_to_mac()
-                setattr(duo.pc, held, True if held == "crossing_paused" else "Steam")
-                self.assertFalse(duo.pc_push(1919, 540, 30))
+                duo = self.duo(crossing={"edge": "right"})
+                self.drive(duo, "right")
+                setattr(duo.mac, held, True if held == "crossing_paused" else "Steam")
+                duo.pc_leans(MAC_EDGE_POINT["right"], 30, times=4)
+                self.assertIsNone(duo.pc_switch(0.2), "a held edge led home")
+                setattr(duo.mac, held, False if held == "crossing_paused" else None)
+                duo.pc_leans(MAC_EDGE_POINT["right"], 30, times=3)
+                self.assertIsNotNone(duo.pc_switch(), "the edge did not lead home once released")
                 duo.close()
 
     def test_this_macs_own_pointer_can_take_input_back_only_with_its_own_link_to_the_pc_up(self):
         # Pinned known gap (G7 in the report): the push back needs the Mac's own link.
-        duo = self.duo(pc=pc_settings("right", crossing_resistance_px=40), edge="right")
-        duo.link_pc_to_mac()
-        self.cross(duo, "right")
-        self.assertTrue(wait_for(lambda: duo.mac.receiving))
+        duo = self.duo(crossing={"edge": "right"})
+        self.drive(duo, "right")
         self.assertFalse(duo.mac_push(1727.0, 558.0, 30, times=6), "crossed with no link of its own")
         self.assertTrue(duo.mac.receiving)
+        self.assertIsNone(duo.pc_switch(0.2))
         duo.link_mac_to_pc()
-        self.assertTrue(duo.mac_push(1727.0, 558.0, 30), "the Mac's pointer could not take input back")
-        self.assertTrue(wait_for(lambda: not duo.pc.redirecting))
+        duo.mac_push(1727.0, 558.0, 30)
+        switch = duo.pc_switch()
+        self.assertEqual(switch, {"route": switch["route"], "next": protocol.id_text(HERE)}, "the PC was sent home with a position")
+        duo.pc.let_go()
+        self.assertTrue(wait_for(lambda: duo.mac.redirecting), "the Mac's pointer could not follow the PC home")
+        self.assertTrue(wait_for(lambda: duo.pc_responder.responder.owner == duo.mac_id))
+        self.assertFalse(duo.mac.receiving)
 
-    def test_a_shortcut_while_the_other_machine_drives_only_sends_its_input_home(self):
-        duo = self.duo(pc=pc_settings("right"))
-        duo.link_pc_to_mac()
+    def test_a_shortcut_while_the_other_machine_drives_sends_its_input_home_and_then_drives(self):
+        duo = self.duo(crossing={"edge": "right"})
         duo.link_mac_to_pc()
-        self.assertTrue(duo.pc.set_redirecting(True))
-        self.assertTrue(wait_for(lambda: duo.mac.receiving))
+        duo.link_pc_to_mac()
+        duo.pc_drives()
         self.assertTrue(duo.mac.set_redirecting(True))
-        self.assertTrue(wait_for(lambda: not duo.pc.redirecting))
-        self.assertFalse(duo.mac.redirecting, "the shortcut also crossed this Mac's input, which only a push does")
-        self.assertTrue(duo.mac.set_redirecting(True))
-        self.assertTrue(wait_for(lambda: duo.pc_server.return_edge is not None))
-        self.assertTrue(duo.pc.set_redirecting(True))
-        self.assertTrue(wait_for(lambda: not duo.mac.redirecting))
-        self.assertFalse(duo.pc.redirecting)
+        switch = duo.pc_switch()
+        self.assertEqual(switch["next"], protocol.id_text(HERE))
+        self.assertFalse(duo.mac.redirecting, "this Mac drove before the PC had let go")
+        duo.pc.let_go()
+        self.assertTrue(wait_for(lambda: duo.mac.redirecting), "this Mac never took over once the PC let go")
+        self.assertTrue(wait_for(lambda: duo.pc_responder.responder.owner == duo.mac_id))
+        # And while it drives, the PC cannot take it: one machine never drives and is driven at once.
+        route = duo.pc_takes()
+        self.assertEqual(duo.pc.answer(route), (protocol.MSG_REFUSE, {"route": route, "why": "busy"}))
+        self.assertTrue(duo.mac.redirecting)
 
 
 if __name__ == "__main__":

@@ -71,7 +71,10 @@ if ($IsElevated) {
         # The pairing beacon answers the Mac on UDP 24821; without this the Mac never sees the PC.
         Get-NetFirewallRule -DisplayName 'Beamer Pairing (UDP-In)' -ErrorAction SilentlyContinue | Remove-NetFirewallRule
         New-NetFirewallRule -DisplayName 'Beamer Pairing (UDP-In)' -Direction Inbound -Protocol UDP -LocalPort 24821 -Action Allow -Profile Private -Program $ExeDestination | Out-Null
-        Write-Host 'Private-network firewall rules installed (TCP 24820 receiver, UDP 24821 pairing).' -ForegroundColor Green
+        # The pairing exchange itself runs over TCP on the same number while a code is on screen.
+        Get-NetFirewallRule -DisplayName 'Beamer Pairing (TCP-In)' -ErrorAction SilentlyContinue | Remove-NetFirewallRule
+        New-NetFirewallRule -DisplayName 'Beamer Pairing (TCP-In)' -Direction Inbound -Protocol TCP -LocalPort 24821 -Action Allow -Profile Private -Program $ExeDestination | Out-Null
+        Write-Host 'Private-network firewall rules installed (TCP 24820 receiver, UDP and TCP 24821 pairing).' -ForegroundColor Green
     } catch {
         Write-Host "Could not install the firewall rule: $_" -ForegroundColor Yellow
     }

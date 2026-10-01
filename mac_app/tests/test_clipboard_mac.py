@@ -147,6 +147,13 @@ class ChangedContentsTests(unittest.TestCase):
         clipboard_mac.forget_sync()
         self.assertEqual(clipboard_mac.changed_contents()[0], "copied")
 
+    def test_the_change_stamp_is_the_change_count(self):
+        # Wire version 6's responder compares it across a visit (core.receiver.LinkResponder).
+        before = clipboard_mac.change_stamp()
+        self.assertEqual(before, self.board.count)
+        clipboard_mac.set_contents("from a peer", None)
+        self.assertNotEqual(clipboard_mac.change_stamp(), before)
+
 
 if __name__ == "__main__":
     unittest.main()

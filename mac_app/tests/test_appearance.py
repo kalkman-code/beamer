@@ -1,6 +1,6 @@
 """The settings window's light and dark palettes: the choice, the Mac's own setting and a live switch.
 
-The window is built for real, as tools/readme_shots_mac.py builds it, and never put on screen."""
+The window is built for real, as the README's screenshots build it, and never put on screen."""
 
 import json
 import logging

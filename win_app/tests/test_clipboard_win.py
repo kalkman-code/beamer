@@ -3,6 +3,7 @@ the clipboard message's image payload, and the read/write orchestration
 over fake user32/kernel32 backed by real ctypes buffers. The Qt PNG codec is
 replaced with a marker encoding so nothing here needs PySide6 or Windows."""
 
+import base64
 import ctypes
 import struct
 import sys
@@ -113,8 +114,9 @@ class ClipboardMessageTests(unittest.TestCase):
         self.assertIsNone(protocol.clipboard_image(protocol.clipboard_msg("hello")["data"]))
 
     def test_image_round_trips_through_the_sealed_wire(self):
-        sender = protocol.SecureSession("shared-token")
-        receiver = protocol.SecureSession("shared-token")
+        token = base64.urlsafe_b64encode(bytes(range(32))).decode("ascii").rstrip("=")
+        sender = protocol.LinkSession(token, protocol.ROLE_INITIATOR)
+        receiver = protocol.LinkSession(token, protocol.ROLE_RESPONDER)
         receiver.accept_preamble(sender.preamble())
         sender.accept_preamble(receiver.preamble())
         frame = sender.seal(protocol.clipboard_msg("shot.png", PNG))
@@ -286,6 +288,13 @@ class ClipboardOrchestrationTests(unittest.TestCase):
         # whatever the person running it had copied.
         self.assertEqual(clipboard_win.get_contents(), (None, None))
         self.assertFalse(clipboard_win.set_contents("x", PNG))
+
+    def test_the_change_stamp_is_the_sequence_number(self):
+        # Wire version 6's responder compares it across a visit (core.receiver.LinkResponder).
+        if sys.platform == "win32":
+            self.assertEqual(clipboard_win.change_stamp(), clipboard_win.user32.GetClipboardSequenceNumber())
+        else:
+            self.assertIsNone(clipboard_win.change_stamp())
 
 
 if __name__ == "__main__":

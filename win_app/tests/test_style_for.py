@@ -1,5 +1,5 @@
 """The Design page's Style for switch shows the tiles it names, in the real window: built offscreen
-from a synthetic config as tools/readme_shots_win.py builds it, which starts no receiver, hooks or
+from a synthetic config as the README's screenshots build it, which starts no receiver, hooks or
 announcer."""
 
 import json
@@ -23,12 +23,12 @@ class StyleForTest(unittest.TestCase):
         os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
         self.app = QApplication.instance() or QApplication([])
         theme.init_fonts()
-        config = Path(tempfile.mkdtemp()) / "config.json"
-        config.write_text(json.dumps({
+        folder = Path(tempfile.mkdtemp())
+        (folder / "config.json").write_text(json.dumps({
             "host": "192.168.1.20", "port": 24820, "auth_token": "synthetic", "paired_with": "MacBook Pro",
             "mac_host": "192.168.1.10", "mac_return_edge": "left", "shortcut_arrival": True,
         }))
-        self.window = kvm_bridge_win.WindowsApplication(config)
+        self.window = kvm_bridge_win.WindowsApplication(folder / "settings.json")
         self.window._select_page("design")
         self.window._refresh_window()
 

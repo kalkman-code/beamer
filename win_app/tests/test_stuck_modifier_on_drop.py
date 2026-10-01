@@ -5,46 +5,12 @@ import os
 sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 import input_injector
-from core import receiver
 
 
-class FakeInjector:
-    def __init__(self):
-        self.calls = []
-
-    def inject_key(self, name, down, us=None):
-        self.calls.append((name, down))
-
-    def release_all(self):
-        self.calls.append(("release_all",))
-
-
-class PeerKeysReleasedTests(unittest.TestCase):
-    """Invariant 3: anything injected for the peer is released when input
-    comes home or the link dies, on this PC exactly as on the Mac."""
-
-    def _server(self, injector):
-        server = receiver.ReceiverServer(
-            status_callback=lambda *a: None,
-            injector=injector,
-            focus_callback=lambda target: None,
-        )
-        server._peer_driving = True
-        return server
-
-    def test_hand_back_releases_what_the_peer_held(self):
-        injector = FakeInjector()
-        server = self._server(injector)
-        receiver.handle_message({"type": "keydown", "data": {"key": "ctrl"}}, injector=injector)
-        server._hand_back("peer went away")
-        self.assertIn(("release_all",), injector.calls)
-
-    def test_input_going_home_releases_what_the_peer_held(self):
-        injector = FakeInjector()
-        server = self._server(injector)
-        server._clipboard = type("C", (), {"changed_contents": staticmethod(lambda: (None, None))})
-        server._handle_focus({"type": "focus", "data": {"target": "mac"}}, None, None, "peer", "192.168.1.5")
-        self.assertIn(("release_all",), injector.calls)
+class WindowsInjectorReleaseTests(unittest.TestCase):
+    """Anything injected for the peer is released when input comes home or the link dies; that the
+    responder calls release_all then is held by core/tests (LinkResponder). This is the Windows
+    injector doing it."""
 
     @unittest.skipUnless(sys.platform == "win32", "the scan-code lookup needs user32")
     def test_the_windows_injector_releases_keys_and_buttons(self):

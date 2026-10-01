@@ -117,6 +117,21 @@ def button_of(message: int, mouse_data: int) -> Optional[Tuple[str, bool]]:
     return None
 
 
+def mouse_event(message: int, mouse_data: int):
+    """What a low-level mouse message says, in the sender's neutral terms: ("button", name, down),
+    ("wheel", dy, dx) in notches, ("move",), or None for a message the Mac has no name for."""
+    button = button_of(message, mouse_data)
+    if button is not None:
+        return ("button",) + button
+    if message == WM_MOUSEWHEEL:
+        return ("wheel", wheel_notches(mouse_data), 0.0)
+    if message == WM_MOUSEHWHEEL:
+        return ("wheel", 0.0, wheel_notches(mouse_data))
+    if message == WM_MOUSEMOVE:
+        return ("move",)
+    return None
+
+
 # What the Keyboard page calls a recorded key, in Windows' own words.
 VK_TITLES: Dict[int, str] = {
     0x08: "Backspace", 0x09: "Tab", 0x0D: "Enter", 0x13: "Pause", 0x14: "Caps Lock", 0x1B: "Esc",

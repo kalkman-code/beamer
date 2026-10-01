@@ -28,7 +28,7 @@ class SettingsStoreTests(unittest.TestCase):
 
     def test_save_is_private_and_round_trips_shared_schema(self):
         with tempfile.TemporaryDirectory() as directory:
-            path = Path(directory) / "config.json"
+            path = Path(directory) / "settings.json"
             store = SettingsStore(path)
             saved = store.save(self.valid_raw())
             loaded = store.load()
@@ -39,7 +39,7 @@ class SettingsStoreTests(unittest.TestCase):
 
     def test_both_directions_default_on_and_each_switch_round_trips(self):
         with tempfile.TemporaryDirectory() as directory:
-            store = SettingsStore(Path(directory) / "config.json")
+            store = SettingsStore(Path(directory) / "settings.json")
             loaded = store.save(self.valid_raw())
             self.assertTrue(loaded.send_to_windows)
             self.assertTrue(loaded.allow_windows_to_drive)
@@ -52,7 +52,7 @@ class SettingsStoreTests(unittest.TestCase):
 
     def test_the_full_screen_hold_defaults_on_and_round_trips(self):
         with tempfile.TemporaryDirectory() as directory:
-            store = SettingsStore(Path(directory) / "config.json")
+            store = SettingsStore(Path(directory) / "settings.json")
             loaded = store.save(self.valid_raw())
             self.assertTrue(loaded.crossing["hold_full_screen"])
             raw = config_to_raw(loaded)
@@ -65,7 +65,7 @@ class SettingsStoreTests(unittest.TestCase):
 
     def test_appearance_defaults_to_system_and_each_choice_round_trips(self):
         with tempfile.TemporaryDirectory() as directory:
-            store = SettingsStore(Path(directory) / "config.json")
+            store = SettingsStore(Path(directory) / "settings.json")
             self.assertEqual(store.save(self.valid_raw()).appearance, "system")
             for choice in ("light", "dark", "system"):
                 raw = config_to_raw(store.load())
@@ -78,7 +78,7 @@ class SettingsStoreTests(unittest.TestCase):
 
     def test_a_hand_edited_appearance_loads_as_system(self):
         with tempfile.TemporaryDirectory() as directory:
-            path = Path(directory) / "config.json"
+            path = Path(directory) / "settings.json"
             path.write_text(json.dumps({**self.valid_raw(), "appearance": "sepia"}), encoding="utf-8")
             self.assertEqual(config_module.load_config(str(path)).appearance, "system")
 
@@ -90,7 +90,7 @@ class SettingsStoreTests(unittest.TestCase):
 
     def test_legacy_positional_key_map_is_replaced_by_the_semantic_default(self):
         with tempfile.TemporaryDirectory() as directory:
-            path = Path(directory) / "config.json"
+            path = Path(directory) / "settings.json"
             raw = self.valid_raw()
             raw["key_map"] = {
                 "alt": "alt", "alt_r": "alt",
@@ -103,7 +103,7 @@ class SettingsStoreTests(unittest.TestCase):
 
     def test_hand_edited_key_map_survives(self):
         with tempfile.TemporaryDirectory() as directory:
-            path = Path(directory) / "config.json"
+            path = Path(directory) / "settings.json"
             raw = self.valid_raw()
             raw["key_map"] = {"cmd": "cmd", "ctrl": "alt"}
             loaded = SettingsStore(path).save(raw)
@@ -115,14 +115,14 @@ class SettingsStoreTests(unittest.TestCase):
             raw = self.valid_raw()
             raw["auth_token"] = "CHANGE_ME"
             with self.assertRaises(SettingsError):
-                SettingsStore(Path(directory) / "config.json").save(raw)
+                SettingsStore(Path(directory) / "settings.json").save(raw)
 
     def test_rejects_unknown_trigger(self):
         with tempfile.TemporaryDirectory() as directory:
             raw = self.valid_raw()
             raw["trigger_key"] = "not_a_key"
             with self.assertRaises(SettingsError):
-                SettingsStore(Path(directory) / "config.json").save(raw)
+                SettingsStore(Path(directory) / "settings.json").save(raw)
 
     def test_config_without_crossing_keys_loads_the_defaults(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -182,7 +182,7 @@ class SettingsStoreTests(unittest.TestCase):
             raw = self.valid_raw()
             raw["crossing"] = {"edge": "left", "resistance_px": 40}
             raw["trigger_style"] = "hold"
-            loaded = SettingsStore(Path(directory) / "config.json").save(raw)
+            loaded = SettingsStore(Path(directory) / "settings.json").save(raw)
             self.assertEqual(loaded.crossing["edge"], "left")
             self.assertEqual(loaded.crossing["resistance_px"], 40)
             self.assertEqual(loaded.crossing["methods"], ["shortcut", "edge"])
@@ -220,7 +220,7 @@ class SettingsStoreTests(unittest.TestCase):
                     raw = self.valid_raw()
                     raw["crossing"] = crossing
                     with self.assertRaises(SettingsError) as caught:
-                        SettingsStore(Path(directory) / "config.json").save(raw)
+                        SettingsStore(Path(directory) / "settings.json").save(raw)
                     self.assertIn(field, str(caught.exception))
 
     def test_every_crossing_effect_and_colour_pack_round_trips(self):
@@ -230,7 +230,7 @@ class SettingsStoreTests(unittest.TestCase):
         pairs += [(style, colour) for style in ("glow", "beam") for colour in effects.PACK_IDS]
         pairs += list(zip(effects.EFFECT_IDS, effects.PACK_IDS))
         with tempfile.TemporaryDirectory() as directory:
-            store = SettingsStore(Path(directory) / "config.json")
+            store = SettingsStore(Path(directory) / "settings.json")
             for style, colour in pairs:
                 with self.subTest(style=style, colour=colour):
                     raw = self.valid_raw()
@@ -253,7 +253,7 @@ class SettingsStoreTests(unittest.TestCase):
                     raw = self.valid_raw()
                     raw["crossing"] = crossing
                     with self.assertRaises(SettingsError) as caught:
-                        SettingsStore(Path(directory) / "config.json").save(raw)
+                        SettingsStore(Path(directory) / "settings.json").save(raw)
                     self.assertIn(field, str(caught.exception))
 
     def test_rejects_unknown_trigger_style(self):
@@ -261,11 +261,11 @@ class SettingsStoreTests(unittest.TestCase):
             raw = self.valid_raw()
             raw["trigger_style"] = "triple_tap"
             with self.assertRaises(SettingsError):
-                SettingsStore(Path(directory) / "config.json").save(raw)
+                SettingsStore(Path(directory) / "settings.json").save(raw)
 
     def test_key_map_style_names_round_trip(self):
         with tempfile.TemporaryDirectory() as directory:
-            path = Path(directory) / "config.json"
+            path = Path(directory) / "settings.json"
             raw = self.valid_raw()
             raw["key_map"] = "positional"
             loaded = SettingsStore(path).save(raw)
@@ -298,16 +298,17 @@ class LegacyPortTests(unittest.TestCase):
 
     def test_the_old_default_port_is_moved_and_the_move_is_written_down(self):
         with tempfile.TemporaryDirectory() as directory:
-            path = Path(directory) / "config.json"
+            path = Path(directory) / "settings.json"
+            (Path(directory) / "config.json").write_text(json.dumps(self.raw(protocol.LEGACY_DEFAULT_PORT)), encoding="utf-8")
             store = SettingsStore(path)
-            store.save(self.raw(protocol.LEGACY_DEFAULT_PORT))
             self.assertEqual(store.load().port, protocol.DEFAULT_PORT)
             on_disk = json.loads(path.read_text(encoding="utf-8"))
             self.assertEqual(on_disk["port"], protocol.DEFAULT_PORT)
+            self.assertEqual(on_disk["peers"][0]["port"], protocol.DEFAULT_PORT)
 
     def test_a_port_someone_chose_is_left_alone(self):
         with tempfile.TemporaryDirectory() as directory:
-            path = Path(directory) / "config.json"
+            path = Path(directory) / "settings.json"
             store = SettingsStore(path)
             store.save(self.raw(9000))
             self.assertEqual(store.load().port, 9000)
