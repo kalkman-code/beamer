@@ -130,6 +130,56 @@ class TakeFromHomeTests(OwnerCase):
                 self.assertEqual(moved(actions).to, None)
                 self.assertEqual(moved(actions).why, why if why != "something_new" else "refused")
                 self.assertFalse(self.o.away)
+                self.clock.now += owner.SENT_HOME_FOR
+
+    def test_a_machine_that_refused_a_take_is_not_taken_again_for_a_while(self):
+        # The live check, 01-10-2026: every push at the laptop's edge took the rig again while the
+        # Mac drove it, about 30 refusals and 30 notices in 20 seconds.
+        for why in ("owned", "busy", "not_allowed"):
+            with self.subTest(why=why):
+                self.o.go("B")
+                self.o.refuse("B", {"route": self.o.route, "why": why})
+                self.clock.now += owner.LEFT_OUT / 2
+                self.assertEqual(self.o.go("B"), [])
+                self.assertFalse(self.o.away)
+                self.clock.now += owner.LEFT_OUT / 2
+                self.assertEqual(moved(self.o.go("B")).to, "B")
+                self.o.go(None)
+
+    def test_a_machine_that_sent_this_one_home_is_left_alone_for_as_long_as_it_would_refuse(self):
+        # The live check, 01-10-2026: thirty "sent_home" refusals in three seconds between two machines.
+        self.o.go("B")
+        self.o.refuse("B", {"route": self.o.route, "why": "sent_home"})
+        self.clock.now += owner.SENT_HOME_FOR - 0.1
+        self.assertEqual(self.o.go("B"), [])
+        self.clock.now += 0.1
+        self.assertEqual(moved(self.o.go("B")).to, "B")
+
+    def test_the_sent_home_window_is_the_responders_own(self):
+        from core import receiver
+        self.assertEqual(owner.SENT_HOME_FOR, receiver.SENT_HOME_SECONDS)
+
+    def test_a_machine_held_back_does_not_hold_back_the_others(self):
+        self.o.go("B")
+        self.o.refuse("B", {"route": self.o.route, "why": "owned"})
+        self.assertEqual(moved(self.o.go("C")).to, "C")
+
+    def test_asking_for_a_machine_held_back_from_another_changes_nothing(self):
+        self.o.go("B")
+        self.o.refuse("B", {"route": self.o.route, "why": "owned"})
+        self.take("C")
+        route = self.o.route
+        self.assertEqual(self.o.go("B"), [])
+        self.assertEqual((self.o.on, self.o.route), ("C", route))
+
+    def test_a_hand_over_refused_as_sent_home_holds_back_as_long_as_the_refusal(self):
+        self.take("B")
+        self.switch("B", "C")
+        self.o.refuse("C", {"route": self.o.route, "why": "sent_home"})
+        self.clock.now += owner.SENT_HOME_FOR - 0.1
+        self.assertNotIn("C", self.o.reach_for(None))
+        self.clock.now += 0.1
+        self.assertIn("C", self.o.reach_for(None))
 
     def test_a_refusal_for_an_old_route_is_ignored(self):
         self.take("B")
@@ -153,6 +203,7 @@ class TakeFromHomeTests(OwnerCase):
         self.o.go("B")
         self.o.refuse("B", {"route": 1, "why": "busy"})
         self.assertIsNone(self.o.on)
+        self.clock.now += owner.LEFT_OUT
         self.take("B")
         self.assertEqual(self.o.on, "B")
 
@@ -409,6 +460,7 @@ class ComingHomeTests(OwnerCase):
                                                      ("B", {"type": "focus", "data": {"route": self.o.route, "target": "A"}})])
                 self.assertEqual(self.o.input(key("keyup", "shift")), [])
                 self.assertEqual(self.o.input(key("keyup", "shift")), [LOCAL])
+                self.clock.now += owner.LEFT_OUT
 
     def test_the_owner_releases_what_it_pressed_there_before_letting_go(self):
         self.take("B")
@@ -488,6 +540,7 @@ class ClipboardTests(OwnerCase):
     def test_a_refused_take_does_not_count_as_having_the_clipboard(self):
         self.o.go("B")
         self.o.refuse("B", {"route": 1, "why": "owned"})
+        self.clock.now += owner.LEFT_OUT
         self.assertIn(SendClipboard("B"), self.take("B"))
 
     def test_the_machine_left_keeps_its_clipboard_when_the_next_one_refuses_first(self):
@@ -496,6 +549,13 @@ class ClipboardTests(OwnerCase):
         self.o.refuse("C", {"route": 2, "why": "owned"})
         message = {"type": "clipboard", "data": {"text": "copied on B"}}
         self.assertEqual(self.o.clipboard_arrived("B", 1000.25, message), [SetClipboard(message)])
+
+    def test_a_machine_whose_link_was_lost_is_sent_the_clipboard_again(self):
+        # Its clipboard may still have been on the way, or waiting behind a slow read, when the link went.
+        self.take("B")
+        self.o.link_down("B")
+        self.o.link_up("B", True)
+        self.assertIn(SendClipboard("B"), self.take("B"))
 
     def test_the_clipboard_goes_after_the_taking_focus_and_before_any_input(self):
         actions = self.o.go("B")

@@ -236,7 +236,7 @@ class RelayTests(unittest.TestCase):
 
 class WordsTests(unittest.TestCase):
     def test_a_shared_page_says_so_only_while_on(self):
-        own = "For this Mac only; the PC keeps its own."
+        own = "For this Mac only; the other machine keeps its own."
         everyone = settings_sync.who(["Studio", "Laptop"])
         self.assertEqual(settings_sync.scope("crossing", everyone, False, own), own)
         self.assertEqual(settings_sync.scope("design", everyone, True, own),

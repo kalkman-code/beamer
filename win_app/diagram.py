@@ -12,6 +12,7 @@ import pages_win
 import theme
 import tokens
 
+OTHER = "Other machine"
 SCREEN = (120.0, 75.0)
 GAP = 14.0
 PAD = 8.0
@@ -42,7 +43,7 @@ def _marks(edge, methods, parts, corner, shortcut) -> dict:
 
 
 class ArrangementDiagram(QWidget):
-    """This PC's screen with your Mac's beside it on the chosen side, and on this PC's screen,
+    """This PC's screen with the other machine's beside it on the chosen side, and on this PC's screen,
     lit, whatever crosses; the shortcut as a key cap underneath."""
 
     def __init__(self, parent: QWidget | None = None) -> None:
@@ -53,7 +54,14 @@ class ArrangementDiagram(QWidget):
         self._angle = pages_win.SIDE_ANGLE["right"]
         self._marks = _marks("right", (), (), "", False)
         self._cap_text = ""
+        self._other = OTHER
         self.setFixedHeight(self._height())
+
+    def set_other_name(self, name: str) -> None:
+        name = name or OTHER
+        if name != self._other:
+            self._other = name
+            self.update()
 
     def sizeHint(self) -> QSize:
         return QSize(2 * round(SCREEN[0]) + round(GAP) + 2 * round(PAD), self._height())
@@ -103,7 +111,7 @@ class ArrangementDiagram(QWidget):
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         pc, mac, pair_h = pages_win.arrangement_rects(self.width(), PAD, self._angle, SCREEN, GAP)
         radius = tokens.RADIUS["field"]
-        self._screen(painter, QRectF(*mac), "Your Mac", "panel", "edge", "ink_3", radius)
+        self._screen(painter, QRectF(*mac), self._other, "panel", "edge", "ink_3", radius)
         self._screen(painter, QRectF(*pc), "This PC", "well", "edge", "ink_2", radius)
         for key, level in self._marks.items():
             if level <= 0.001:
@@ -129,6 +137,7 @@ class ArrangementDiagram(QWidget):
         painter.drawRoundedRect(rect.adjusted(0.5, 0.5, -0.5, -0.5), radius, radius)
         painter.setPen(_colour(ink))
         painter.setFont(theme.font(tokens.TYPE["small"], 600))
+        name = painter.fontMetrics().elidedText(name, Qt.TextElideMode.ElideRight, int(rect.width()) - 8)
         painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, name)
 
     @staticmethod
@@ -198,7 +207,7 @@ class ArrangementDiagram(QWidget):
 
 
 class PushStrip(QWidget):
-    """A band of this screen's edge: the edge line, your Mac beyond it, and a `signal` fill from the
+    """A band of this screen's edge: the edge line, the other machine beyond it, and a `signal` fill from the
     edge as deep as the resistance, with the pointer at its end. A change slides the fill and the
     pointer to the new depth, lit bright, and the light then settles."""
 
@@ -211,6 +220,7 @@ class PushStrip(QWidget):
         self.setFixedHeight(self.HEIGHT)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        self._other = OTHER
         self._value = None
         self._shown = 0.0
         self._glow = 0.0
@@ -218,6 +228,12 @@ class PushStrip(QWidget):
 
     def minimumSizeHint(self) -> QSize:
         return QSize(160, self.HEIGHT)
+
+    def set_other_name(self, name: str) -> None:
+        name = name or OTHER
+        if name != self._other:
+            self._other = name
+            self.update()
 
     def set_edge(self, edge: str) -> None:
         mac_left = edge == "left"
@@ -253,7 +269,7 @@ class PushStrip(QWidget):
     def paintEvent(self, _event) -> None:
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        # Drawn with your Mac on the right; flipped when it is on the left.
+        # Drawn with the other machine on the right; flipped when it is on the left.
         if self._mac_left:
             painter.translate(self.width(), 0)
             painter.scale(-1, 1)
@@ -286,7 +302,10 @@ class PushStrip(QWidget):
             # Text drawn in the flipped frame would read backwards.
             painter.resetTransform()
             label = QRectF(self.width() - label.right(), label.top(), label.width(), label.height())
-        painter.drawText(label, Qt.AlignmentFlag.AlignCenter, "Your Mac")
+        painter.drawText(
+            label, Qt.AlignmentFlag.AlignCenter,
+            painter.fontMetrics().elidedText(self._other, Qt.TextElideMode.ElideRight, int(label.width()) - 4),
+        )
         painter.end()
 
     def _pointer(self, painter, tip: QPointF) -> None:

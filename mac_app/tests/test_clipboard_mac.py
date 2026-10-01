@@ -3,6 +3,8 @@ real AppKit conversion (TIFF to PNG) run on data that never touches the
 general pasteboard, so the suite leaves the machine's clipboard alone."""
 
 import struct
+import threading
+import time
 import unittest
 import zlib
 import os
@@ -153,6 +155,62 @@ class ChangedContentsTests(unittest.TestCase):
         self.assertEqual(before, self.board.count)
         clipboard_mac.set_contents("from a peer", None)
         self.assertNotEqual(clipboard_mac.change_stamp(), before)
+
+
+class _SlowBoard(FakePasteboard):
+    """Counts how many threads are inside it at once, each read and write taking a moment."""
+
+    def __init__(self):
+        super().__init__(string="copied")
+        self.inside = 0
+        self.most = 0
+        self.lock = threading.Lock()
+
+    def _visit(self):
+        with self.lock:
+            self.inside += 1
+            self.most = max(self.most, self.inside)
+        time.sleep(0.02)
+        with self.lock:
+            self.inside -= 1
+
+    def stringForType_(self, kind):
+        self._visit()
+        return self.string
+
+    def clearContents(self):
+        self._visit()
+        super().clearContents()
+
+
+class OneAtATimeTests(unittest.TestCase):
+    """NSPasteboard is not documented as thread-safe, and reading it from two threads at once has
+    raised from inside AppKit: the controller's clipboard reads, its writes and the Mac's responder
+    each run on threads of their own, so every read and write takes its turn."""
+
+    def setUp(self):
+        AppKit = clipboard_mac.AppKit
+        self.board = _SlowBoard()
+        fake_appkit = type("FakeAppKit", (), {})()
+        fake_appkit.NSPasteboard = type("NSPasteboard", (), {"generalPasteboard": staticmethod(lambda: self.board)})
+        fake_appkit.NSData = AppKit.NSData
+        for name in ("NSPasteboardTypeString", "NSPasteboardTypePNG", "NSPasteboardTypeTIFF"):
+            setattr(fake_appkit, name, getattr(AppKit, name))
+        real = clipboard_mac.AppKit
+        clipboard_mac.AppKit = fake_appkit
+        self.addCleanup(setattr, clipboard_mac, "AppKit", real)
+
+    def test_reads_and_writes_from_several_threads_never_overlap(self):
+        work = [clipboard_mac.get_contents, lambda: clipboard_mac.set_contents("x", None)] * 3
+        threads = [threading.Thread(target=job) for job in work]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(5)
+        self.assertEqual(self.board.most, 1)
+
+
+OneAtATimeTests = unittest.skipIf(clipboard_mac.AppKit is None, "AppKit is only available on macOS")(OneAtATimeTests)
 
 
 if __name__ == "__main__":

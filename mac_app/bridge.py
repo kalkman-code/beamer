@@ -65,10 +65,6 @@ OWN_PLATFORM = "macos"
 CAPABILITIES = ("clipboard", "clipboard_image", "gestures", "media_keys", "text", "settings")
 MEDIA_KEY_NAMES = frozenset({"volume_mute", "volume_down", "volume_up", "media_next", "media_prev", "media_stop", "media_play_pause"})
 
-# The local sentinel a clipboard read is deferred with: the event tap must never wait on the
-# pasteboard, so it queues this and the outbound worker reads it, in order with the input behind it.
-_LOCAL_CLIPBOARD_SENTINEL_TYPE = "_local_clipboard"
-
 # Why input came home, in words, for the alert. A why that is not here comes home quietly.
 WHY_TEXT = {
     "owned": "{name} is being driven from another machine",
@@ -430,15 +426,6 @@ def links_from_store(settings_store, app_version):
     return settings_store.book(), identity
 
 
-class _Literal(dict):
-    """A message whose key names are the receiver's own words already, which the key table must
-    leave alone: the gestures press the PC's Control for a zoom, and that is Control there."""
-
-
-def _literal(messages):
-    return [_Literal(message) for message in messages]
-
-
 class _MemoryBook(receiver.PeerBook):
     """The peers a controller built from a Config alone has: peers[0] from the flat fields, nothing
     on disk. The app hands in the settings store's book instead; this is what the controller has
@@ -627,6 +614,12 @@ class KVMController:
         self._cfg_lock = threading.Lock()
         self._owner_lock = threading.RLock()
         self._effects_lock = threading.RLock()
+        # A peer whose clipboard is being read, and what was decided for it meanwhile, in order; and
+        # the pasteboard's reads and writes, done one at a time in order on a thread of their own.
+        self._clip_lock = threading.Lock()
+        self._clip_wait = {}
+        self._pasteboard_jobs = collections.deque()
+        self._pasteboard_busy = False
         self.owner = owner_module.Owner(protocol.id_text(self.identity()["id"]), clock, resistance_px=int(self.crossing.resistance_px))
         self._clipboard_stamp = None
         self._paired_ids = ()
@@ -805,6 +798,10 @@ class KVMController:
 
     def stop(self):
         self._return_local()
+        # The let-go and what is ahead of it may be waiting behind a clipboard read: sent first.
+        deadline = time.monotonic() + 1.0
+        while (self._clip_wait or self._pasteboard_busy) and time.monotonic() < deadline:
+            time.sleep(0.01)
         for link in list(self.links.values()):
             link.flush(0.3)
         self.stop_event.set()
@@ -995,8 +992,8 @@ class KVMController:
         self.crossing.reset()
 
     def _enqueue_control(self, message):
-        """Queue a local control message (the clipboard sentinel) from the event tap, which must
-        never block. Best-effort: a momentarily full queue drops it (logged)."""
+        """Queue a message the event tap made itself, which must never block. Best-effort: a
+        momentarily full queue drops it (logged)."""
         try:
             self.outbound.put_nowait(message)
         except queue.Full:
@@ -1338,6 +1335,14 @@ class KVMController:
             return event
         if not self.connected:
             return event
+        peer = self._primary_link.peer_id
+        with self._owner_lock:
+            # Held back after a refusal, as Windows' zones are: a push that cannot take it must not
+            # pin the pointer and glow as if it would.
+            held_back = bool(peer) and self.owner.held_back(peer)
+        if held_back:
+            self.crossing.reset()
+            return event
         try:
             quartz = self.quartz
             location = quartz.CGEventGetLocation(event)
@@ -1492,12 +1497,12 @@ class KVMController:
             # would open Mission Control or switch Spaces on the Mac while
             # the user is looking at Windows.
             fields = self._read_dock_event(event)
-            messages = _literal(self.dock_classifier.translate(fields) if fields is not None else [])
+            messages = self.dock_classifier.translate(fields) if fields is not None else []
         else:
             gesture_view = self._convert_gesture_event(event)
             if gesture_view is None:
                 return event
-            messages = _literal(self.gesture_translator.translate(event_type, gesture_view))
+            messages = self.gesture_translator.translate(event_type, gesture_view)
         if not self._gesture_capture_logged:
             self._gesture_capture_logged = True
             self.logger.info("gesture capture active")
@@ -1531,7 +1536,7 @@ class KVMController:
             self._overlay_gesture_capture_logged = True
             self.logger.info("gesture capture active (overlay)")
         try:
-            messages = _literal(self.gesture_translator.translate(event_type, gesture_view))
+            messages = self.gesture_translator.translate(event_type, gesture_view)
         except Exception:
             self.logger.exception("overlay gesture translation failed")
             return
@@ -1648,6 +1653,7 @@ class KVMController:
         peer = link.peer_id
         if peer and self._peers_up.get(peer) is link:
             self._peers_up.pop(peer, None)
+            self._forget_held(peer)
             self._step(lambda owner: owner.link_down(peer))
 
     def _connection_worker(self):
@@ -1716,6 +1722,7 @@ class KVMController:
             # this registered the link: undo what that could not see.
             if self._peers_up.get(peer) is link:
                 del self._peers_up[peer]
+            self._forget_held(peer)
             self._step(lambda owner: owner.link_down(peer))
             return
         self.logger.info("connected to %s", fields["name"])
@@ -1876,15 +1883,10 @@ class KVMController:
                 effects.append(action)
                 continue
             try:
-                if isinstance(action, owner_module.Send):
+                if isinstance(action, (owner_module.Send, owner_module.SendClipboard)):
                     self._deliver(action)
-                elif isinstance(action, owner_module.SendClipboard):
-                    if threading.current_thread() is self.capture_thread:
-                        self._enqueue_control({"type": _LOCAL_CLIPBOARD_SENTINEL_TYPE, "data": {}, "peer": action.peer})
-                    else:
-                        self._send_clipboard(action.peer)
                 else:
-                    self._set_clipboard(action.message)
+                    self._on_pasteboard(lambda message=action.message: self._set_clipboard(message))
             except Exception:
                 # One message that cannot go must not stop the move it belongs to: its Moved is next.
                 self.logger.exception("carrying out %s failed", type(action).__name__)
@@ -1897,11 +1899,98 @@ class KVMController:
             elif isinstance(effect, owner_module.Unreachable):
                 self._on_unreachable(effect)
 
-    def _deliver(self, send):
+    def _deliver(self, action):
+        """Sends in the order the owner gave them, except that reading the pasteboard (which can take
+        seconds, while the event tap waits for the owner's lock) is done on a thread of its own:
+        what follows a clipboard read for the same peer waits for it, and everything else goes on."""
+        with self._clip_lock:
+            waiting = self._clip_wait.get(action.peer)
+            if waiting is not None:
+                waiting.append(action)
+                return
+            if isinstance(action, owner_module.SendClipboard):
+                waiting = self._clip_wait[action.peer] = collections.deque()
+                try:
+                    self._on_pasteboard_locked(lambda peer=action.peer: self._clipboard_then_rest(peer, waiting))
+                except RuntimeError:
+                    # No thread at shutdown: nothing must wait behind a read that never starts.
+                    del self._clip_wait[action.peer]
+                    raise
+                return
+        self._send(action)
+
+    def _on_pasteboard(self, job):
+        with self._clip_lock:
+            self._on_pasteboard_locked(job)
+
+    def _on_pasteboard_locked(self, job):
+        """Under `_clip_lock`: `job` done after every pasteboard job before it, on the one thread
+        that does them, started when there is none."""
+        self._pasteboard_jobs.append(job)
+        if self._pasteboard_busy:
+            return
+        try:
+            threading.Thread(target=self._pasteboard_worker, name="Beamer-clipboard", daemon=True).start()
+        except RuntimeError:
+            self._pasteboard_jobs.pop()
+            raise
+        self._pasteboard_busy = True
+
+    def _pasteboard_worker(self):
+        while True:
+            with self._clip_lock:
+                if not self._pasteboard_jobs:
+                    self._pasteboard_busy = False
+                    return
+                job = self._pasteboard_jobs.popleft()
+            try:
+                job()
+            except Exception:
+                self.logger.exception("pasteboard work failed")
+
+    def _clipboard_then_rest(self, peer, waiting):
+        """The clipboard for `peer`, then what `waiting` held behind it, in order. `waiting` belongs to
+        the link it was made on: once that link is lost (`_forget_held`) none of it is sent, as the
+        machine that reconnects will be taken afresh. A clipboard asked for again takes its turn
+        among the pasteboard's other work, behind any write decided before it."""
+        try:
+            self._send_clipboard(peer, waiting)
+        except Exception:
+            self.logger.exception("the clipboard could not be sent")
+        while True:
+            with self._clip_lock:
+                if self._clip_wait.get(peer) is not waiting:
+                    return
+                if not waiting:
+                    del self._clip_wait[peer]
+                    return
+                action = waiting.popleft()
+                if isinstance(action, owner_module.SendClipboard):
+                    self._on_pasteboard_locked(lambda: self._clipboard_then_rest(peer, waiting))
+                    return
+            try:
+                self._send(action)
+            except Exception:
+                self.logger.exception("a message held behind the clipboard could not be sent")
+
+    def _forget_held(self, peer):
+        """`peer`'s link is lost: what waited for its clipboard is for a link that is gone."""
+        with self._clip_lock:
+            self._clip_wait.pop(peer, None)
+
+    def _send(self, send):
         link = self._peers_up.get(send.peer)
         if link is None:
             return
         message = send.message
+        if message.get("type") == gestures.CHORD:
+            receiver = "mac" if keytable.is_mac(link.peer_platform) else "windows"
+            for part in gestures.chord_for(message["data"]["action"], receiver):
+                if not link.send_input(part):
+                    if link.live():
+                        link.drop("The outbound queue filled")
+                    return
+            return
         if message.get("type") in protocol.INPUT_TYPES:
             message = self._for_peer(message, link)
             if message is None:
@@ -1918,7 +2007,7 @@ class KVMController:
     def _for_peer(self, message, link):
         """A captured input message as the peer it is going to names it: modifiers by the key
         table (WIRE.md section 7), and media keys only to a peer that acts on them."""
-        if message.get("type") not in (protocol.MSG_KEYDOWN, protocol.MSG_KEYUP) or isinstance(message, _Literal):
+        if message.get("type") not in (protocol.MSG_KEYDOWN, protocol.MSG_KEYUP):
             return message
         data = dict(message["data"])
         key = data.get("key")
@@ -1993,14 +2082,20 @@ class KVMController:
             with self._owner_lock:
                 self.owner.clipboard_changed()
 
-    def _send_clipboard(self, peer):
+    def _send_clipboard(self, peer, waiting):
         """Read this Mac's clipboard and send it as a clipboard message. Text over CLIPBOARD_MAX_BYTES
         and an image over CLIPBOARD_IMAGE_MAX_BYTES are each dropped on their own, so an oversized
-        screenshot still lets its text through; with nothing left nothing is sent."""
+        screenshot still lets its text through; with nothing left nothing is sent. Nothing is sent
+        either when `waiting` was dropped with its link while the pasteboard was read."""
+        if self._peers_up.get(peer) is None:
+            return
+        text, image = self.clipboard.get_contents()
+        with self._clip_lock:
+            if self._clip_wait.get(peer) is not waiting:
+                return
         link = self._peers_up.get(peer)
         if link is None:
             return
-        text, image = self.clipboard.get_contents()
         if text and len(text.encode("utf-8")) > protocol.CLIPBOARD_MAX_BYTES:
             self.logger.warning("local clipboard text is too large; skipping the text")
             text = None
@@ -2052,13 +2147,9 @@ class KVMController:
             self._step(lambda owner: owner.tick())
 
     def _process_outbound(self, message):
-        """Handle one dequeued item: the clipboard sentinel, or input the tap captured, which the
-        owner routes (to the machine it is on, held for a hand-over, or dropped when it has
-        already come home)."""
+        """Handle one dequeued item: input the tap captured, which the owner routes (to the machine
+        it is on, held for a hand-over, or dropped when it has already come home)."""
         kind = message.get("type")
-        if kind == _LOCAL_CLIPBOARD_SENTINEL_TYPE:
-            self._send_clipboard(message["peer"])
-            return
         if kind in (protocol.MSG_KEYUP, protocol.MSG_MOUSEUP):
             # Whether or not the input is away: the release of a key pressed there that arrives
             # after it came home is what lets the owner stop swallowing it.

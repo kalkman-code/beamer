@@ -178,19 +178,6 @@ class FailureTests(Base):
         self.controller.stop_event.set()
         thread.join(2)
 
-    def test_the_clipboard_sentinel_is_read_without_the_owner_lock(self):
-        bring_up(self.controller)
-        held = []
-        original = self.controller._send_clipboard
-
-        def spy(peer):
-            held.append(self.controller._owner_lock._is_owned())
-            original(peer)
-
-        self.controller._send_clipboard = spy
-        self.controller._process_outbound({"type": bridge._LOCAL_CLIPBOARD_SENTINEL_TYPE, "data": {}, "peer": self.link.peer_id})
-        self.assertEqual(held, [False])
-
 
 class CapabilityAndPairedTests(Base):
     def test_settings_from_a_peer_that_does_not_keep_them_are_ignored(self):

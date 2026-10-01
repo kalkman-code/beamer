@@ -33,7 +33,9 @@ class ScriptedOwner:
     def __init__(self, test, own, machines):
         self.test = test
         self.own = own
-        self.owner = owner_module.Owner(text(own), time.monotonic)
+        # Its own clock runs ahead by `ahead`, so a test can wait out a refusal's back-off at once.
+        self.ahead = 0.0
+        self.owner = owner_module.Owner(text(own), lambda: time.monotonic() + self.ahead)
         self.links = {}
         self.sent = []
         self.moved = []
@@ -263,6 +265,9 @@ class Competing(unittest.TestCase):
         self.assertEqual(self.a.responder.owner, O)
         self.first.go(None)
         self.assertTrue(wait_for(lambda: self.a.responder.owner is None))
+        # A refused machine is not asked again until its back-off has passed.
+        self.assertEqual(self.second.owner.go(text(A)), [])
+        self.second.ahead += owner_module.LEFT_OUT
         self.second.go(self.a)
         self.assertTrue(self.second.until(lambda: self.a.responder.owner == O2))
         self.assertEqual(self.second.on, text(A))
@@ -302,7 +307,8 @@ class TwoDesktopsTakeEachOther(unittest.TestCase):
             self.assertEqual(owners[here].moved[-1].why, "busy")
         self.assertIsNone(x.responder.owner)
         self.assertIsNone(y.responder.owner)
-        # Neither is stuck: one take now gets in.
+        # Neither is stuck: once the back-off has passed, one take gets in.
+        owners[A].ahead += owner_module.LEFT_OUT
         owners[A].go(y)
         self.assertTrue(owners[A].until(lambda: y.responder.owner == A))
 

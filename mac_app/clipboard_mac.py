@@ -1,13 +1,10 @@
 """macOS clipboard access via AppKit's NSPasteboard.
 
 `get_contents`/`set_contents` are called from background threads: the
-outbound worker (when switching redirect to Windows, to grab the outgoing
-clipboard) and the ack-receiver thread (when a clipboard message arrives from
-Windows). Apple doesn't document NSPasteboard as thread-safe, but
-reading/writing the general pasteboard from a background thread is widely
-relied upon in practice and has not shown problems in manual testing. Flagging
-here as the one part of this feature that still wants confirmation on a real
-machine under load.
+controller's clipboard thread, and the responder's link threads when this Mac
+is driven. Apple doesn't document NSPasteboard as thread-safe, and two threads
+reading it at once have raised from inside AppKit, so every read and write of
+the contents takes `_LOCK`.
 
 AppKit is imported at module level (pyobjc is already a hard dependency of
 this app -- bridge.py imports Quartz/objc the same way) but guarded so the
@@ -17,6 +14,7 @@ rather than mocking imports.
 """
 
 import logging
+import threading
 
 try:
     import AppKit
@@ -29,6 +27,10 @@ LOGGER = logging.getLogger("Beamer")
 # then and after forget_sync. A switch sends the clipboard only when the count has moved since,
 # so an unchanged screenshot is not pushed across on every switch.
 _synced_count = None
+
+# Every read and write of the contents, from whichever thread: one at a time. The change count is
+# left out, so a caller that only asks whether the pasteboard moved never waits behind a slow read.
+_LOCK = threading.Lock()
 
 
 def _text_from_pasteboard(pasteboard):
@@ -63,8 +65,9 @@ def get_contents():
     if AppKit is None:
         return None, None
     try:
-        pasteboard = AppKit.NSPasteboard.generalPasteboard()
-        return _text_from_pasteboard(pasteboard), _png_from_pasteboard(pasteboard)
+        with _LOCK:
+            pasteboard = AppKit.NSPasteboard.generalPasteboard()
+            return _text_from_pasteboard(pasteboard), _png_from_pasteboard(pasteboard)
     except Exception:
         LOGGER.exception("failed to read the macOS clipboard")
         return None, None
@@ -113,16 +116,17 @@ def set_contents(text, png):
     if AppKit is None or (text is None and png is None):
         return False
     try:
-        pasteboard = AppKit.NSPasteboard.generalPasteboard()
-        pasteboard.clearContents()
-        wrote = False
-        if text is not None:
-            wrote |= bool(pasteboard.setString_forType_(text, AppKit.NSPasteboardTypeString))
-        if png is not None:
-            data = AppKit.NSData.dataWithBytes_length_(png, len(png))
-            wrote |= bool(pasteboard.setData_forType_(data, AppKit.NSPasteboardTypePNG))
-        if wrote:
-            _synced_count = pasteboard.changeCount()
+        with _LOCK:
+            pasteboard = AppKit.NSPasteboard.generalPasteboard()
+            pasteboard.clearContents()
+            wrote = False
+            if text is not None:
+                wrote |= bool(pasteboard.setString_forType_(text, AppKit.NSPasteboardTypeString))
+            if png is not None:
+                data = AppKit.NSData.dataWithBytes_length_(png, len(png))
+                wrote |= bool(pasteboard.setData_forType_(data, AppKit.NSPasteboardTypePNG))
+            if wrote:
+                _synced_count = pasteboard.changeCount()
         return wrote
     except Exception:
         LOGGER.exception("failed to set the macOS clipboard")

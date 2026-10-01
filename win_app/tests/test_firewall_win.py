@@ -70,7 +70,7 @@ class InterpretTests(unittest.TestCase):
         self.assertEqual(status.public_interfaces, ())
         advice = advise(status)
         self.assertEqual(advice.action, "check")
-        self.assertIn("lets your Mac reach Beamer", advice.sentence)
+        self.assertIn("lets your other machines reach Beamer", advice.sentence)
 
     def test_rule_scoped_to_a_profile_the_lan_is_not_on(self):
         # The installer's Private-only rule, but the LAN has been reclassified Public.
@@ -266,6 +266,7 @@ class PairingRuleTests(unittest.TestCase):
         advice = advise(status)
         self.assertEqual(advice.action, "repair")
         self.assertIn("pairing beacon", advice.sentence)
+        self.assertIn("will not hear other machines' pairing announcements", advice.sentence)
 
     def test_a_missing_pairing_rule_is_one_this_app_may_add_by_itself(self):
         # An upgrade from 1.4.x has the receiver and the UDP rule and no TCP one: the first code shown
@@ -321,4 +322,4 @@ class PairingRuleTests(unittest.TestCase):
         # Input not arriving at all is the bigger problem; one button fixes both.
         status = interpret(payload([pairing_rule()]), EXE, PORT)
         self.assertFalse(status.allowed)
-        self.assertIn("no rule letting your Mac reach", advise(status).sentence)
+        self.assertIn("no rule letting your other machines reach", advise(status).sentence)

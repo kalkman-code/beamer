@@ -32,7 +32,8 @@ from dataclasses import dataclass
 from typing import Optional
 
 TAKE_WAIT = 1.0         # seconds a take waits for its `accept`
-LEFT_OUT = 3.0          # seconds a peer that did not take a hand-over stays out of `reach`
+LEFT_OUT = 3.0          # seconds a peer that did not take a hand-over, or refused a take, is not asked again
+SENT_HOME_FOR = 5.0     # a peer that sent this machine home refuses it this long (receiver.SENT_HOME_SECONDS)
 CLIPBOARD_AFTER = 10.0  # seconds after a let-go that the machine let go may send its clipboard
 TAKE_MEMORY = 30.0      # seconds a take is remembered, so a late `accept` can still be let go
 REFUSALS = ("owned", "not_allowed", "busy", "sent_home", "malformed")
@@ -160,6 +161,8 @@ class Owner:
     def link_down(self, peer):
         self._links.discard(peer)
         self._accepting.discard(peer)
+        # Its clipboard may still have been on the way, or waiting behind a slow read: sent again.
+        self._clipboard_at.discard(peer)
         if peer == self.on:
             return self._come_home("link_lost")
         if self._wait is not None and self._wait.chain and self._wait.peer == peer:
@@ -186,6 +189,8 @@ class Owner:
             return []
         if peer not in self._links & self._accepting:
             return [Unreachable(peer, "unreachable")]
+        if self.held_back(peer):
+            return []
         left = self.on
         self._wait = None
         self.route += 1
@@ -243,6 +248,7 @@ class Owner:
             return []
         # The take's own route too: a re-arm sent before its answer came raised the route past it.
         if peer == self.on and (route == self.route or (wait is not None and route == wait.route)):
+            self._hold_back(peer, why)
             return self._come_home(why)
         return []
 
@@ -388,8 +394,17 @@ class Owner:
         """A hand-over from the machine the input is on did not happen: re-arm it without `peer`."""
         self._wait = None
         if peer is not None:
-            self._left_out[peer] = self._clock() + LEFT_OUT
+            self._hold_back(peer, why)
         return self._stay() + [Unreachable(peer, why)] + self._replay_held()
+
+    def held_back(self, peer):
+        """Whether `peer` refused, or did not take, a move a moment ago and is not asked again yet."""
+        return self._left_out.get(peer, 0) > self._clock()
+
+    def _hold_back(self, peer, why):
+        """`peer` is not asked again for as long as it would refuse: each push at its edge would
+        otherwise ask, be refused, and say so."""
+        self._left_out[peer] = self._clock() + (SENT_HOME_FOR if why == "sent_home" else LEFT_OUT)
 
     def _stay(self):
         self.route += 1

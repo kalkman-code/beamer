@@ -3,6 +3,7 @@ still, a clipboard that never touches the pasteboard, and the Config a controlle
 
 import base64
 import logging
+import time
 
 import config
 from core import protocol
@@ -137,6 +138,14 @@ def crossing_config(token="synthetic-token", **overrides):
     cfg = make_config(token)
     cfg.crossing = dict(config.DEFAULT_CROSSING, **overrides)
     return cfg
+
+
+def settle(controller, timeout=2.0):
+    """Wait until the pasteboard work the controller started is done, and what waited behind it sent."""
+    deadline = time.monotonic() + timeout
+    while (controller._clip_wait or controller._pasteboard_busy) and time.monotonic() < deadline:
+        time.sleep(0.002)
+    assert not (controller._clip_wait or controller._pasteboard_busy), "pasteboard work never finished"
 
 
 def quiet_logger():

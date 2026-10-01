@@ -58,6 +58,7 @@ from effect_previews import EffectStill, SwitchStill, TileHover
 from core import ignored
 import motion
 from core import pairing
+from core import keytable
 from core import peerlist
 from core.pairing import PAIRING_PORT, PairingService, local_address_towards
 import machines_win
@@ -120,10 +121,10 @@ CORNER_CHOICES = (
 TRIGGER_STYLE_CHOICES = (("double_tap", "Double-tap"), ("hold", "Hold"))
 MODIFIER_STYLE_CHOICES = (("semantic", "Same shortcuts"), ("positional", "Same positions"))
 MODIFIER_NOTES = {
-    "semantic": "Ctrl arrives on the Mac as Command and the Windows key as Control, so Ctrl+C "
-    "copies there too.",
-    "positional": "Each key arrives as the Mac key in the same place: Ctrl as Control, the Windows "
-    "key as Command.",
+    "semantic": "On a Mac, Ctrl arrives as Command and the Windows key as Control, so Ctrl+C "
+    "copies there too. Between two PCs every key arrives as itself.",
+    "positional": "On a Mac, each key arrives as the Mac key in the same place: Ctrl as Control, the "
+    "Windows key as Command. Between two PCs every key arrives as itself.",
 }
 FULL_SCREEN_CHECK_MS = 1000
 # How long a dragged slider waits, still, before the value it settled on is written to disk.
@@ -173,6 +174,14 @@ def configure_logging() -> Optional[Path]:
             continue
     logging.basicConfig(level=logging.INFO)
     return None
+
+
+def arrival_method(edge: Optional[str], driver_platform: str) -> str:
+    """How input arriving at `edge` came: a Mac's notch crossing lands on this PC's bottom edge,
+    and that is the only arrival an effect draws differently. No edge is a peer's shortcut or menu."""
+    if edge is None:
+        return "switch"
+    return "notch" if edge == "bottom" and keytable.is_mac(driver_platform) else "edge"
 
 
 def status_icon(state: ServerState, size: int = 64) -> QPixmap:
@@ -291,10 +300,8 @@ class WindowsApplication(QWidget):
             self._identity,
             status_callback=self._set_status,
             pressure_callback=lambda edge, pressure, crossed, part=None: self.bridge.pressure.emit(edge, pressure, crossed, part),
-            # The Mac's notch crossing lands on this PC's bottom edge, and that is the only
-            # arrival an effect draws differently. No edge is a peer's shortcut or menu.
             arrival_callback=lambda edge, x, y: self.bridge.arrived.emit(
-                "switch" if edge is None else "notch" if edge == "bottom" else "edge", edge or "", float(x), float(y)
+                arrival_method(edge, self._driver_platform()), edge or "", float(x), float(y)
             ),
             owner_callback=lambda peer: self.bridge.owner.emit(protocol.id_text(peer) if peer else ""),
             arrangement_callback=lambda peer, read: self.bridge.arrangement.emit(
@@ -778,6 +785,15 @@ class WindowsApplication(QWidget):
             messages.append(protocol.settings_msg(self._same_state()))
         return messages
 
+    def _driver_platform(self) -> str:
+        """The platform of the machine driving this PC now, or "" when none is. From the peers the
+        window last read, not settings.json: this runs on the responder's thread as input lands."""
+        owner = self.server.owner
+        if owner is None:
+            return ""
+        text = protocol.id_text(owner)
+        return next((peer.get("platform") or "" for peer in self._peer_entries if peer.get("id") == text), "")
+
     def _identity(self) -> dict:
         """This machine as a `hello` and a `welcome` say it (section 2)."""
         config = self._config or default_config()
@@ -888,6 +904,7 @@ class WindowsApplication(QWidget):
         self.shortcut_module = self._shortcut_module(current)
         layout.addWidget(self.shortcut_module)
         self._reflect_ways()
+        self._reflect_other_name()
 
     @staticmethod
     def _row(*items) -> QWidget:
@@ -927,14 +944,14 @@ class WindowsApplication(QWidget):
         self.edge_choice = widgets.Choice(
             EDGE_CHOICES, columns=4, current=current.mac_return_edge, on_change=self._set_arrangement
         )
-        self.edge_choice.set_names("Where your Mac is")
+        self.edge_choice.set_names("Where the other machine is")
         self.edge_unlearned = widgets.label(pages_win.NOT_LEARNED_EDGE, "note", wrap=True)
         self.edge_unlearned.setVisible(not current.mac_return_edge)
         self.crossing_rows = {
             "edge": self._row(
-                widgets.label("Where your Mac is", "key"),
+                widgets.label("Where the other machine is", "key"),
                 widgets.label(
-                    "One border, walked both ways, so changing it here moves it on your Mac too.",
+                    "One border, walked both ways, so changing it here moves it on the other machine too.",
                     "note",
                     wrap=True,
                 ),
@@ -1160,9 +1177,9 @@ class WindowsApplication(QWidget):
         layout.addWidget(self._speed_module(current))
 
     def _speed_module(self, current: Config) -> QWidget:
-        """How the Mac's pointer feels on this PC: the Mac sends what its own acceleration made of
+        """How the other machine's pointer feels on this PC: it sends what its own acceleration made of
         the hand's movement, and this PC's settings decide the rest."""
-        module = widgets.Module("The Mac's pointer here")
+        module = widgets.Module("The other machine's pointer here")
         self.speed_sliders = {}
         self.speed_readouts = {}
         for key, name, value in (("pointer_speed", "Pointer speed", current.pointer_speed),
@@ -1179,9 +1196,9 @@ class WindowsApplication(QWidget):
             module.body.addLayout(row)
             self.speed_sliders[key], self.speed_readouts[key] = slider, readout
         module.body.addWidget(widgets.label(
-            "For the Mac's trackpad or mouse while it drives this PC.", "note", wrap=True
+            "For the other machine's trackpad or mouse while it drives this PC.", "note", wrap=True
         ))
-        self.reverse_scroll_switch = widgets.Switch("Reverse the Mac's scrolling")
+        self.reverse_scroll_switch = widgets.Switch("Reverse the other machine's scrolling")
         self.reverse_scroll_switch.setFont(theme.font(theme.TYPE["body"]))
         self.reverse_scroll_switch.setChecked(current.reverse_scroll)
         self.reverse_scroll_switch.toggled.connect(self._reverse_scroll_changed)
@@ -1259,10 +1276,10 @@ class WindowsApplication(QWidget):
             row_layout.addWidget(remove)
             self.ignored_list.addWidget(row)
         text = refused or (
-            "These keep working on this PC while its input is on your Mac: a mouse's back button for "
+            "These keep working on this PC while its input is on another machine: a mouse's back button for "
             "this PC's browser, say, or a volume key for its speakers."
             if entries
-            else "Nothing yet. Every key and button goes to your Mac while it has input. Add one to keep "
+            else "Nothing yet. Every key and button goes to the other machine while it has input. Add one to keep "
             "it here: a mouse's back button for this PC's browser, say, or a volume key for its speakers."
         )
         self.ignored_note.setText(text)
@@ -1301,7 +1318,7 @@ class WindowsApplication(QWidget):
         module = widgets.Module("Shortcut")
         module.body.addWidget(
             widgets.label(
-                "Use this key to send input to your Mac, and to bring it back.", "note", wrap=True
+                "Use this key to send input to the other machine, and to bring it back.", "note", wrap=True
             )
         )
         self.trigger_recorder = widgets.InputRecorder(
@@ -1377,7 +1394,7 @@ class WindowsApplication(QWidget):
 
     def _update_style_hint(self, style: str) -> None:
         text = (
-            "Input is on the Mac for as long as the key is held."
+            "Input is on the other machine for as long as the key is held."
             if style == "hold"
             else "Tap twice to switch; tap twice again to come back."
         )
@@ -1432,8 +1449,8 @@ class WindowsApplication(QWidget):
         module.body.addWidget(self._own_note())
         module.body.addWidget(
             widgets.label(
-                "Lights this PC as you push toward your Mac. Switched off, crossing still works. "
-                "Your Mac sets how its own edge and notch look.",
+                "Lights this PC as you push toward the other machine. Switched off, crossing still works. "
+                "Each machine sets how its own edge looks.",
                 "note",
                 wrap=True,
             )
@@ -1762,6 +1779,13 @@ class WindowsApplication(QWidget):
             peers = []
         self._peer_entries = peers
         self.machines.set_peers(self._peer_items(peers))
+        if hasattr(self, "arrangement_diagram"):
+            self._reflect_other_name()
+
+    def _reflect_other_name(self) -> None:
+        name = self._machines_name() if len(self._peer_entries) == 1 else ""
+        self.arrangement_diagram.set_other_name(name)
+        self.resistance_strip.set_other_name(name)
 
     def _refresh_peer_states(self) -> None:
         """The rows' states again from the peers last read: the links move faster than the file does."""
@@ -2573,7 +2597,7 @@ class WindowsApplication(QWidget):
         box.setIconPixmap(QIcon(str(ICON_PATH)).pixmap(64, 64))
         box.setTextFormat(Qt.TextFormat.RichText)
         box.setText(
-            f"<b>Beamer {VERSION}</b><br>One keyboard and mouse for your Mac and PC.<br><br>"
+            f"<b>Beamer {VERSION}</b><br>One keyboard and mouse for all your Macs and PCs.<br><br>"
             f'<a href="{HOME_PAGE}" style="color: {theme.colour("signal")};">{HOME_PAGE_TEXT}</a>'
         )
         box.setTextInteractionFlags(Qt.TextInteractionFlag.TextBrowserInteraction)

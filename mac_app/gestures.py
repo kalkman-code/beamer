@@ -19,8 +19,10 @@ raw values:
 
 `DockSwipeClassifier` handles the tap's DockControl events and emits one
 `gesture` message per completed movement. `GestureTranslator` handles the
-overlay's NSEvents, turning a pinch into Ctrl+wheel and a page swipe into
-Alt+Arrow with no Windows-side change. A zoom gesture was never observed to
+overlay's NSEvents, turning a pinch into zoom steps and a page swipe into back
+or forward, each a CHORD that `chord_for` shapes for the machine it is sent to:
+Ctrl+wheel and Alt+Arrow for a PC, Command with = - [ ] for a Mac, with no
+change on the receiving side. A zoom gesture was never observed to
 reach the tap, so the overlay is the only route for it, and it remains
 best-effort.
 
@@ -130,25 +132,43 @@ NS_EVENT_PHASE_ENDED = 8
 NS_EVENT_PHASE_CANCELLED = 16
 _PHASE_RESET_MASK = NS_EVENT_PHASE_ENDED | NS_EVENT_PHASE_CANCELLED
 
-# Accumulated `.magnification` needed before one Ctrl+wheel zoom step fires.
-# Positive magnification (fingers spreading -- zooming in) maps to a
-# positive wheel delta, matching the usual "Ctrl+scroll up zooms in"
-# convention in browsers and other zoomable apps.
+# Accumulated `.magnification` needed before one zoom step fires. Positive
+# magnification (fingers spreading) zooms in: on a PC a positive wheel delta,
+# matching the usual "Ctrl+scroll up zooms in" convention in browsers and other
+# zoomable apps, and on a Mac Command-=.
 MAGNIFY_STEP = 0.05
 
 
-RECEIVERS = ("windows", "mac")
+# Never on the wire: a zoom step or a page swipe whose chord is chosen when it is sent to a machine,
+# since the machine input is on can change between capture and sending.
+CHORD = "gesture_chord"
+
+
+def chord_for(action, receiver):
+    """The messages that make `action` ("zoom_in", "zoom_out", "back", "forward") on `receiver`. The
+    wire's key names are the receiver's own words, so a Mac's "cmd" is Command and Windows' "ctrl"
+    is Control. `receiver` is "mac" for a Mac and anything else for a PC."""
+    if action not in ("zoom_in", "zoom_out", "back", "forward"):
+        raise ValueError(f"unknown gesture action: {action!r}")
+    if action in ("zoom_in", "zoom_out"):
+        direction = 1 if action == "zoom_in" else -1
+        if receiver == "mac":
+            return _chord("cmd", "=" if direction > 0 else "-")
+        return [
+            {"type": protocol.MSG_KEYDOWN, "data": {"key": "ctrl"}},
+            protocol.scroll_msg(dy=direction, dx=0, mode="line"),
+            {"type": protocol.MSG_KEYUP, "data": {"key": "ctrl"}},
+        ]
+    if receiver == "mac":
+        return _chord("cmd", "[" if action == "back" else "]")
+    return _chord("alt", "left" if action == "back" else "right")
 
 
 class GestureTranslator:
-    """`receiver` is the platform of the machine being driven: a zoom or a page swipe is the
-    chord that machine answers to. The wire's key names are the receiver's own words, so a Mac's
-    "cmd" is Command and Windows' "ctrl" is Control."""
+    """A zoom step or a page swipe comes out as one CHORD message, for `chord_for` to shape once
+    the machine it goes to is known."""
 
-    def __init__(self, logger=None, receiver="windows"):
-        if receiver not in RECEIVERS:
-            raise ValueError(f"unknown receiver platform: {receiver!r}")
-        self.receiver = receiver
+    def __init__(self, logger=None):
         self.logger = logger or logging.getLogger("Beamer")
         self._magnify_accum = 0.0
         self._warned_types = set()
@@ -193,22 +213,16 @@ class GestureTranslator:
         return messages
 
     def _zoom_step_messages(self, direction):
-        if self.receiver == "mac":
-            return _chord("cmd", "=" if direction > 0 else "-")
-        return [
-            {"type": protocol.MSG_KEYDOWN, "data": {"key": "ctrl"}},
-            protocol.scroll_msg(dy=direction, dx=0, mode="line"),
-            {"type": protocol.MSG_KEYUP, "data": {"key": "ctrl"}},
-        ]
+        return self._shaped("zoom_in" if direction > 0 else "zoom_out")
 
     def _translate_swipe(self, ns_event):
         delta_x = float(ns_event.deltaX)
         if delta_x == 0:
             return []
-        back = delta_x > 0
-        if self.receiver == "mac":
-            return _chord("cmd", "[" if back else "]")
-        return _chord("alt", "left" if back else "right")
+        return self._shaped("back" if delta_x > 0 else "forward")
+
+    def _shaped(self, action):
+        return [{"type": CHORD, "data": {"action": action}}]
 
 
 def _chord(modifier, key):

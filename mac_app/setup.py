@@ -94,7 +94,7 @@ setup(
                 "NSPrincipalClass": "NSApplication",
                 "ATSApplicationFontsPath": "Fonts",
                 "NSHumanReadableCopyright": "Copyright 2026 Toby Kalkman",
-                "NSLocalNetworkUsageDescription": "Beamer needs to reach the Windows PC on your local network to forward keyboard and mouse input.",
+                "NSLocalNetworkUsageDescription": "Beamer needs to reach your other computers on your local network to share keyboard and mouse input.",
             },
         }
     },

@@ -19,23 +19,23 @@ PAGES = (
     ("permissions", "Permissions", "lock.shield",
      "macOS must allow Beamer to read this keyboard and trackpad before it can send them anywhere."),
     ("crossing", "Crossing", "cursorarrow.motionlines",
-     "Choose how the pointer or a key moves input to Windows, and how hard the edge pushes back first."),
+     "Choose how the pointer or a key moves input to the other machine, and how hard the edge pushes back first."),
     ("keyboard", "Keyboard", "keyboard",
-     "How this Mac's modifier keys arrive on Windows, which keys and buttons stay on this Mac, and "
-     "how fast the PC's pointer moves here. The switch key is on the Crossing page."),
+     "How this Mac's modifier keys arrive on the other machine, which keys and buttons stay on this Mac, "
+     "and how fast the other machine's pointer moves here. The switch key is on the Crossing page."),
     ("design", "Design", "paintpalette",
      "How crossing looks and feels on this Mac: the edge, the corner, the notch and the trackpad."),
     ("connection", "Connection", "network",
      "Where the first machine you paired is. Pairing fills these in."),
 )
 KEYS = tuple(page[0] for page in PAGES)
-# Under the purpose on the pages whose settings are this Mac's alone, so nobody looks for the PC's
-# on the Mac: each app sets only its own machine, and the PC's are in Beamer on the PC.
+# Under the purpose on the pages whose settings are this Mac's alone, so nobody looks for the other
+# machine's on the Mac: each app sets only its own machine, and the other's are in Beamer there.
 SCOPE = {
-    "crossing": "For this Mac only; the PC keeps its own. Only which side the PC is on is shared. This Mac's "
-                "resistance is also what its pointer meets at the PC's edge on the way back.",
-    "design": "For this Mac's screen only; the PC keeps its own.",
-    "keyboard": "For this Mac's keyboard only; the PC keeps its own.",
+    "crossing": "For this Mac only; the other machine keeps its own. Only which side the other machine is on is shared. This "
+                "Mac's resistance is also what its pointer meets at the other machine's edge on the way back.",
+    "design": "For this Mac's screen only; the other machine keeps its own.",
+    "keyboard": "For this Mac's keyboard only; the other machine keeps its own.",
 }
 # With Same on both machines on, under each row of the shared pages that stays this Mac's own.
 OWN_ROW = "This Mac only."
@@ -172,7 +172,7 @@ def toggle_part(parts, part, on):
     return [name for name in ("start", "middle", "end") if name in chosen]
 
 
-# The Crossing page's diagram: this Mac's screen at 16:10 and the PC's at 16:9, a gap between.
+# The Crossing page's diagram: this Mac's screen at 16:10 and the other machine's at 16:9, a gap between.
 DIAGRAM_THIS = (120.0, 75.0)
 DIAGRAM_OTHER = (112.0, 63.0)
 DIAGRAM_GAP = 10.0
@@ -292,14 +292,14 @@ def place_note(style, place, methods, has_notch):
 
 def notch_or_corner_only(methods):
     """The pointer's only ways in are the notch and/or a corner, so input arrives by their own side
-    and Where the PC is does not steer it."""
+    and Where the other machine is does not steer it."""
     chosen = set(methods)
     return bool(chosen & {"notch", "corner"}) and not chosen & {"edge", "part"}
 
 
 NOTCH_OR_CORNER_NOTE = (
     "With only the notch or a corner on, input arrives by the notch's or corner's own side, so this "
-    "choice does nothing on this Mac; your PC's own push still follows it."
+    "choice does nothing on this Mac; the other machine's own push still follows it."
 )
 
 
@@ -309,8 +309,8 @@ def crossing_rows(methods):
     chosen = set(methods)
     pointer = bool(chosen & {"edge", "part", "corner", "notch"})
     return {
-        # Where the PC sits, which every way in uses: a crossing arrives by it, and with only the
-        # shortcut on it is still the PC's edge that leads back here.
+        # Where the other machine sits, which every way in uses: a crossing arrives by it, and with
+        # only the shortcut on it is still that machine's edge that leads back here.
         "edge": True,
         "parts": "part" in chosen,
         "corner": "corner" in chosen,

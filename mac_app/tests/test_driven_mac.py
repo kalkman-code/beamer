@@ -11,7 +11,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspa
 
 import input_injector_mac as injector
 from core import protocol
-from gestures import GestureTranslator
+from gestures import chord_for
 
 
 class FakeEvent:
@@ -349,58 +349,10 @@ class GestureInjectionTests(InjectorCase):
                 self.assertTrue(self.quartz.posted, name)
 
 
-class FakeNSGesture:
-    def __init__(self, magnification=0.0, delta_x=0.0, phase=0):
-        self.magnification = magnification
-        self.deltaX = delta_x
-        self.deltaY = 0.0
-        self.phase = phase
-
-
-class MacShapedGestureTranslatorTests(unittest.TestCase):
-    def keys(self, messages):
-        return [(m["type"], m["data"]["key"]) for m in messages if m["type"] in (protocol.MSG_KEYDOWN, protocol.MSG_KEYUP)]
-
-    def test_the_default_is_still_the_windows_shaped_chord(self):
-        translator = GestureTranslator()
-        swipe = translator.translate(31, FakeNSGesture(delta_x=1))
-        self.assertEqual(
-            self.keys(swipe),
-            [(protocol.MSG_KEYDOWN, "alt"), (protocol.MSG_KEYDOWN, "left"), (protocol.MSG_KEYUP, "left"), (protocol.MSG_KEYUP, "alt")],
-        )
-
-    def test_a_page_swipe_to_a_mac_is_command_bracket(self):
-        translator = GestureTranslator(receiver="mac")
-        back = translator.translate(31, FakeNSGesture(delta_x=1))
-        forward = translator.translate(31, FakeNSGesture(delta_x=-1))
-        self.assertEqual(
-            self.keys(back),
-            [(protocol.MSG_KEYDOWN, "cmd"), (protocol.MSG_KEYDOWN, "["), (protocol.MSG_KEYUP, "["), (protocol.MSG_KEYUP, "cmd")],
-        )
-        self.assertEqual(self.keys(forward)[1], (protocol.MSG_KEYDOWN, "]"))
-
-    def test_a_pinch_to_a_mac_zooms_with_command_plus_and_minus(self):
-        translator = GestureTranslator(receiver="mac")
-        zoom_in = translator.translate(30, FakeNSGesture(magnification=0.06))
-        zoom_out = translator.translate(30, FakeNSGesture(magnification=-0.06))
-        self.assertEqual(self.keys(zoom_in)[:2], [(protocol.MSG_KEYDOWN, "cmd"), (protocol.MSG_KEYDOWN, "=")])
-        self.assertEqual(self.keys(zoom_out)[:2], [(protocol.MSG_KEYDOWN, "cmd"), (protocol.MSG_KEYDOWN, "-")])
-        self.assertFalse([m for m in zoom_in if m["type"] == protocol.MSG_SCROLL])
-
-    def test_the_mac_chord_names_its_us_key_so_another_layout_still_presses_a_key(self):
-        translator = GestureTranslator(receiver="mac")
-        keys = [m["data"] for m in translator.translate(31, FakeNSGesture(delta_x=1)) if m["type"] == protocol.MSG_KEYDOWN]
-        self.assertEqual(keys, [{"key": "cmd"}, {"key": "[", "us": "["}])
-        down = injector.plan_key_event("[", True, {"cmd"}, us="[")
-        self.assertEqual(down, (0x21, None))
-
-    def test_a_pinch_to_windows_is_still_control_wheel(self):
-        zoom = GestureTranslator().translate(30, FakeNSGesture(magnification=0.06))
-        self.assertTrue([m for m in zoom if m["type"] == protocol.MSG_SCROLL])
-
-    def test_an_unknown_receiver_is_refused(self):
-        with self.assertRaises(ValueError):
-            GestureTranslator(receiver="linux")
+class MacChordInjectionTests(unittest.TestCase):
+    def test_a_page_swipes_chord_presses_the_bracket_key_under_command(self):
+        bracket = [m["data"] for m in chord_for("back", "mac") if m["type"] == protocol.MSG_KEYDOWN][1]
+        self.assertEqual(injector.plan_key_event(bracket["key"], True, {"cmd"}, us=bracket["us"]), (0x21, None))
 
 
 if __name__ == "__main__":

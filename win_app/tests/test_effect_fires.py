@@ -130,6 +130,24 @@ class PressureRoutingTest(unittest.TestCase):
 
 
 @unittest.skipIf(kvm_bridge_win is None, "needs PySide6")
+class ArrivalMethodTest(unittest.TestCase):
+    """Only a Mac has a notch: a PC below this one lands on its bottom edge as an edge crossing."""
+
+    def test_a_mac_landing_on_the_bottom_edge_came_through_its_notch(self):
+        self.assertEqual(kvm_bridge_win.arrival_method("bottom", "macos"), "notch")
+
+    def test_a_pc_landing_on_the_bottom_edge_crossed_an_edge(self):
+        self.assertEqual(kvm_bridge_win.arrival_method("bottom", "windows"), "edge")
+
+    def test_an_unknown_driver_on_the_bottom_edge_crossed_an_edge(self):
+        self.assertEqual(kvm_bridge_win.arrival_method("bottom", ""), "edge")
+
+    def test_other_edges_are_edges_and_no_edge_is_a_switch(self):
+        self.assertEqual(kvm_bridge_win.arrival_method("left", "macos"), "edge")
+        self.assertEqual(kvm_bridge_win.arrival_method(None, "macos"), "switch")
+
+
+@unittest.skipIf(kvm_bridge_win is None, "needs PySide6")
 class ArrivalRoutingTest(unittest.TestCase):
     """`method` is decided before _on_arrival ever runs, by the inline lambdas that wire
     the responder's and sender.py's arrival_callback in WindowsApplication.__init__

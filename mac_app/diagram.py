@@ -1,5 +1,5 @@
 """The Crossing page's two drawings, in Core Animation layers so every change can move: the
-arrangement, which shows where the PC sits and what crosses, and the push strip, which shows how
+arrangement, which shows where the other machine sits and what crosses, and the push strip, which shows how
 far the pointer is pushed past the edge before it gives."""
 
 from __future__ import annotations
@@ -53,7 +53,7 @@ def _collapsed(frame, side):
 
 
 class ArrangementDiagram(AppKit.NSView):
-    """This Mac's screen with the PC's beside it on the chosen side, lit where a way in crosses."""
+    """This Mac's screen with the other machine's beside it on the chosen side, lit where a way in crosses."""
 
     HEIGHT = 186.0
 
@@ -188,7 +188,7 @@ class ArrangementDiagram(AppKit.NSView):
 
 
 class PushStrip(AppKit.NSView):
-    """The last stretch of this Mac's screen, the edge, and the PC beyond it, with the push past the
+    """The last stretch of this Mac's screen, the edge, and the other machine beyond it, with the push past the
     edge drawn in: its depth is the resistance, out of the ruler's 500 px."""
 
     HEIGHT = 44.0
@@ -230,7 +230,7 @@ class PushStrip(AppKit.NSView):
         for layer in (self.this, self.fill, self.edge, self.this_label, self.other_label, self.pointer):
             root.addSublayer_(layer)
         self.fraction = None
-        self.other_name = "PC"
+        self.other_name = "Other machine"
         self.setAccessibilityElement_(False)
         return self
 
@@ -240,7 +240,7 @@ class PushStrip(AppKit.NSView):
             self._draw(False)
 
     @objc.python_method
-    def show(self, fraction, other_name="PC"):
+    def show(self, fraction, other_name="Other machine"):
         fraction = min(1.0, max(0.0, float(fraction)))
         if fraction == self.fraction and other_name == self.other_name:
             return
@@ -262,7 +262,7 @@ class PushStrip(AppKit.NSView):
         if width <= 0:
             return
         edge = round(width * self.EDGE_AT)
-        # The full 500 px stops short of the PC's name, so the name is never under the push.
+        # The full 500 px stops short of the other machine's name, so the name is never under the push.
         room = width - edge - 120
         depth = room * self.fraction
         motion.transaction(animate)

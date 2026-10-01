@@ -6,6 +6,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspa
 
 from core import protocol
 from gestures import (
+    CHORD,
     DOCK_PHASE_ENDED,
     DOCK_SWIPE_HID_TYPE,
     GESTURE_TYPE,
@@ -19,6 +20,7 @@ from gestures import (
     NS_EVENT_PHASE_ENDED,
     DockSwipeClassifier,
     GestureTranslator,
+    chord_for,
     sign_table_for,
 )
 
@@ -44,20 +46,54 @@ class BrokenNSEvent:
         raise RuntimeError(f"synthetic failure reading {name!r}")
 
 
+def chord(action):
+    return [{"type": CHORD, "data": {"action": action}}]
+
+
 def zoom_in_triple():
-    return [
-        {"type": protocol.MSG_KEYDOWN, "data": {"key": "ctrl"}},
-        protocol.scroll_msg(dy=1, dx=0, mode="line"),
-        {"type": protocol.MSG_KEYUP, "data": {"key": "ctrl"}},
-    ]
+    return chord("zoom_in")
 
 
 def zoom_out_triple():
-    return [
-        {"type": protocol.MSG_KEYDOWN, "data": {"key": "ctrl"}},
-        protocol.scroll_msg(dy=-1, dx=0, mode="line"),
-        {"type": protocol.MSG_KEYUP, "data": {"key": "ctrl"}},
-    ]
+    return chord("zoom_out")
+
+
+def keys(messages):
+    return [(m["type"], m["data"].get("key")) for m in messages]
+
+
+class ChordShapeTests(unittest.TestCase):
+    """What a CHORD becomes once the machine it is sent to is known."""
+
+    def test_a_zoom_to_a_pc_is_control_wheel(self):
+        self.assertEqual(chord_for("zoom_in", "windows"), [
+            {"type": protocol.MSG_KEYDOWN, "data": {"key": "ctrl"}},
+            protocol.scroll_msg(dy=1, dx=0, mode="line"),
+            {"type": protocol.MSG_KEYUP, "data": {"key": "ctrl"}},
+        ])
+        self.assertEqual(chord_for("zoom_out", "windows")[1], protocol.scroll_msg(dy=-1, dx=0, mode="line"))
+
+    def test_a_page_swipe_to_a_pc_is_alt_arrow(self):
+        self.assertEqual(keys(chord_for("back", "windows")), [
+            (protocol.MSG_KEYDOWN, "alt"), (protocol.MSG_KEYDOWN, "left"), (protocol.MSG_KEYUP, "left"), (protocol.MSG_KEYUP, "alt")])
+        self.assertEqual(keys(chord_for("forward", "windows"))[1], (protocol.MSG_KEYDOWN, "right"))
+
+    def test_a_zoom_to_a_mac_is_command_plus_and_minus(self):
+        self.assertEqual(keys(chord_for("zoom_in", "mac")), [
+            (protocol.MSG_KEYDOWN, "cmd"), (protocol.MSG_KEYDOWN, "="), (protocol.MSG_KEYUP, "="), (protocol.MSG_KEYUP, "cmd")])
+        self.assertEqual(keys(chord_for("zoom_out", "mac"))[1], (protocol.MSG_KEYDOWN, "-"))
+
+    def test_a_page_swipe_to_a_mac_is_command_bracket(self):
+        self.assertEqual(keys(chord_for("back", "mac"))[:2], [(protocol.MSG_KEYDOWN, "cmd"), (protocol.MSG_KEYDOWN, "[")])
+        self.assertEqual(keys(chord_for("forward", "mac"))[1], (protocol.MSG_KEYDOWN, "]"))
+
+    def test_the_mac_chord_names_its_us_key_so_another_layout_still_presses_a_key(self):
+        downs = [m["data"] for m in chord_for("back", "mac") if m["type"] == protocol.MSG_KEYDOWN]
+        self.assertEqual(downs, [{"key": "cmd"}, {"key": "[", "us": "["}])
+
+    def test_an_unknown_action_is_refused(self):
+        with self.assertRaises(ValueError):
+            chord_for("sideways", "mac")
 
 
 class GestureTranslatorWantsTests(unittest.TestCase):
@@ -134,21 +170,11 @@ class SwipeTranslationTests(unittest.TestCase):
 
     def test_positive_delta_x_is_back(self):
         messages = self.translator.translate(SWIPE_TYPE, FakeNSEvent(deltaX=1.0))
-        self.assertEqual(messages, [
-            {"type": protocol.MSG_KEYDOWN, "data": {"key": "alt"}},
-            {"type": protocol.MSG_KEYDOWN, "data": {"key": "left"}},
-            {"type": protocol.MSG_KEYUP, "data": {"key": "left"}},
-            {"type": protocol.MSG_KEYUP, "data": {"key": "alt"}},
-        ])
+        self.assertEqual(messages, chord("back"))
 
     def test_negative_delta_x_is_forward(self):
         messages = self.translator.translate(SWIPE_TYPE, FakeNSEvent(deltaX=-1.0))
-        self.assertEqual(messages, [
-            {"type": protocol.MSG_KEYDOWN, "data": {"key": "alt"}},
-            {"type": protocol.MSG_KEYDOWN, "data": {"key": "right"}},
-            {"type": protocol.MSG_KEYUP, "data": {"key": "right"}},
-            {"type": protocol.MSG_KEYUP, "data": {"key": "alt"}},
-        ])
+        self.assertEqual(messages, chord("forward"))
 
     def test_vertical_only_swipe_is_ignored(self):
         messages = self.translator.translate(SWIPE_TYPE, FakeNSEvent(deltaX=0.0, deltaY=1.0))

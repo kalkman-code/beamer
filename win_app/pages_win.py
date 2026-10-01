@@ -15,26 +15,26 @@ PAGES = (
      "The machines paired with this PC, where input is right now, and the controls you reach for "
      "every day. Pair a machine here first."),
     ("crossing", "Crossing",
-     "Choose how the pointer or a key moves input to your Mac, and how hard the edge pushes back "
-     "first."),
+     "Choose how the pointer or a key moves input to the other machine, and how hard the edge "
+     "pushes back first."),
     ("keyboard", "Keyboard",
-     "How this PC's Ctrl and Windows keys arrive on your Mac, the keys and buttons that stay here, "
-     "and how fast your Mac's pointer moves here."),
+     "How this PC's Ctrl and Windows keys arrive on the other machine, the keys and buttons that stay "
+     "here, and how fast the other machine's pointer moves here."),
     ("design", "Design",
-     "How crossing looks on this PC: the light as you push toward your Mac, and where the pointer "
-     "lands."),
+     "How crossing looks on this PC: the light as you push toward the other machine, and where the "
+     "pointer lands."),
     ("connection", "Connection",
-     "Whether Windows Firewall lets your Mac in, this PC's address, port and shared token, and your "
-     "Mac's IP address, which pairing learns."),
+     "Whether Windows Firewall lets your other machines in, this PC's address, port and shared token, "
+     "and the other machine's IP address, which pairing learns."),
 )
 KEYS = tuple(page[0] for page in PAGES)
-# Under the purpose on the pages whose settings are this PC's alone, so nobody looks for the Mac's
-# on the PC: each app sets only its own machine.
+# Under the purpose on the pages whose settings are this PC's alone, so nobody looks for the other
+# machine's on the PC: each app sets only its own machine.
 SCOPE = {
-    "crossing": "For this PC only; your Mac keeps its own. Only which side your Mac is on is shared. This PC's "
-                "resistance is also what its pointer meets at your Mac's edge on the way back.",
-    "design": "For this PC's screen only; your Mac keeps its own.",
-    "keyboard": "For this PC's keyboard only; your Mac keeps its own.",
+    "crossing": "For this PC only; the other machine keeps its own. Only which side the other machine is on is shared. This PC's "
+                "resistance is also what its pointer meets at the other machine's edge on the way back.",
+    "design": "For this PC's screen only; the other machine keeps its own.",
+    "keyboard": "For this PC's keyboard only; the other machine keeps its own.",
 }
 # With Same on both machines on, under each row of the shared pages that stays this PC's own.
 OWN_ROW = "This PC only."
@@ -173,10 +173,10 @@ def toggle_part(parts, part, on) -> list:
     return [candidate for candidate in ("start", "middle", "end") if candidate in chosen]
 
 
-NOT_LEARNED_EDGE = "Not learned yet: your Mac tells this PC when it first connects, or choose a side."
+NOT_LEARNED_EDGE = "Not learned yet: choose a side here or on the other machine."
 
 
-def crossing_state_sentence(paired, heard, sending, connected, armed, paused, full_screen_app, name="your Mac") -> str:
+def crossing_state_sentence(paired, heard, sending, connected, armed, paused, full_screen_app, name="the other machine") -> str:
     """The Crossing page's line under Pause: why nothing can cross, first match wins, and only then
     whether crossing is on, held or paused. `name` is the machine it is about."""
     if not paired:
@@ -259,7 +259,7 @@ def trigger_phrase(key_name: str, style: str) -> str:
 def ways_summary(methods, edge, parts, corner, key_name, style) -> str:
     """The Ways in module's first line: every way input leaves for the Mac, in one sentence."""
     if not edge:
-        return "Nothing moves input to your Mac until it has connected once and told this PC which side it is on."
+        return "Nothing moves input to the other machine until this PC knows which side it is on."
     methods = set(methods)
     ways = []
     if "edge" in methods:
@@ -271,9 +271,9 @@ def ways_summary(methods, edge, parts, corner, key_name, style) -> str:
     if "shortcut" in methods:
         ways.append(f"hold {key_name}" if style == "hold" else f"press {key_name} twice")
     if not ways:
-        return "Nothing moves input to your Mac: choose at least one way below."
+        return "Nothing moves input to the other machine: choose at least one way below."
     joined = ways[0] if len(ways) == 1 else ", ".join(ways[:-1]) + " or " + ways[-1]
-    return f"Input moves to your Mac when you {joined}."
+    return f"Input moves to the other machine when you {joined}."
 
 
 # The arrangement diagram. Each side of this PC has an angle, and the Mac's screen travels round

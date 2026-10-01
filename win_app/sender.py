@@ -349,6 +349,7 @@ class LinkSender:
             return
         LOGGER.error("the link to %s went quiet; input returns to this PC", self._name(peer))
         self.links.close(peer)
+        self._forget_held(peer)
         self._feed(lambda o: o.link_down(peer))
 
     def on_key(self, name: str, down: bool, vk: Optional[int] = None, us: Optional[str] = None) -> bool:
@@ -576,6 +577,7 @@ class LinkSender:
                 self._accepts[peer] = accepts
             else:
                 self._accepts.pop(peer, None)
+                self._forget_held(peer)
             actions = self._owner.link_up(peer, accepts) if up else self._owner.link_down(peer)
             self._queue(actions)
         self._report(actions)
@@ -721,30 +723,44 @@ class LinkSender:
                 waiting.append(action)
                 return
             if isinstance(action, owner_module.SendClipboard):
-                self._clip_wait[peer] = collections.deque()
-                threading.Thread(target=self._clipboard_then_rest, args=(peer,), name="Beamer-links-clipboard", daemon=True).start()
+                waiting = self._clip_wait[peer] = collections.deque()
+                try:
+                    threading.Thread(target=self._clipboard_then_rest, args=(peer, waiting), name="Beamer-links-clipboard", daemon=True).start()
+                except RuntimeError:
+                    # No thread at shutdown: nothing must wait behind a read that never starts.
+                    del self._clip_wait[peer]
+                    raise
                 return
         self._send(peer, action.message)
 
-    def _clipboard_then_rest(self, peer: bytes) -> None:
+    def _clipboard_then_rest(self, peer: bytes, waiting) -> None:
+        """The clipboard for `peer`, then what `waiting` held behind it, in order. `waiting` belongs to
+        the link it was made on: once that link is lost (`_forget_held`) none of it is sent, as the
+        machine that reconnects will be taken afresh."""
         try:
-            self._send_clipboard(peer)
+            self._send_clipboard(peer, waiting)
         except Exception:
             LOGGER.exception("The clipboard could not be sent")
         while True:
             with self._clip_lock:
-                waiting = self._clip_wait[peer]
+                if self._clip_wait.get(peer) is not waiting:
+                    return
                 if not waiting:
                     del self._clip_wait[peer]
                     return
                 action = waiting.popleft()
             try:
                 if isinstance(action, owner_module.SendClipboard):
-                    self._send_clipboard(peer)
+                    self._send_clipboard(peer, waiting)
                 else:
                     self._send(peer, action.message)
             except Exception:
                 LOGGER.exception("A message held behind the clipboard could not be sent")
+
+    def _forget_held(self, peer: bytes) -> None:
+        """`peer`'s link is lost: what waited for its clipboard is for a link that is gone."""
+        with self._clip_lock:
+            self._clip_wait.pop(peer, None)
 
     def _send(self, peer: bytes, message: dict) -> None:
         kind = message["type"]
@@ -783,7 +799,7 @@ class LinkSender:
         else:
             style = self._setting("modifier_style", "semantic")
             try:
-                name = keytable.wire_name(physical, OWN_PLATFORM, entry.get("platform", "macos"), style)
+                name = keytable.wire_name(physical, OWN_PLATFORM, entry.get("platform") or "", style)
             except ValueError:
                 name = physical
             if message["type"] == protocol.MSG_KEYDOWN:
@@ -792,6 +808,7 @@ class LinkSender:
 
     def _send_failed(self, peer: bytes) -> None:
         self.links.close(peer)
+        self._forget_held(peer)
         self._feed(lambda o: o.link_down(peer))
 
     def _feed(self, call) -> None:
@@ -810,12 +827,15 @@ class LinkSender:
             self._clipboard_stamp = stamp
             self._owner.clipboard_changed()
 
-    def _send_clipboard(self, peer: bytes) -> None:
+    def _send_clipboard(self, peer: bytes, waiting) -> None:
         try:
             text, image = self._clipboard_module().get_contents()
         except Exception:
             LOGGER.exception("Failed to read the local clipboard for %s", self._name(peer))
             return
+        with self._clip_lock:
+            if self._clip_wait.get(peer) is not waiting:
+                return
         caps = self.links.caps(peer)
         if text and ("clipboard" not in caps or len(text.encode("utf-8")) > protocol.CLIPBOARD_MAX_BYTES):
             text = None

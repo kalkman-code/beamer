@@ -34,9 +34,10 @@ from bridge_fakes import (  # noqa: F401  (re-exported)
     crossing_config,
     make_config,
     quiet_logger,
+    settle,
 )
 from fake_link import OTHER_ID, PEER_ID, FakeLink, bring_up
-from gestures import DOCK_CONTROL_TYPE, MAGNIFY_TYPE, SWIPE_TYPE
+from gestures import CHORD, DOCK_CONTROL_TYPE, MAGNIFY_TYPE, SWIPE_TYPE
 from input_injector_mac import INJECTED_MARK
 
 
@@ -518,16 +519,16 @@ class ControllerTests(unittest.TestCase):
 
     def test_outbound_worker_survives_a_bad_message(self):
         # The only thread that drains the queue is never restarted, so a raise
-        # inside one message (the clipboard read every switch does) must force
-        # input local and leave the worker running for the next message.
+        # inside one message must force input local and leave the worker
+        # running for the next message.
         bring_up(self.controller)
         self.assertTrue(self.controller.set_redirecting(True))
-        self.controller.clipboard = types.SimpleNamespace(
-            get_contents=lambda: (_ for _ in ()).throw(RuntimeError("synthetic clipboard failure"))
-        )
-        self.controller.outbound.put_nowait(
-            {"type": "_local_clipboard", "data": {}, "peer": protocol.id_text(PEER_ID)}
-        )
+
+        def fail(message):
+            raise RuntimeError("synthetic routing failure")
+
+        self.controller.owner.input = fail
+        self.controller.outbound.put_nowait({"type": protocol.MSG_KEYDOWN, "data": {"key": "a"}})
         self.controller.stop_event.clear()
 
         def stop_after_one():
@@ -622,6 +623,7 @@ class ClipboardSyncTests(unittest.TestCase):
     def _take_with(self, clipboard):
         self.controller.clipboard = clipboard
         self.assertTrue(self.controller.set_redirecting(True))
+        settle(self.controller)
 
     def _arrives_from_a_machine_just_let_go(self, message):
         self.controller.set_redirecting(True)
@@ -827,13 +829,9 @@ class OverlayGestureTests(unittest.TestCase):
         self.assertTrue(self.controller.set_redirecting(True))
         self.controller.handle_overlay_gesture(MAGNIFY_TYPE, FakeGestureEvent(magnification=0.05))
         drained = drain(self.controller)
-        self.assertEqual(drained, [
-            {"type": protocol.MSG_KEYDOWN, "data": {"key": "ctrl"}},
-            protocol.scroll_msg(dy=1, dx=0, mode="line"),
-            {"type": protocol.MSG_KEYUP, "data": {"key": "ctrl"}},
-        ])
-        # Fed back through the normal outbound path, they reach the link
-        # the same way any other input event does.
+        self.assertEqual(drained, [{"type": CHORD, "data": {"action": "zoom_in"}}])
+        # Fed back through the normal outbound path, the chord reaches the
+        # link in the shape the PC at its end answers to.
         for message in drained:
             self.controller._process_outbound(message)
         self.assertEqual(
@@ -877,12 +875,7 @@ class OverlayGestureTests(unittest.TestCase):
         drained = []
         while not self.controller.outbound.empty():
             drained.append(self.controller.outbound.get_nowait())
-        self.assertEqual(drained, [
-            {"type": protocol.MSG_KEYDOWN, "data": {"key": "alt"}},
-            {"type": protocol.MSG_KEYDOWN, "data": {"key": "left"}},
-            {"type": protocol.MSG_KEYUP, "data": {"key": "left"}},
-            {"type": protocol.MSG_KEYUP, "data": {"key": "alt"}},
-        ])
+        self.assertEqual(drained, [{"type": CHORD, "data": {"action": "back"}}])
 
 
 class MediaKeyWiringTests(unittest.TestCase):
@@ -979,17 +972,17 @@ class GestureWiringTests(unittest.TestCase):
         returned = controller._event_tap_callback(None, SWIPE_TYPE, object(), None)
         self.assertIsNone(returned)
         drained = drain(controller)
-        self.assertEqual(drained, [
+        self.assertEqual(drained, [{"type": CHORD, "data": {"action": "back"}}])
+        # Fed back through the normal outbound path, the chord reaches the
+        # link in the shape the PC at its end answers to.
+        for message in drained:
+            controller._process_outbound(message)
+        self.assertEqual(link.sent, [
             {"type": protocol.MSG_KEYDOWN, "data": {"key": "alt"}},
             {"type": protocol.MSG_KEYDOWN, "data": {"key": "left"}},
             {"type": protocol.MSG_KEYUP, "data": {"key": "left"}},
             {"type": protocol.MSG_KEYUP, "data": {"key": "alt"}},
         ])
-        # Fed back through the normal outbound path, they reach the link
-        # the same way any other input event does.
-        for message in drained:
-            controller._process_outbound(message)
-        self.assertEqual(link.sent, drained)
 
     def test_gesture_while_not_redirecting_is_passed_through_untouched(self):
         calls = []
@@ -1044,12 +1037,7 @@ class GestureWiringTests(unittest.TestCase):
         drained = []
         while not controller.outbound.empty():
             drained.append(controller.outbound.get_nowait())
-        self.assertEqual(drained, [
-            {"type": protocol.MSG_KEYDOWN, "data": {"key": "alt"}},
-            {"type": protocol.MSG_KEYDOWN, "data": {"key": "left"}},
-            {"type": protocol.MSG_KEYUP, "data": {"key": "left"}},
-            {"type": protocol.MSG_KEYUP, "data": {"key": "alt"}},
-        ])
+        self.assertEqual(drained, [{"type": CHORD, "data": {"action": "back"}}])
 
     def test_gesture_capture_active_logged_once_on_first_success(self):
         logger = logging.getLogger("kvm-bridge-tests.gesture-capture")
@@ -1185,6 +1173,18 @@ class CrossingWiringTests(unittest.TestCase):
         kinds = [kind for kind, _ in self.feedback]
         self.assertEqual(kinds[-1], "cross")
         self.assertEqual(kinds.count("tick"), 3)
+
+    def test_a_machine_that_just_refused_is_not_pushed_at_until_its_back_off_ends(self):
+        # A push that cannot take it must not pin the pointer and glow as if it would.
+        self._push(12)
+        self.link.arrives(self.controller, protocol.refuse_msg(self.controller.owner.route, "owned"))
+        self.assertFalse(self.controller.redirecting)
+        self.feedback.clear()
+        FakeQuartz.reset_cursor_spies()
+        event, returned = self._move(1727.0, 558.0, 30)
+        event, returned = self._move(1727.0, 558.0, 30)
+        self.assertIs(returned, event)
+        self.assertEqual((FakeQuartz.warp_calls, self.feedback), ([], []))
 
     def test_this_macs_own_push_while_windows_drives_sends_the_pc_home_and_crosses(self):
         # Regression: this Mac's trackpad could not push back while the PC drove it. The push

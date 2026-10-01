@@ -10,6 +10,9 @@ owner, the pointer, the alerts, the clipboard) is tested without a socket.
 The wire itself (handshake, framing, acks, liveness) is core/tests/test_link.py's; the two ends
 together are test_mac_links.py's."""
 
+import threading
+
+from bridge_fakes import settle
 from core import protocol
 
 PEER_ID = bytes(range(1, 17))
@@ -37,13 +40,31 @@ class FakeLink:
         self.status = ""
         self.peer_locked = False
         self.dialled = None
-        self.sent = []
-        self.posted = []
+        self._sent = []
+        self._posted = []
         self.dropped = []
         self.followed = []
         self.samples = []
         self.full = False
         self._live = False
+        self._controller = None
+
+    # A take's clipboard is read on a thread of the controller's own, and what follows it for this
+    # link waits behind it: a test reading what was sent first waits for that thread to finish.
+
+    @property
+    def sent(self):
+        self._settle()
+        return self._sent
+
+    @property
+    def posted(self):
+        self._settle()
+        return self._posted
+
+    def _settle(self):
+        if self._controller is not None and threading.current_thread().name != "Beamer-clipboard":
+            settle(self._controller)
 
     def start(self):
         self.started = True
@@ -74,13 +95,13 @@ class FakeLink:
     def post(self, message):
         if not self._live or self.full:
             return False
-        self.posted.append(message)
+        self._posted.append(message)
         return True
 
     def send_input(self, message):
         if not self._live or self.full:
             return False
-        self.sent.append(message)
+        self._sent.append(message)
         return True
 
     def round_trips(self, max_age=30.0):
@@ -94,6 +115,7 @@ class FakeLink:
     def up(self, controller, ident=PEER_ID, name="Office PC", platform="windows", caps=CAPS, accepts=True, hw=None):
         """The handshake done, as the link would report it."""
         self._live = True
+        self._controller = controller
         self.peer_id = protocol.id_text(ident)
         self.peer_name, self.peer_platform = name, platform
         self.caps = frozenset(caps)
@@ -116,6 +138,7 @@ class FakeLink:
         if began is not None:
             message.began_at = began
         controller._link_message(self, message)
+        settle(controller)
 
     def types(self):
         return [message["type"] for message in self.posted]

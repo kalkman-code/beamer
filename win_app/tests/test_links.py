@@ -1,6 +1,7 @@
 """This PC's input going to its peers (WIRE.md sections 3 to 5): the zones, the owner's decisions
 carried out, the key names, the clipboard and the way home, against links that only record."""
 
+import time
 import unittest
 
 from links_rig import B, C, CAPS, HERE, Rig, edge_zone, make_config
@@ -368,6 +369,17 @@ class KeyTests(unittest.TestCase):
         rig.sender.on_key("ctrl", True, 0x5B)
         self.assertEqual([m["data"]["key"] for m in rig.sent(B, "keydown")], ["ctrl", "cmd"])
 
+    def test_a_peer_of_no_known_platform_is_a_pc_and_gets_every_key_as_itself(self):
+        # WIRE.md section 7: the PC family is Windows, Linux, Android and any unknown platform.
+        unknown = harness.entry(B, "Something", side="left")
+        del unknown["platform"]
+        rig = Rig(entries=[unknown])
+        rig.sender.set_redirecting(True)
+        rig.accept_take()
+        rig.sender.on_key("cmd", True, 0xA2)
+        rig.sender.on_key("ctrl", True, 0x5B)
+        self.assertEqual([m["data"]["key"] for m in rig.sent(B, "keydown")], ["ctrl", "cmd"])
+
     def test_a_release_repeats_the_name_its_press_went_under(self):
         self.sender.on_key("A", True, 0x41, "a")
         self.sender.on_key("a", False, 0x41, "a")
@@ -449,6 +461,37 @@ class ReviewTests(unittest.TestCase):
         rig.sender.on_key("a", True, 0x41, "a")
         self.assertTrue(self.wait(lambda: [m for t, m in rig.links.sent if t == B and m["type"] == "keydown"]))
         self.assertEqual([m["type"] for t, m in rig.links.sent if t == B], ["focus", "clipboard", "keydown"])
+
+    def test_pointer_moves_made_during_a_clipboard_read_go_one_by_one_as_made(self):
+        # Never summed: the far machine's edge feels each move where its pointer is (return_edge).
+        rig = self.two()
+        rig.clipboard.slow_get = 0.3
+        self.start_worker(rig)
+        rig.sender.set_redirecting(True)
+        for dx, dy in ((3, 1), (4, -2), (5, 0)):
+            rig.sender.on_motion(dx, dy)
+        self.assertTrue(self.wait(lambda: [m for t, m in rig.links.sent if t == B and m["type"] == "mousemove"]))
+        self.assertTrue(self.wait(lambda: not rig.sender._clip_wait))
+        moves = [m["data"] for t, m in rig.links.sent if t == B and m["type"] == "mousemove"]
+        self.assertEqual([(m["dx"], m["dy"]) for m in moves], [(3, 1), (4, -2), (5, 0)])
+
+    def test_a_link_lost_during_a_clipboard_read_drops_what_waited_and_a_retake_sends_the_clipboard_after_its_focus(self):
+        rig = self.two()
+        rig.clipboard.slow_get = 0.4
+        self.start_worker(rig)
+        rig.sender.set_redirecting(True)
+        self.assertTrue(self.wait(lambda: rig.sender._clip_wait))
+        rig.sender.on_key("a", True, 0x41, "a")
+        self.assertTrue(self.wait(lambda: rig.sender._clip_wait.get(B)))
+        rig.sender.on_link(B, False)
+        rig.sender.on_link(B, True, accepts=True)
+        mark = len(rig.links.sent)
+        rig.sender.set_redirecting(True)
+        self.assertTrue(self.wait(lambda: [m for t, m in rig.links.sent[mark:] if t == B and m["type"] == "clipboard"], 2.0))
+        self.assertTrue(self.wait(lambda: not rig.sender._clip_wait))
+        time.sleep(0.5)
+        after = [m["type"] for t, m in rig.links.sent[mark:] if t == B]
+        self.assertEqual(after, ["focus", "clipboard"])
 
     def test_a_peer_that_starts_accepting_input_arms_its_zone_at_once(self):
         rig = Rig(up=())

@@ -1281,7 +1281,7 @@ class ControlWindow(AppKit.NSObject):
         )
         after = (self.notch_after_select.value or 1200) / 1000
         self.notch_note.set(
-            f"Once the pointer is through to Windows the notch keeps playing for {after:g} seconds, so the "
+            f"Once the pointer is through to the other machine the notch keeps playing for {after:g} seconds, so the "
             "animation finishes instead of cutting off."
         )
         self._run_previews()
@@ -1294,7 +1294,7 @@ class ControlWindow(AppKit.NSObject):
         hold = self.style_select.value == "hold"
         motion.set_hidden(self.double_tap_head, hold)
         self.style_hint.set(
-            "Input is on Windows for as long as the key is held."
+            "Input is on the other machine for as long as the key is held."
             if hold
             else "Tap twice to switch; tap twice again to come back."
         )
@@ -1308,8 +1308,10 @@ class ControlWindow(AppKit.NSObject):
             f"{self.edge_select.value} edge of this screen so you can feel the size of it."
         )
         self.modifier_note.set({
-            "semantic": "Command arrives on Windows as Control, so Command-C copies there too, and Control arrives as the Windows key.",
-            "positional": "Each key arrives as the key in its place, so Command arrives as the Windows key.",
+            "semantic": "On a PC, Command arrives as Control, so Command-C copies there too, and Control arrives as the Windows key. "
+                        "Between two Macs every key arrives as itself.",
+            "positional": "On a PC, each key arrives as the key in its place, so Command arrives as the Windows key. "
+                          "Between two Macs every key arrives as itself.",
         }.get(self.modifier_select.value, "Custom: the key map in settings.json is kept as it is."))
 
     @objc.python_method
@@ -1843,17 +1845,17 @@ class ControlWindow(AppKit.NSObject):
 
     @objc.python_method
     def _speed_module(self):
-        """How the PC's mouse feels on this Mac: the PC sends what its own acceleration made of the
+        """How the other machine's mouse feels on this Mac: it sends what its own acceleration made of the
         hand's movement, and this Mac's settings decide the rest."""
         module = widgets.Module()
         figure, self.pointer_numeral = self._numeral("%")
-        module.add(self._head("The PC's pointer here", figure))
+        module.add(self._head("The other machine's pointer here", figure))
         self.pointer_ruler = widgets.Ruler(
             25, 400, (25, 100, 200, 300, 400), step=5, minor=25, on_change=self._speed_moved,
             title="Pointer speed", arrow_step=25,
         )
         module.add(self.pointer_ruler.view)
-        module.add(widgets.note("Pointer speed for the PC's mouse or trackpad while it drives this Mac.").view)
+        module.add(widgets.note("Pointer speed for the other machine's mouse or trackpad while it drives this Mac.").view)
         figure, self.scroll_numeral = self._numeral("%")
         module.add(self._head("Scrolling", figure))
         self.scroll_ruler = widgets.Ruler(
@@ -1861,7 +1863,7 @@ class ControlWindow(AppKit.NSObject):
             title="Scroll speed", arrow_step=25,
         )
         module.add(self.scroll_ruler.view)
-        self.reverse_scroll_box = widgets.Switch("Reverse the PC's scrolling", on_change=self._changed)
+        self.reverse_scroll_box = widgets.Switch("Reverse the other machine's scrolling", on_change=self._changed)
         module.add(self.reverse_scroll_box.view)
         return module
 
@@ -1926,7 +1928,7 @@ class ControlWindow(AppKit.NSObject):
         module.add(self.hold_box.view)
         module.add(self._own_note())
         module.add(widgets.note(
-            "Off, your pointer can leave a full-screen game or video, and the PC's pointer can come home "
+            "Off, your pointer can leave a full-screen game or video, and the other machine's pointer can come home "
             "through this Mac's edge. Useful if your keyboard has no key for the shortcut."
         ).view)
         return module
@@ -1970,11 +1972,11 @@ class ControlWindow(AppKit.NSObject):
         }
         module.add(widgets.grid([tile.view for tile in self.method_boxes.values()], 2))
         module.add(self._own_note(pages.OWN_NOTCH))
-        # The values are the side of this Mac the PC is on, which is also the edge that crosses.
+        # The values are the side of this Mac the other machine is on, which is also the edge that crosses.
         self.edge_select = widgets.Segmented(
             [("left", "Left"), ("right", "Right"), ("top", "Above"), ("bottom", "Below")], on_change=self._changed
         )
-        self.edge_row = widgets.field_row("Where the PC is", self.edge_select.view)[0]
+        self.edge_row = widgets.field_row("Where the other machine is", self.edge_select.view)[0]
         module.add(self.edge_row)
         self.edge_note = widgets.note(pages.NOTCH_OR_CORNER_NOTE)
         self.edge_note.view.setHidden_(True)
@@ -2052,13 +2054,13 @@ class ControlWindow(AppKit.NSObject):
         module = widgets.Module()
         module.add(widgets.eyebrow("Stays on this Mac"))
         module.add(widgets.note(
-            "These keys and buttons keep working on this Mac while its input is on Windows: a "
+            "These keys and buttons keep working on this Mac while its input is on another machine: a "
             "mouse's back button for this Mac's browser, say, or a volume key for its speakers."
         ).view)
         self.ignored_entries = []
         self.ignored_list = widgets.stack(spacing=6)
         module.add(self.ignored_list)
-        self.ignored_empty = widgets.note("Nothing yet. Every key and button goes to Windows while it has input.")
+        self.ignored_empty = widgets.note("Nothing yet. Every key and button goes to the other machine while it has input.")
         module.add(self.ignored_empty.view)
         self.ignored_recorder = widgets.IgnoredRecorder(
             KEY_NAME_TO_CODE.get(self.key_recorder.value), on_recorded=self._add_ignored
@@ -2127,8 +2129,8 @@ class ControlWindow(AppKit.NSObject):
         module.add(self.glow_box.view)
         module.add(self._own_note())
         module.add(widgets.note(
-            "Lights the edge, the corner or the notch as you push toward Windows. Switched off, crossing "
-            "still works; you feel it rather than see it. Windows sets how its own edge looks."
+            "Lights the edge, the corner or the notch as you push toward the other machine. Switched off, crossing "
+            "still works; you feel it rather than see it. Each machine sets how its own edge looks."
         ).view)
         self.landing_box = widgets.Switch("Show where the pointer lands", on_change=self._changed)
         self.landing_row = widgets.stack(spacing=8)
@@ -2394,12 +2396,12 @@ class ControlWindow(AppKit.NSObject):
     def _access_module(self):
         module = widgets.Module(spacing=10)
         self.access_status, self.access_button = self._permission_row(
-            module, "Accessibility", "Lets Beamer move this Mac's pointer and type on it when the PC drives.",
+            module, "Accessibility", "Lets Beamer move this Mac's pointer and type on it when another machine drives.",
             "requestAccessibility:",
         )
         module.add(widgets.hairline())
         self.input_status, self.input_button = self._permission_row(
-            module, "Input Monitoring", "Lets Beamer read this keyboard and trackpad, to send them to the PC.",
+            module, "Input Monitoring", "Lets Beamer read this keyboard and trackpad, to send them to another machine.",
             "requestInputMonitoring:",
         )
         self.capture_status = widgets.note()
@@ -2804,7 +2806,7 @@ class ControlWindow(AppKit.NSObject):
         mac = cfg.mac_address
         self.wake_state.set(self._shown(mac) if mac else "Not yet learned", ink="ink" if mac else "ink_3")
         self.wake_hint.set(
-            "Crossing to the PC while it sleeps sends a wake-up packet and waits for it."
+            "Crossing to the other machine while it sleeps sends a wake-up packet and waits for it."
             if mac
             else "Read from the network the first time this Mac connects; nothing to type."
         )
@@ -3290,6 +3292,17 @@ def parse_args(argv=None):
     return parser.parse_args(argv)
 
 
+def stay_awake(process_info=None):
+    """An activity that keeps macOS from napping Beamer or coalescing its timers, which made its
+    links answer seconds late and drop (test_app_nap.py); idle system sleep is still allowed. The
+    token returned must be kept for as long as Beamer runs."""
+    process_info = process_info or AppKit.NSProcessInfo.processInfo()
+    return process_info.beginActivityWithOptions_reason_(
+        AppKit.NSActivityUserInitiatedAllowingIdleSystemSleep | AppKit.NSActivityLatencyCritical,
+        "Beamer's links answer the other machines within two seconds",
+    )
+
+
 def main(argv=None):
     args = parse_args(argv)
     if sys.platform != "darwin":
@@ -3315,6 +3328,7 @@ def main(argv=None):
     book, identity = bridge.links_from_store(settings_store, VERSION)
     controller = WakingController(cfg, logger=logger, book=book, identity=identity, hardware=hardware_mac.hardware_address_towards)
     app = TrayApp(controller, settings_store, logger, hidden=args.hidden)
+    awake = stay_awake()  # noqa: F841  (held until Beamer quits)
     controller.start()
     try:
         app.run()

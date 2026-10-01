@@ -222,7 +222,6 @@ def changed(before, after):
     return any(before.get(key) != after.get(key) for key in CROSSING_KEYS + DESIGN_KEYS)
 
 
-# What the window says. `peer` is "PC" on the Mac and "Mac" on the PC.
 SHARED_PAGES = ("crossing", "design")
 
 

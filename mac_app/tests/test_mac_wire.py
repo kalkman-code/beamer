@@ -136,6 +136,9 @@ class TakingTheFarMachineTests(Wire):
         self.assertTrue(self.connected())
         self.controller.set_redirecting(True)
         self.assertTrue(wait_for(lambda: self.machine.responder.owner is not None))
+        # The take's own clipboard first, read on its own thread: a copy there before it lands is
+        # overwritten by it, as one made by input sent there could not be (input waits behind it).
+        self.assertTrue(wait_for(lambda: self.machine.clipboard.set_calls))
         self.machine.clipboard.copy("copied there")
         self.controller.set_redirecting(False)
         self.assertTrue(wait_for(lambda: ("copied there", None) in self.clipboard.set_calls), self.clipboard.set_calls)
