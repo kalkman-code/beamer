@@ -3326,6 +3326,17 @@ def parse_args(argv=None):
     return parser.parse_args(argv)
 
 
+def stay_awake(process_info=None):
+    """An activity that keeps macOS from napping Beamer or coalescing its timers, which made its
+    links answer seconds late and drop (test_app_nap.py); idle system sleep is still allowed. The
+    token returned must be kept for as long as Beamer runs."""
+    process_info = process_info or AppKit.NSProcessInfo.processInfo()
+    return process_info.beginActivityWithOptions_reason_(
+        AppKit.NSActivityUserInitiatedAllowingIdleSystemSleep | AppKit.NSActivityLatencyCritical,
+        "Beamer's links answer the other machines within two seconds",
+    )
+
+
 def main(argv=None):
     args = parse_args(argv)
     if sys.platform != "darwin":
@@ -3350,6 +3361,7 @@ def main(argv=None):
         cfg = editable_default_config()
     controller = WakingController(cfg, logger=logger)
     app = TrayApp(controller, settings_store, logger, hidden=args.hidden)
+    awake = stay_awake()  # noqa: F841  (held until Beamer quits)
     controller.start()
     try:
         app.run()
