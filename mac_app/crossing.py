@@ -80,10 +80,10 @@ def tick_fires(steps, pressure):
 @dataclass
 class Step:
     """What the bridge does with one movement event. `hold` means swallow it and warp the
-    pointer back to `pin`; `crossed` means hand input to Windows, arriving at `edge` (a Windows
-    edge) at `offset` along it. `mac_edge` and `region` describe the strip being pushed, for
-    the glow, and `via` names the method that owns that strip, so the notch can get its own
-    feedback; `pressure` is the fraction of the way to breakthrough."""
+    pointer back to `pin`; `crossed` means hand input to `peer`, the machine the zone leads to,
+    arriving at `edge` (that machine's edge) at `offset` along it. `mac_edge` and `region` describe
+    the strip being pushed, for the glow, and `via` names the method that owns that strip, so the
+    notch can get its own feedback; `pressure` is the fraction of the way to breakthrough."""
 
     pressure: float = 0.0
     hold: bool = False
@@ -95,6 +95,19 @@ class Step:
     mac_edge: str = None
     region: tuple = None
     via: str = None
+    peer: str = None
+
+
+@dataclass(frozen=True)
+class Ways:
+    """One machine's zones on this Mac (WIRE.md section 8): the kinds in use, the side it is on, the
+    thirds of that side and the corner. `peer` is its id, None for an engine built the 1.4.x way."""
+
+    peer: str
+    methods: frozenset
+    edge: str
+    parts: frozenset
+    corner: str
 
 
 class CrossingEngine:
@@ -106,11 +119,11 @@ class CrossingEngine:
         resistance_px=120,
         block_while_dragging=True,
         parts=("middle",),
+        ways=None,
     ):
-        self.methods = frozenset(methods)
-        self.edge = edge
-        self.parts = frozenset(parts)
-        self.corner = corner
+        if ways is None:
+            ways = [Ways(None, frozenset(methods), edge, frozenset(parts), corner)]
+        self.ways = list(ways)
         self.resistance_px = float(resistance_px)
         self.block_while_dragging = block_while_dragging
         self.reset()
@@ -126,9 +139,61 @@ class CrossingEngine:
             parts=crossing.get("edge_parts", ("middle",)),
         )
 
+    @classmethod
+    def from_zones(cls, crossing, zones, peers):
+        """An engine for every zone in use that leads to one of `peers` (settings entries, each with
+        its `id` and `side`): the machines this Mac can send to now. A machine with no side keeps its
+        corner and the notch, which do not need one."""
+        sides = {entry.get("id"): entry.get("side") for entry in peers if entry.get("id")}
+        found = {}
+        for zone in zones:
+            peer = zone.get("peer")
+            if zone.get("off") is True or peer not in sides:
+                continue
+            held = found.setdefault(peer, {"methods": set(), "parts": ("middle",), "corner": "top_right"})
+            kind = zone.get("kind")
+            if kind in ("edge", "part") and sides[peer] not in EDGES:
+                continue
+            if kind == "part":
+                held["parts"] = tuple(part for part in zone.get("parts") or () if part in return_edge.PARTS)
+            elif kind == "corner":
+                if zone.get("corner") not in CORNERS:
+                    continue
+                held["corner"] = zone["corner"]
+            elif kind not in ("edge", "notch"):
+                continue
+            held["methods"].add(kind)
+        ways = [Ways(peer, frozenset(held["methods"]), sides[peer] if sides[peer] in EDGES else "right",
+                     frozenset(held["parts"]), held["corner"])
+                for peer, held in found.items() if held["methods"]]
+        return cls(resistance_px=crossing["resistance_px"], block_while_dragging=crossing["block_while_dragging"],
+                   ways=ways)
+
     @property
     def armed(self):
-        return bool(self.methods & {"edge", "part", "corner", "notch"})
+        return any(way.methods & {"edge", "part", "corner", "notch"} for way in self.ways)
+
+    @property
+    def peers(self):
+        """The machines this engine's zones lead to."""
+        return {way.peer for way in self.ways if way.methods}
+
+    # The one machine's settings, for an engine built the 1.4.x way.
+    @property
+    def methods(self):
+        return self.ways[0].methods if self.ways else frozenset()
+
+    @property
+    def edge(self):
+        return self.ways[0].edge if self.ways else "right"
+
+    @property
+    def parts(self):
+        return self.ways[0].parts if self.ways else frozenset()
+
+    @property
+    def corner(self):
+        return self.ways[0].corner if self.ways else "top_right"
 
     def reset(self):
         self.touching = False
@@ -137,6 +202,7 @@ class CrossingEngine:
         self.mac_edge = None
         self.region = None
         self._quarter_reached = 0
+        self._peer = None
         self._last_at = None
         self._last_x = None
         self._last_y = None
@@ -149,9 +215,10 @@ class CrossingEngine:
         remaining = self.pressure - self._decay(now - self._last_at)
         return max(0.0, min(1.0, remaining / self.resistance_px))
 
-    def feed(self, x, y, dx, dy, bounds, now, notch_range=None, dragging=False, displays=None):
+    def feed(self, x, y, dx, dy, bounds, now, notch_range=None, dragging=False, displays=None, ready=None):
         """`displays` is each display's (left, top, right, bottom), which Part of the edge measures
-        its thirds along; without them it measures along `bounds`."""
+        its thirds along; without them it measures along `bounds`. `ready(peer)` says whether a
+        machine can take input now: one that cannot has no wall."""
         if self._last_at is not None:
             self.pressure = max(0.0, self.pressure - self._decay(now - self._last_at))
         self._last_at = now
@@ -161,20 +228,26 @@ class CrossingEngine:
             self.touching = False
             return self._release()
 
-        target = self._target(x, y, bounds, notch_range, displays)
+        target = self._target(x, y, bounds, notch_range, displays, ready=ready)
         # Whether the pointer is at an armed region at all, whatever the pressure: a slow push
         # drains to nothing between events and releases, but is still against the edge.
         self.touching = target is not None
         if target is None:
             return self._release()
-        mac_edge, region, diagonal, via = target
+        mac_edge, region, diagonal, via, peer = target
         outward, inward = self._push(mac_edge, diagonal, x, y, dx, dy, previous_x, previous_y, self._push_box)
         if via == "corner" and outward <= 0.0:
             # A straight push in the corner's box is still a push on the edge it sits on, as on the PC.
-            edge_target = self._target(x, y, bounds, notch_range, displays, corner=False)
+            edge_target = self._target(x, y, bounds, notch_range, displays, corner=False, ready=ready)
             if edge_target is not None:
-                mac_edge, region, diagonal, via = edge_target
+                mac_edge, region, diagonal, via, peer = edge_target
                 outward, inward = self._push(mac_edge, diagonal, x, y, dx, dy, previous_x, previous_y, self._push_box)
+        if self._peer is not None and peer != self._peer:
+            # Pressure built against one machine's zone is not a push on another's beside it.
+            self.pressure = 0.0
+            self.pin = None
+            self._quarter_reached = 0
+        self._peer = peer
         before = self.pressure
         self.pressure = max(0.0, self.pressure + outward - inward)
         if self.pressure <= 0.0:
@@ -194,6 +267,7 @@ class CrossingEngine:
                 mac_edge=mac_edge,
                 region=region,
                 via=via,
+                peer=peer,
             )
             self.reset()
             return step
@@ -211,6 +285,7 @@ class CrossingEngine:
             mac_edge=mac_edge,
             region=region,
             via=via,
+            peer=peer,
         )
 
     @staticmethod
@@ -243,6 +318,7 @@ class CrossingEngine:
         self.mac_edge = None
         self.region = None
         self._quarter_reached = 0
+        self._peer = None
         return Step()
 
     def _fraction(self, pressure):
@@ -255,9 +331,12 @@ class CrossingEngine:
             return 0
         return min(3, int(4 * pressure / self.resistance_px))
 
-    def _target(self, x, y, bounds, notch_range, displays=None, corner=True):
-        """Which armed region the pointer is touching, as (mac_edge, region, diagonal, method). The
-        corner wins over the edge it sits on, since its box is inside that edge's strip."""
+    def _target(self, x, y, bounds, notch_range, displays=None, corner=True, ready=None):
+        """Which armed region the pointer is touching, as (mac_edge, region, diagonal, method, peer).
+        Every machine's corners are checked first, then edges, then thirds, then the notch (WIRE.md
+        section 8): a corner wins over the edge it sits on, since its box is inside that edge's strip.
+        `ready(peer)`, when given, leaves out the zones of machines that cannot take input now."""
+        ways = [way for way in self.ways if ready is None or ready(way.peer)]
         left, top, right, bottom = bounds
         x_max, y_max = right - 1, bottom - 1
         at = {
@@ -267,36 +346,43 @@ class CrossingEngine:
             "bottom": y >= y_max - EDGE_TOLERANCE,
         }
         own = next((d for d in displays or () if d[0] <= x < d[2] and d[1] <= y < d[3]), None)
-        edge_box = bounds
-        if own is not None and not at[self.edge] and self._exposed(self.edge, x, y, own, displays):
-            # The edge of a display that stops short of the desktop's, with nothing beyond it: a
-            # wall all the same, as on the PC. Against the whole desktop it could never be reached.
-            at[self.edge] = True
-            edge_box = own
+        edge_box = {}
+        for edge in {way.edge for way in ways if way.methods & {"edge", "part"}}:
+            edge_box[edge] = bounds
+            if own is not None and not at[edge] and self._exposed(edge, x, y, own, displays):
+                # The edge of a display that stops short of the desktop's, with nothing beyond it: a
+                # wall all the same, as on the PC. Against the whole desktop it could never be reached.
+                at[edge] = True
+                edge_box[edge] = own
         # What the push is measured against: the display's own edge when that is the wall.
         self._push_box = bounds
-        if corner and "corner" in self.methods:
-            vertical, horizontal = self.corner.split("_")
+        for way in ways if corner else ():
+            if "corner" not in way.methods:
+                continue
+            vertical, horizontal = way.corner.split("_")
             near_x = x <= left + CORNER_PX if horizontal == "left" else x >= x_max - CORNER_PX
             near_y = y <= top + CORNER_PX if vertical == "top" else y >= y_max - CORNER_PX
             if near_x and near_y and (at[horizontal] or at[vertical]):
                 box_x = left if horizontal == "left" else x_max - CORNER_PX + 1
                 box_y = top if vertical == "top" else y_max - CORNER_PX + 1
-                return horizontal, (box_x, box_y, CORNER_PX, CORNER_PX), vertical, "corner"
-        if "edge" in self.methods and at[self.edge]:
-            self._push_box = edge_box
-            return self.edge, self._strip(self.edge, edge_box), None, "edge"
-        if "part" in self.methods and at[self.edge]:
-            # The thirds are the pointer's own display's, as the PC measures them: along the whole
-            # desktop, a short display beside a tall one could hold none of the middle third.
-            part = return_edge.part_of(self._offset(self.edge, (x, y), own or bounds))
-            if part in self.parts:
-                self._push_box = edge_box
-                return self.edge, self._part_strip(self.edge, own or bounds, part), None, "edge"
-        if "notch" in self.methods and notch_range is not None and at["top"]:
-            notch_left, notch_right = notch_range
-            if notch_left <= x <= notch_right:
-                return "top", (notch_left, top, notch_right - notch_left, 1), None, "notch"
+                return horizontal, (box_x, box_y, CORNER_PX, CORNER_PX), vertical, "corner", way.peer
+        for way in ways:
+            if "edge" in way.methods and at[way.edge]:
+                self._push_box = edge_box[way.edge]
+                return way.edge, self._strip(way.edge, edge_box[way.edge]), None, "edge", way.peer
+        for way in ways:
+            if "part" in way.methods and at[way.edge]:
+                # The thirds are the pointer's own display's, as the PC measures them: along the whole
+                # desktop, a short display beside a tall one could hold none of the middle third.
+                part = return_edge.part_of(self._offset(way.edge, (x, y), own or bounds))
+                if part in way.parts:
+                    self._push_box = edge_box[way.edge]
+                    return way.edge, self._part_strip(way.edge, own or bounds, part), None, "edge", way.peer
+        for way in ways:
+            if "notch" in way.methods and notch_range is not None and at["top"]:
+                notch_left, notch_right = notch_range
+                if notch_left <= x <= notch_right:
+                    return "top", (notch_left, top, notch_right - notch_left, 1), None, "notch", way.peer
         return None
 
     @staticmethod

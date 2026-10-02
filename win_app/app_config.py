@@ -1,10 +1,12 @@
 """Configuration loading and saving for the Windows tray application.
 
 The file is settings.json (WIRE.md section 1), migrated from 1.4.x's config.json on the first start
-and never written back to it. The app still works on one peer: `Config` is the flat view the window,
-the sender and the receiver have always read, and `peers[0]` and the zones of that peer feed the
-fields that used to be the Mac's (`mac_host`, `auth_token`, `send_to_mac`, `crossing_methods` and the
-rest). The settings carry whatever else the file holds through every save untouched."""
+and never written back to it. `Config` is the flat view the window, the sender and the receiver have
+always read: this PC's own settings, and `peers[0]` as the fields that used to be the Mac's
+(`mac_host`, `auth_token`, `send_to_mac` and the rest). Each peer's side and zones are written only by
+`set_ways` and `apply_arrangement`, one peer at a time, never by a save of the flat view, so a view read
+before another machine sent its side cannot put the old one back. The settings carry whatever else
+the file holds through every save untouched."""
 
 import base64
 import binascii
@@ -15,6 +17,7 @@ import logging
 import os
 import tempfile
 import threading
+import time
 from dataclasses import dataclass, field, fields, replace
 from pathlib import Path
 
@@ -24,6 +27,7 @@ from core import ignored
 from core import protocol
 from core import receiver
 from core import return_edge
+from core import ways
 from core.pairing import local_address_towards
 import tokens
 
@@ -41,17 +45,13 @@ TRIGGER_STYLES = ("double_tap", "hold")
 # Any named key that is not a character can be the trigger, recorded by pressing it, as on the
 # Mac: a modifier, a function key, a navigation key. Stored as its wire name, which is Mac-shaped --
 # "cmd_r" is the right Ctrl key on this keyboard -- so every trigger saved before the recorder
-# (eight fixed keys, 1.2 to 1.3.1) is still one. Media and browser keys are left out: they are
-# what the stays-on-this-PC list is for. The undifferentiated 0x10-0x12 never reach the hook.
-_NOT_TRIGGERS = {0x10, 0x11, 0x12} | set(range(0xA6, 0xB4))
+# (eight fixed keys, 1.2 to 1.3.1) is still one. Which keys are left out, and which are loaded but
+# never offered, are the capture's, in its own key codes.
 TRIGGER_VKS = {
-    name: vk for vk, name in capture_win.VK_TO_NAME.items() if vk not in _NOT_TRIGGERS
+    name: vk for vk, name in capture_win.VK_TO_NAME.items() if vk not in capture_win.NOT_TRIGGER_VKS
 }
 TRIGGER_KEYS = {name: capture_win.VK_TITLES[vk] for name, vk in TRIGGER_VKS.items()}
-# Loaded if a config names them, never offered by the recorder, as on the Mac: Backspace, Tab,
-# Enter, Esc and Space are typing keys a double-tap or a hold would take from every app, and
-# Windows gives a window no key-down for Print Screen, so it cannot be recorded at all.
-UNRECORDABLE_TRIGGER_VKS = {0x08, 0x09, 0x0D, 0x1B, 0x20, 0x2C}
+UNRECORDABLE_TRIGGER_VKS = capture_win.UNRECORDABLE_TRIGGER_VKS
 MODIFIER_STYLES = ("semantic", "positional")
 
 
@@ -66,6 +66,11 @@ def palette_colours(colour: str) -> tuple:
 
 class ConfigError(Exception):
     pass
+
+
+class ClashError(ConfigError):
+    """Two machines' zones would lead from one stretch of this PC's screen; the message is the
+    sentence that names both. Nothing was written."""
 
 
 class SettingsFileError(ConfigError):
@@ -99,7 +104,7 @@ class Config:
     check_updates: bool = True
     # Every address the window shows is hidden.
     hide_addresses: bool = False
-    # Same on both machines: the Crossing and Design pages kept in step with the Mac's, and the unix
+    # Same on all machines: the Crossing and Design pages kept in step with the Mac's, and the unix
     # seconds of the last change to that or to a shared value; see settings_sync.
     same_on_both: bool = False
     same_set_at: int = 0
@@ -110,8 +115,9 @@ class Config:
     scroll_speed: float = 1.0
     reverse_scroll: bool = False
     send_to_mac: bool = True
-    # How input leaves this PC. Any combination of the methods can be on, and
-    # none of them means the PC can only be driven, never drive.
+    # How input leaves this PC: "shortcut" is this PC's own and is saved from here; the rest, with the
+    # corner, the thirds, `mac_return_edge` and `arrangement_set_at`, are the first peer's ways as
+    # loaded, never saved from here (set_ways writes each peer's).
     crossing_methods: list = field(default_factory=lambda: ["edge", "shortcut"])
     crossing_corner: str = "top_left"
     # "Part of the edge": the thirds of the edge to the Mac that cross, as return_edge.PARTS names them.
@@ -130,11 +136,6 @@ class Config:
     # The Mac's address is learned, never typed: it is the peer address the
     # Mac's own link arrives from.
     mac_host: str = ""
-    # The edge of THIS PC that leads to the Mac, which is both the way home
-    # and the way out -- one border, walked either way. It can be set at
-    # either machine and is synced over the link, so `arrangement_set_at`
-    # (unix seconds) says how recently this end changed it and settles which
-    # of two ends that disagree is the newer.
     mac_return_edge: str = ""
     arrangement_set_at: int = 0
     # What the Mac asks for at the return edge. The PC's own push out has its
@@ -645,7 +646,8 @@ def load_settings(path: Path) -> dict:
     settings.setdefault("port", protocol.DEFAULT_PORT)
     settings.setdefault("shortcut", True)
     settings.setdefault("migrated_token_sha256", "")
-    if legacy is not None and remigrate(settings, legacy):
+    repaired = ways.ensure_zones(settings)
+    if (legacy is not None and remigrate(settings, legacy)) or repaired:
         _write_json(path, settings)
     return settings
 
@@ -717,9 +719,10 @@ def _flat_from_settings(settings: dict) -> dict:
 
 
 def _apply_flat(settings: dict, flat: dict) -> None:
-    """Write a Config's flat fields (from `config_to_dict`) into the settings, leaving every other
-    peer, zone and field as it was. A token that is not the first peer's is a new pairing: it
-    replaces that entry, and its zones point at the empty id until a link learns the new one."""
+    """Write a Config's flat fields (from `config_to_dict`) into the settings: this PC's own, and the
+    first peer's address, name and switches, never a side or a zone. A token that is not the first
+    peer's is a new pairing: it replaces that entry, and its zones point at the empty id until a link
+    learns the new one."""
     own_id = settings["machine_id"]
     settings.update({key: flat[key] for key in KEPT_FIELDS})
     old_port, settings["port"] = settings["port"], flat["port"]
@@ -731,6 +734,9 @@ def _apply_flat(settings: dict, flat: dict) -> None:
     peers = settings["peers"]
     if not peers or peers[0].get("token") != flat["auth_token"]:
         entry = _peer_entry(flat, flat["auth_token"], flat["port"], own_id)
+        held = peers[0] if peers else {}
+        # The side is the pair's, settled by `arrangement`, and is not the flat view's to set.
+        entry.update(side=held.get("side", ""), side_set_at=held.get("side_set_at", 0), side_by=held.get("side_by", ""))
         if peers:
             for zone in settings["zones"]:
                 if zone.get("peer") == peers[0].get("id"):
@@ -739,34 +745,14 @@ def _apply_flat(settings: dict, flat: dict) -> None:
         else:
             peers.insert(0, entry)
     peer = peers[0]
-    if (peer.get("side"), peer.get("side_set_at")) != (flat["mac_return_edge"], flat["arrangement_set_at"]):
-        peer["side_by"] = own_id if flat["arrangement_set_at"] else ""
-    peer.update(
-        name=flat["paired_with"], host=flat["mac_host"], hw=flat["mac_hardware_address"], send=flat["send_to_mac"],
-        allow_drive=flat["allow_mac_to_drive"], side=flat["mac_return_edge"], side_set_at=flat["arrangement_set_at"],
-    )
+    # Its name and hardware address are learnt on its link: written here only with a new address, which
+    # clears what was learnt at the old one, or a save from a window read before one was learnt would
+    # put the old one back.
+    if flat["mac_host"] != peer.get("host"):
+        peer.update(name=flat["paired_with"], hw=flat["mac_hardware_address"])
+    peer.update(host=flat["mac_host"], send=flat["send_to_mac"], allow_drive=flat["allow_mac_to_drive"])
     if flat["port"] != old_port and peer.get("port") == old_port:
         peer["port"] = flat["port"]
-    _apply_zones(settings, peer.get("id", ""), flat)
-
-
-def _apply_zones(settings: dict, peer_id: str, flat: dict) -> None:
-    """One zone of each kind for the peer, on or off as `crossing_methods` says, keeping the zone a
-    user had and its other fields."""
-    methods, corner, parts = _zone_fields(flat)
-    mine = _zones_of(settings, peer_id)
-    rest = {"edge": {}, "part": {"parts": list(parts)},
-            "corner": {"corner": corner, "edge": _corner_edge(corner, flat["mac_return_edge"])}}
-    for kind in KINDS:
-        zone = mine.get(kind)
-        if zone is None:
-            zone = {"peer": peer_id, "kind": kind}
-            settings["zones"].append(zone)
-        zone.update(rest[kind])
-        if kind in methods:
-            zone.pop("off", None)
-        else:
-            zone["off"] = True
 
 
 # Held around every read-change-write of settings.json, here and by the link's PeerBook (which takes
@@ -833,8 +819,8 @@ def set_own(path: Path, **fields) -> None:
 
 
 def learned_fields(path: Path) -> dict:
-    """What links write into the first peer's entry, in the flat view's names: its address, hardware
-    address and name, and the side and the stamp that settled it."""
+    """What links write into the first peer's entry, in the flat view's names: its token, address,
+    hardware address and name, and the two direction switches."""
     with SETTINGS_LOCK:
         flat = _flat_from_settings(load_settings(path))
     # With no peer there is nothing for links to have written, and the flat view has no such fields.
@@ -842,11 +828,8 @@ def learned_fields(path: Path) -> dict:
     return {name: flat[name] if name in flat else getattr(fallback, name) for name in LEARNED}
 
 
-# What links, arrangements and a fold write into the first peer or its zones, in the flat view's names.
-LEARNED = (
-    "auth_token", "mac_host", "mac_hardware_address", "paired_with", "mac_return_edge", "arrangement_set_at",
-    "send_to_mac", "allow_mac_to_drive", "crossing_methods", "crossing_edge_parts", "crossing_corner",
-)
+# What links and a fold write into the first peer, in the flat view's names.
+LEARNED = ("auth_token", "mac_host", "mac_hardware_address", "paired_with", "send_to_mac", "allow_mac_to_drive")
 # The ones a link writes while the window is not looking, which a save must never overwrite.
 LINK_WRITTEN = ("mac_host", "mac_hardware_address", "paired_with")
 
@@ -863,50 +846,40 @@ def set_peer_hardware_address(path: Path, peer: str, address: str) -> bool:
         return True
 
 
-def _side_order(entry: dict):
-    by = _unb64(entry.get("side_by"), 16) if entry.get("side_by") else b""
-    return int(entry.get("side_set_at") or 0), by or b""
-
-
-def apply_arrangement(path: Path, peer: str, edge: str, set_at: int, by: str):
-    """A peer's `arrangement` (WIRE.md section 8): `edge` is the edge of the peer that faces this PC, so
-    this PC's side for it is the opposite. Taken when it is newer than the side held (a higher stamp, or
-    the same stamp and the larger `by` as bytes). A side that would make two zones in use cover one
-    stretch is applied and turns this peer's clashing zones off. Returns (changed, notices): whether
-    the file was written, and a sentence for each zone turned off."""
+def set_ways(path: Path, peer: str, *, side=None, methods, parts, corner) -> bool:
+    """Writes one peer's ways across (WIRE.md section 8): its `side`, and its edge, part and corner
+    zones, in use when named in `methods`. `side` None keeps the side held now, so a change to a way
+    never puts back a side that arrived since the window last read it. Raises ClashError, writing
+    nothing, when two machines' zones would then cover one stretch of this PC's screen; ConfigError
+    when no entry has `peer`. Returns whether the side moved, which the caller sends as `arrangement`."""
     with SETTINGS_LOCK:
         settings = load_settings(path)
         entry = next((item for item in settings["peers"] if item.get("id") == peer), None)
-        by_bytes = _unb64(by, 16)
-        if entry is None or edge not in EDGES or by_bytes is None or (int(set_at), by_bytes) <= _side_order(entry):
-            return False, []
-        entry.update(side=return_edge.OPPOSITE[edge], side_set_at=int(set_at), side_by=by)
-        notices = _clear_overlaps(settings, entry)
+        if entry is None:
+            raise ConfigError("that machine is not paired with this PC")
+        moved = ways.edit(
+            settings, peer, side=entry.get("side", "") if side is None else side, methods=methods, parts=parts,
+            corner=corner, kinds=KINDS, corner_edge=_corner_edge, now=time.time(),
+        )
+        if moved:
+            # Moved onto a side another machine's edge holds: the side stands and this machine's way
+            # there goes off, as when the side arrives from it; the page says which machine holds it.
+            ways.settle(settings, peer, "this PC")
+        sentence = ways.clash(settings, "this PC")
+        if sentence is not None:
+            raise ClashError(sentence)
         _write_json(path, settings)
-        return True, notices
+        return moved
 
 
-def _clear_overlaps(settings: dict, entry: dict) -> list:
-    sides = {item.get("id", ""): item.get("side", "") for item in settings["peers"]}
-    names = {item.get("id", ""): item.get("name") or "another machine" for item in settings["peers"]}
-    covered = {}
-    mine = []
-    for zone in settings["zones"]:
-        if zone.get("off") is True:
-            continue
-        if zone.get("peer") == entry.get("id"):
-            mine.append(zone)
-            continue
-        for stretch in receiver.zone_stretch(zone, sides):
-            covered.setdefault(stretch, zone.get("peer"))
-    notices = []
-    for zone in mine:
-        stretch = receiver.zone_stretch(zone, sides)
-        clash = next((covered[item] for item in stretch if item in covered), None)
-        if clash is not None:
-            zone["off"] = True
-            notices.append(f"{names.get(clash)} and {names.get(entry.get('id'))} now lead from the same part of this PC's screen, so {names.get(entry.get('id'))}'s {zone.get('kind')} zone is off.")
-        else:
-            for item in stretch:
-                covered.setdefault(item, entry.get("id"))
-    return notices
+def apply_arrangement(path: Path, peer: str, edge: str, set_at: int, by: str, way_back=None):
+    """A peer's `arrangement` (WIRE.md section 8), as core.ways takes it: `edge` is the edge of the peer
+    that faces this PC, so this PC's side for it is the opposite, and `way_back` is kept whatever the
+    side. Returns (changed, notices): whether the file was written, and a sentence for each of that
+    peer's zones turned off by a clash."""
+    with SETTINGS_LOCK:
+        settings = load_settings(path)
+        changed, notices = ways.arrangement(settings, peer, edge, set_at, by, "this PC", way_back, _corner_edge)
+        if changed:
+            _write_json(path, settings)
+        return changed, notices

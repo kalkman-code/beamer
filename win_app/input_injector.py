@@ -10,6 +10,8 @@ import time
 import unicodedata
 from typing import Callable, Dict, List, Optional, Set, Tuple
 
+from core.keytable import EVDEV_US
+
 
 LOGGER = logging.getLogger(__name__)
 
@@ -43,11 +45,8 @@ INJECTED_MARK = 0xBEA3
 
 # What each key types on a US keyboard, by scan code, which names the key's place rather than its
 # label. Key messages carry it as `us` both ways, and a character this layout cannot type lands on
-# its place when it has to (_by_place).
-SCAN_TO_US: Dict[int, str] = dict(zip(range(0x02, 0x0E), "1234567890-="))
-SCAN_TO_US.update(zip(range(0x10, 0x1C), "qwertyuiop[]"))
-SCAN_TO_US.update(zip(range(0x1E, 0x2A), "asdfghjkl;'`"))
-SCAN_TO_US.update(zip(range(0x2B, 0x36), "\\zxcvbnm,./"))
+# its place when it has to (_by_place). Set-1 scan codes are evdev codes, so it is the key table's.
+SCAN_TO_US: Dict[int, str] = EVDEV_US
 US_SCAN_CODES = {char: scan for scan, char in SCAN_TO_US.items()}
 MAPVK_VSC_TO_VK = 1
 

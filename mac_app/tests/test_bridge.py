@@ -18,6 +18,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspa
 import config
 import media_keys
 from core import protocol
+from core.tests import pngs
 from bridge import (
     CONNECT_TIMEOUT_SECONDS,
     CROSSING_RETRY_SECONDS,
@@ -655,6 +656,10 @@ class ClipboardSyncTests(unittest.TestCase):
     def test_an_oversized_image_is_dropped_but_the_text_is_sent(self):
         big = protocol.PNG_SIGNATURE + b"\x00" * protocol.CLIPBOARD_IMAGE_MAX_BYTES
         self._take_with(FakeClipboard("shot.png", big))
+        self.assertEqual(self.link.posted[1], protocol.clipboard_msg("shot.png"))
+
+    def test_an_image_too_large_to_decode_is_dropped_but_the_text_is_sent(self):
+        self._take_with(FakeClipboard("shot.png", pngs.png(16384, 16384)))
         self.assertEqual(self.link.posted[1], protocol.clipboard_msg("shot.png"))
 
     def test_an_inbound_clipboard_sets_text_and_image(self):

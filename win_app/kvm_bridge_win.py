@@ -13,7 +13,7 @@ import time
 from typing import Optional
 
 from PySide6.QtCore import QEvent, QObject, QRectF, QSize, QTimer, Qt, QUrl, Signal
-from PySide6.QtGui import QColor, QDesktopServices, QIcon, QKeySequence, QPainter, QPixmap, QShortcut
+from PySide6.QtGui import QAction, QColor, QDesktopServices, QIcon, QKeySequence, QPainter, QPixmap, QShortcut
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -72,7 +72,8 @@ from core import receiver
 from core.receiver import LinkResponder, ServerState
 from core import return_edge
 from core import settings_sync
-from sender import LinkSender
+from core import ways
+from sender import OWN_PLATFORM, LinkSender
 import theme
 import tokens
 from core import updates
@@ -143,7 +144,7 @@ def asset_path(name: str) -> Path:
 ICON_PATH = asset_path("Beamer.ico")
 
 # The OS parts keep their Windows names so the code and its tests read as before; on Linux they are
-# linux_stand_ins' (platform_parts).
+# the X11 or the portal back ends (platform_parts).
 autostart_win = platform_parts.autostart
 capture_win = platform_parts.capture
 desktop_win = platform_parts.desktop
@@ -227,13 +228,11 @@ class StatusBridge(QObject):
     # A link learnt something about a peer and saved it, or came up or went down.
     peers_changed = Signal()
     # Either link, telling us a peer's side of the arrangement changed at its end: (peer id, the
-    # peer's edge that faces this PC, stamp, the machine that made the change).
-    arrangement = Signal(str, str, int, str)
+    # peer's edge that faces this PC, stamp, the machine that made the change, its way_back or None).
+    arrangement = Signal(str, str, int, str, object)
     # Either link, carrying a peer's Same on all machines state: (peer id, data).
     settings = Signal(str, object)
     alert = Signal(str, str)
-    # A sentence for the user from the link layer: a first link, a folded pairing.
-    notice = Signal(str)
     # (version, url) when a newer Beamer is out, else None.
     update = Signal(object)
     # The firewall rules are in place (or could not be), so the sockets may open.
@@ -264,7 +263,6 @@ class WindowsApplication(QWidget):
         self.bridge.peers_changed.connect(self._on_peers_changed)
         self.bridge.arrangement.connect(self._on_arrangement)
         self.bridge.settings.connect(self._on_settings)
-        self.bridge.notice.connect(self._on_alert_text)
         self.bridge.update.connect(self._on_update)
         self.bridge.rules_ready.connect(self._listen)
         self._update = None
@@ -276,6 +274,12 @@ class WindowsApplication(QWidget):
         self._pairing_machine = None
         self._pairing_target = ""
         self._peer_entries: list = []
+        self._zone_entries: list = []
+        # The machine the Crossing page shows and edits, by id; the first paired one until a choice.
+        self._chosen: Optional[str] = None
+        self._crossing_seen = None
+        self._machine_items: tuple = ()
+        self.machine_actions: dict = {}
         self._labels_by_id: dict = {}
         self._peers_tick = 0
         self._firewall_advice: Optional[firewall_win.Advice] = None
@@ -305,11 +309,10 @@ class WindowsApplication(QWidget):
             ),
             owner_callback=lambda peer: self.bridge.owner.emit(protocol.id_text(peer) if peer else ""),
             arrangement_callback=lambda peer, read: self.bridge.arrangement.emit(
-                protocol.id_text(peer), read["edge"], read["set_at"], protocol.id_text(read["by"])
+                protocol.id_text(peer), read["edge"], read["set_at"], protocol.id_text(read["by"]), read.get("way_back")
             ),
             settings_callback=lambda peer, data: self.bridge.settings.emit(protocol.id_text(peer), data),
             paired_callback=self._store_paired,
-            notice_callback=self.bridge.notice.emit,
             link_callback=lambda peer, up: self.bridge.peers_changed.emit(),
             announce=self._announce,
             away=lambda: self.sender.redirecting,
@@ -341,10 +344,9 @@ class WindowsApplication(QWidget):
         # this PC's own arrangement the moment a link comes up.
         self.sender.settings_callback = lambda peer, data: self.bridge.settings.emit(protocol.id_text(peer), data)
         self.sender.arrangement_callback = lambda peer, read: self.bridge.arrangement.emit(
-            protocol.id_text(peer), read["edge"], read["set_at"], protocol.id_text(read["by"])
+            protocol.id_text(peer), read["edge"], read["set_at"], protocol.id_text(read["by"]), read.get("way_back")
         )
         self.sender.link_callback = lambda peer, up: self.bridge.peers_changed.emit()
-        self.sender.notice_callback = self.bridge.notice.emit
         self.sender.paired_callback = self._store_paired
         self.sender.hw_learned = self._learn_peer_hardware
         self.sender.announce = self._announce
@@ -357,6 +359,20 @@ class WindowsApplication(QWidget):
         self.sender.on_alert = self.bridge.alert.emit
         self.bridge.alert.connect(self._on_alert)
         self.hooks = capture_win.Hooks(self._on_hook_key, self._on_hook_mouse, self.sender.on_motion)
+        # X11 cannot swallow one event, only grab the devices; the capture thread holds the grab
+        # for as long as input is away.
+        grab_while = getattr(self.hooks, "grab_while", None)
+        if grab_while is not None:
+            grab_while(lambda: self.sender.redirecting)
+            self.hooks.on_failure = self._capture_stopped
+        # Wayland: only the desktop captures input, at barriers on this machine's zones, and it
+        # may end a capture itself, which brings input home.
+        if hasattr(self.hooks, "barriers_from"):
+            self.hooks.barriers_from(self.sender.zone_models)
+            self.hooks.on_home = lambda: self.sender.set_redirecting(False)
+            self.sender.input_held = lambda: self.hooks.holding
+        if hasattr(platform_parts.injector, "on_problem"):
+            platform_parts.injector.on_problem = lambda sentence: self.bridge.alert.emit("Beamer", sentence)
         self._trigger = capture_win.Trigger()
         self._sending_detail = "Not connected"
         self.update_checker = updates.Checker(
@@ -637,14 +653,28 @@ class WindowsApplication(QWidget):
         self.hold_switch.setChecked(self._config.hold_full_screen if self._config else True)
         self.hold_switch.toggled.connect(self._set_hold_full_screen)
         module.body.addWidget(self.hold_switch)
-        module.body.addWidget(self._own_note())
-        module.body.addWidget(widgets.label(
+        own_note = self._own_note()
+        module.body.addWidget(own_note)
+        hold_note = widgets.label(
             "Off, your pointer can leave a full-screen game or video, and another machine's pointer can come "
-            "home through this PC's edge. Useful if your keyboard has no key for the shortcut.", "note", wrap=True))
+            "home through this PC's edge. Useful if your keyboard has no key for the shortcut.", "note", wrap=True)
+        module.body.addWidget(hold_note)
+        self.wayland_crossing_note = widgets.label(
+            "On Wayland Beamer cannot see a full-screen app, or a mouse button held before the pointer reaches an "
+            "edge, so the edges are never held for one and a drag can cross.", "note", wrap=True)
+        module.body.addWidget(self.wayland_crossing_note)
+        for widget in (self.hold_switch, own_note, hold_note):
+            widget.setVisible(not platform_parts.WAYLAND)
+        self.wayland_crossing_note.setVisible(platform_parts.WAYLAND)
         return module
 
     def _redirect_text(self) -> str:
+        """Names the machine the button sends input to, which is the one the shortcut would pick."""
+        target = self.sender.shortcut_target()
+        if target is not None and target in self._labels_by_id:
+            return f"Send input to {self._labels_by_id[target]}"
         sendable = [entry for entry in self._peer_entries if entry.get("send")]
+        # The entry migrated from 1.4.x has no id to pick it by until its first link.
         return f"Send input to {self._shown(peerlist.labels(self._peer_entries)[sendable[0]['token']])}" if len(sendable) == 1 else "Send input across"
 
     def toggle_redirect(self) -> None:
@@ -656,10 +686,9 @@ class WindowsApplication(QWidget):
 
     def _crossing_state_args(self) -> tuple:
         entries = self._peer_entries
-        methods = set(self._config.crossing_methods) if self._config is not None else set()
         return (
             bool(entries), any(entry.get("host") for entry in entries), self._any_send(),
-            bool(self.sender.peers_up()), bool(methods & {"edge", "part", "corner"}),
+            bool(self.sender.peers_up()), bool(self._ways_in()),
             self.sender.crossing_paused, self.sender.full_screen_app, self._machines_name(),
         )
 
@@ -687,12 +716,9 @@ class WindowsApplication(QWidget):
             QApplication.beep()
         self.tray.showMessage(title, self._shown(message), QIcon(str(ICON_PATH)), 4000)
 
-    def _on_alert_text(self, message: str) -> None:
-        self._on_alert("Beamer", message)
-
     def _same_module(self, current: Config) -> QWidget:
         module = widgets.Module("Settings")
-        self.same_switch = widgets.Switch("Same on both machines")
+        self.same_switch = widgets.Switch("Same on all machines")
         self.same_switch.setFont(theme.font(theme.TYPE["body"]))
         self.same_switch.setChecked(current.same_on_both)
         self.same_switch.toggled.connect(self._set_same)
@@ -777,7 +803,8 @@ class WindowsApplication(QWidget):
         messages = []
         author = protocol.read_id(entry.get("side_by")) or protocol.read_id(config.machine_id)
         if entry.get("side") in return_edge.EDGES and entry.get("side_set_at") and author is not None:
-            messages.append(protocol.arrangement_v6(entry["side"], entry["side_set_at"], author))
+            way_back = ways.has_way({"peers": peers, "zones": self.book.zones()}, entry["id"])
+            messages.append(protocol.arrangement_v6(entry["side"], entry["side_set_at"], author, way_back=way_back))
         if entry.get("send"):
             others = [protocol.read_id(item.get("id")) for item in peers if protocol.read_id(item.get("id")) not in (None, peer)]
             messages.append(protocol.paired_msg(others[: protocol.MAX_PEERS]))
@@ -801,9 +828,11 @@ class WindowsApplication(QWidget):
         return {
             "id": protocol.read_id(config.machine_id) or b"",
             "name": name,
-            "platform": "windows",
+            "platform": OWN_PLATFORM,
             "app": VERSION[:32] if VERSION.isascii() and VERSION.isprintable() else "dev",
-            "caps": ["clipboard", "clipboard_image", "gestures", "media_keys", "text", "settings"],
+            # A swipe has no shortcut every Linux desktop shares, so Linux does not offer gestures.
+            "caps": [cap for cap in ("clipboard", "clipboard_image", "gestures", "media_keys", "text", "settings")
+                     if not (cap == "gestures" and OWN_PLATFORM == "linux")],
             "port": self._settings_port,
         }
 
@@ -920,6 +949,18 @@ class WindowsApplication(QWidget):
 
     def _ways_module(self, current: Config) -> QWidget:
         module = widgets.Module("Ways in")
+        # Which machine everything below shows and edits; only there with more than one paired.
+        holder = QWidget()
+        holder.setProperty("vernier", "plain")
+        self._machine_slot = QVBoxLayout(holder)
+        self._machine_slot.setContentsMargins(0, 0, 0, 0)
+        self.machine_choice = widgets.Choice((), 1, "")
+        self._machine_slot.addWidget(self.machine_choice.view)
+        self.machine_row = self._row(widgets.label("Machine", "key"), holder)
+        # A wider step under the choice than between the rows it governs, so it reads as their heading.
+        self.machine_row.layout().setContentsMargins(0, 0, 0, 8)
+        self.machine_row.setVisible(False)
+        module.body.addWidget(self.machine_row)
         self.ways_summary = widgets.label("", "note", wrap=True)
         module.body.addWidget(self.ways_summary)
         self.arrangement_diagram = ArrangementDiagram()
@@ -927,7 +968,6 @@ class WindowsApplication(QWidget):
         self.way_boxes: dict = {}
         for value, text, detail in pages_win.WAY_ROWS:
             box = QCheckBox(text)
-            box.setChecked(value in current.crossing_methods)
             box.toggled.connect(lambda on, v=value: self._ways_changed(v, on))
             self.way_boxes[value] = box
             if not detail:
@@ -940,24 +980,26 @@ class WindowsApplication(QWidget):
             line.addWidget(widgets.label(detail, "small"))
             line.addStretch(1)
             module.body.addLayout(line)
+        # A way refused because it would share a stretch of this screen with another machine's.
+        self.clash_note = widgets.label("", "note-amber", wrap=True)
+        self.clash_note.setVisible(False)
+        module.body.addWidget(self.clash_note)
+        # What stops a way working, under the ways it is about: a side another machine's edge holds,
+        # a machine that may drive this PC and is not paired with the chosen one, and the chosen one
+        # saying none of its own ways leads back here.
+        self.blocked_note = widgets.label("", "note-amber", wrap=True)
+        self.missing_note = widgets.label("", "note", wrap=True)
+        self.no_way_back_note = widgets.label("", "note", wrap=True)
+        for note in (self.blocked_note, self.missing_note, self.no_way_back_note):
+            note.setVisible(False)
+            module.body.addWidget(note)
 
-        self.edge_choice = widgets.Choice(
-            EDGE_CHOICES, columns=4, current=current.mac_return_edge, on_change=self._set_arrangement
-        )
-        self.edge_choice.set_names("Where the other machine is")
-        self.edge_unlearned = widgets.label(pages_win.NOT_LEARNED_EDGE, "note", wrap=True)
-        self.edge_unlearned.setVisible(not current.mac_return_edge)
+        self.edge_choice = widgets.Choice(EDGE_CHOICES, columns=4, current="", on_change=self._set_arrangement)
+        self.edge_heading = widgets.label("", "key")
+        self.edge_note = widgets.label("", "note", wrap=True)
+        self.edge_unlearned = widgets.label(pages_win.not_learned_edge(), "note", wrap=True)
         self.crossing_rows = {
-            "edge": self._row(
-                widgets.label("Where the other machine is", "key"),
-                widgets.label(
-                    "One border, walked both ways, so changing it here moves it on the other machine too.",
-                    "note",
-                    wrap=True,
-                ),
-                self.edge_choice.view,
-                self.edge_unlearned,
-            ),
+            "edge": self._row(self.edge_heading, self.edge_note, self.edge_choice.view, self.edge_unlearned),
         }
 
         chips = QHBoxLayout()
@@ -969,16 +1011,13 @@ class WindowsApplication(QWidget):
             button.setCheckable(True)
             button.setMinimumHeight(widgets.MIN_TARGET)
             button.setCursor(Qt.CursorShape.PointingHandCursor)
-            button.setChecked(part in current.crossing_edge_parts)
             button.clicked.connect(lambda on, p=part: self._set_part(p, on))
             chips.addWidget(button, 1)
             self.part_buttons[part] = button
         self.parts_note = widgets.label("", "note", wrap=True)
         self.crossing_rows["parts"] = self._row(widgets.label("Parts", "key"), chips, self.parts_note)
 
-        self.corner_choice = widgets.Choice(
-            CORNER_CHOICES, columns=2, current=current.crossing_corner, on_change=self._set_corner
-        )
+        self.corner_choice = widgets.Choice(CORNER_CHOICES, columns=2, current="", on_change=self._set_corner)
         self.corner_choice.set_names("Corner")
         self.crossing_rows["corner"] = self._row(widgets.label("Corner", "key"), self.corner_choice.view)
 
@@ -992,77 +1031,191 @@ class WindowsApplication(QWidget):
 
         return module
 
+    # -- the machine the Crossing page shows --
+
+    def _crossing_settings(self) -> dict:
+        """The peers and zones as last read, in the shape core.ways reads them."""
+        own = self._config.machine_id if self._config is not None else ""
+        return {"machine_id": own, "peers": self._peer_entries, "zones": self._zone_entries}
+
+    def _read_crossing(self) -> None:
+        try:
+            self._peer_entries, self._zone_entries = self.book.peers(), self.book.zones()
+        except (ConfigError, OSError):
+            LOGGER.exception("The peers could not be read")
+
+    def _crossing_machines(self) -> list:
+        return [(ident, self._shown(label)) for ident, label in pages_win.crossing_machines(self._peer_entries)]
+
+    def _chosen_machine(self) -> Optional[str]:
+        ids = [ident for ident, _label in self._crossing_machines()]
+        return self._chosen if self._chosen in ids else (ids[0] if ids else None)
+
+    def _ways_in(self) -> set:
+        """The kinds of zone in use towards any machine: what Pause holds and the Design page previews."""
+        settings = self._crossing_settings()
+        found = set()
+        for ident, _label in self._crossing_machines():
+            if ways.has_way(settings, ident):
+                found.update(ways.ways(settings, ident)["methods"])
+        return found
+
+    def _choose_machine(self, peer: str) -> None:
+        self._chosen = peer
+        self._show_clash("")
+        self._reflect_ways()
+        self._reflect_look()
+
+    def _show_clash(self, sentence: str) -> None:
+        self.clash_note.setText(sentence)
+        motion.set_shown(self.clash_note, bool(sentence))
+
+    def _rebuild_machine_choice(self, machines: list) -> None:
+        """The machine choice again when the paired machines or their names change."""
+        items = tuple(machines)
+        if items == self._machine_items:
+            return
+        self._machine_items = items
+        old = self.machine_choice.view
+        # Three names fit a row at the narrowest window; four or more go two to a row.
+        columns = len(items) if len(items) <= 3 else 2
+        self.machine_choice = widgets.Choice(items, max(1, columns), "", on_change=self._choose_machine)
+        self.machine_choice.set_names("Machine")
+        self._machine_slot.replaceWidget(old, self.machine_choice.view)
+        old.deleteLater()
+
+    def _write_ways(self, **changes) -> bool:
+        """One change to the chosen machine's ways, written for that machine alone. A side that moved,
+        or a way there that opened or closed, goes to it as `arrangement` (`_tell`); a change that would
+        share a stretch of this screen with another machine's zone is refused, said, and every control
+        goes back."""
+        peer = self._chosen_machine()
+        if self._config is None or peer is None:
+            self._reflect_ways()
+            return False
+        self._read_crossing()
+        had_way = ways.has_way(self._crossing_settings(), peer)
+        held = ways.ways(self._crossing_settings(), peer)
+        held.update(changes)
+        try:
+            moved = app_config.set_ways(self.config_path, peer, side=changes.get("side"), methods=held["methods"],
+                                        parts=held["parts"], corner=held["corner"])
+        except app_config.ClashError as exc:
+            self._show_clash(self._shown(str(exc)))
+            self._reflect_ways()
+            return False
+        except (ConfigError, OSError):
+            LOGGER.exception("A machine's ways could not be saved")
+            self._reflect_ways()
+            return False
+        self._show_clash("")
+        self._read_crossing()
+        if moved or ways.has_way(self._crossing_settings(), peer) != had_way:
+            # One border, walked both ways: the machine on the other side of it moves its own side to match.
+            self._tell(peer)
+        # A change on the Crossing page reaches a peer's pointer while it is here, not at its next crossing.
+        self.server.peers_changed()
+        self.sender.refresh()
+        self._reflect_ways()
+        # The Design page's preview opens where the pointer crosses and says when a place is not a way in.
+        self._reflect_look()
+        return True
+
     def _ways_changed(self, way: str, on: bool) -> None:
         if self._config is None:
             return
-        self._config.crossing_methods = pages_win.toggle_way(self._config.crossing_methods, way, on)
-        self._persist()
-        self.sender.update_config(self._config)
-        self._reflect_ways()
-        # The Design page's preview opens where the pointer crosses and says when a place is not a way in.
-        self._reflect_look()
+        if way == "shortcut":
+            # The shortcut is this PC's own, whichever machine the page shows.
+            self._config.crossing_methods = pages_win.toggle_way(self._config.crossing_methods, way, on)
+            self._persist()
+            self.sender.update_config(self._config)
+            self._reflect_ways()
+            self._reflect_look()
+            return
+        held = ways.ways(self._crossing_settings(), self._chosen_machine())["methods"]
+        self._write_ways(methods=[kind for kind in pages_win.toggle_way(held, way, on) if kind != "shortcut"])
 
     def _set_part(self, part: str, on: bool) -> None:
-        if self._config is None:
-            return
-        self._config.crossing_edge_parts = pages_win.toggle_part(self._config.crossing_edge_parts, part, on)
-        self._persist()
-        self.sender.update_config(self._config)
-        self._reflect_ways()
-        # The Design page's preview opens where the pointer crosses and says when a place is not a way in.
-        self._reflect_look()
+        held = ways.ways(self._crossing_settings(), self._chosen_machine())["parts"]
+        self._write_ways(parts=pages_win.toggle_part(held, part, on))
 
     def _reflect_ways(self) -> None:
-        """The ways' boxes, the parts' chips and which rows show, from the config: a row a chosen
-        way does not use is hidden, not dimmed, and comes back the moment one does."""
+        """The machine choice, the ways' boxes, the parts' chips and which rows show, for the chosen
+        machine: a row a chosen way does not use is hidden, not dimmed, and comes back the moment one
+        does."""
         config = self._config or default_config()
+        settings = self._crossing_settings()
+        machines = self._crossing_machines()
+        chosen = self._chosen_machine()
+        several = len(machines) > 1
+        self._rebuild_machine_choice(machines if several else [])
+        self.machine_choice.set_value(chosen)
+        motion.set_shown(self.machine_row, several)
+        name = dict(machines).get(chosen) if several else None
+        name = name or "the other machine"
+        held = ways.ways(settings, chosen)
+        shortcut = "shortcut" in config.crossing_methods
+        methods = held["methods"] + (["shortcut"] if shortcut else [])
         for value, box in self.way_boxes.items():
-            if box.isChecked() != (value in config.crossing_methods):
+            if box.isChecked() != (value in methods):
                 box.blockSignals(True)
-                box.setChecked(value in config.crossing_methods)
+                box.setChecked(value in methods)
                 box.blockSignals(False)
-        edge = config.mac_return_edge or "right"
+        side = held["side"]
+        self.edge_choice.set_value(side)
+        self.edge_choice.set_names(f"Where {name} is")
+        self.edge_heading.setText(f"Where {name} is")
+        self.edge_note.setText(f"One border, walked both ways, so changing it here moves it on {name} too.")
+        self.edge_unlearned.setText(pages_win.not_learned_edge(name))
+        self.corner_choice.set_value(held["corner"])
+        edge = side or "right"
         names = pages_win.part_names(edge)
         for part, button in self.part_buttons.items():
             button.setText(names[part])
-            button.setChecked(part in config.crossing_edge_parts)
+            button.setChecked(part in held["parts"])
         self.parts_note.setText(
-            f"Crosses only along {pages_win.parts_phrase(edge, config.crossing_edge_parts)}; the rest of "
+            f"Crosses only along {pages_win.parts_phrase(edge, held['parts'])}; the rest of "
             "it is a wall. Choose any, but at least one."
         )
-        shown = pages_win.crossing_rows(config.crossing_methods)
+        # Resistance and the drag guard are this PC's own, there while any machine has a zone.
+        own = {"dragging", "resistance"} & pages_win.crossing_rows(self._ways_in() | set(methods))
+        shown = (pages_win.crossing_rows(methods) - {"dragging", "resistance"}) | own
         for key, row in self.crossing_rows.items():
-            motion.set_shown(row, key in shown)
+            # Wayland shows no button held before the pointer meets the edge (wayland_crossing_note).
+            motion.set_shown(row, key in shown and not (key == "dragging" and platform_parts.WAYLAND))
         motion.set_shown(self.resistance_module, "resistance" in shown)
         motion.set_shown(self.shortcut_module, "shortcut" in shown)
         key_name = TRIGGER_KEYS.get(config.trigger_key, config.trigger_key)
-        summary = pages_win.ways_summary(config.crossing_methods, config.mac_return_edge, config.crossing_edge_parts,
-                                         config.crossing_corner, key_name, config.trigger_style)
+        summary = pages_win.ways_summary(methods, side, held["parts"], held["corner"], key_name, config.trigger_style,
+                                         name, several)
         if summary != self.ways_summary.text():
             shot = motion.snapshot(self.ways_summary)
             self.ways_summary.setText(summary)
             motion.fade_from(self.ways_summary, shot)
-        motion.set_shown(self.edge_unlearned, not config.mac_return_edge)
-        self.arrangement_diagram.set_state(edge, config.crossing_methods, config.crossing_edge_parts,
-                                           config.crossing_corner, key_name, config.trigger_style)
+        motion.set_shown(self.edge_unlearned, not side)
+        for note, sentence in (
+                (self.blocked_note, ways.blocked_sentence(settings, chosen, "this PC") if chosen else ""),
+                (self.missing_note, ways.missing_sentence(settings, chosen, "this PC") if chosen else ""),
+                (self.no_way_back_note, ways.no_way_back_sentence(settings, chosen) if chosen else "")):
+            sentence = self._shown(sentence)
+            if sentence != note.text():
+                note.setText(sentence)
+            motion.set_shown(note, bool(sentence))
+        drawn = []
+        for ident, label in machines or [("", "")]:
+            found = ways.ways(settings, ident) if ident or machines else {"side": "", "methods": [], "parts": ["middle"],
+                                                                         "corner": "top_left"}
+            drawn.append(dict(found, key=ident, label=label, chosen=ident == chosen or not machines))
+        self.arrangement_diagram.set_machines(drawn, key_name, config.trigger_style, shortcut)
         self.resistance_strip.set_edge(edge)
 
     def _set_arrangement(self, pc_edge: str) -> None:
-        """The edge of THIS PC that leads to the Mac -- one border, walked either way. Not an
-        ordinary save: both machines have to agree on it, so this end's change is timestamped
-        and sent over whichever link is up."""
-        if self._config is None or pc_edge == self._config.mac_return_edge:
+        """The edge of THIS PC that leads to the chosen machine -- one border, walked either way. Not
+        an ordinary change: both machines have to agree on it, so this end's change is stamped and
+        sent to that machine over whichever link is up."""
+        if ways.ways(self._crossing_settings(), self._chosen_machine())["side"] == pc_edge:
             return
-        self._config.mac_return_edge = pc_edge
-        self._config.arrangement_set_at = settings_sync.next_stamp(self._config.arrangement_set_at, time.time())
-        self._persist()
-        peer = self._first_peer()
-        own = protocol.read_id(self._config.machine_id)
-        if peer is not None and own is not None:
-            self._send_to(peer, protocol.arrangement_v6(pc_edge, self._config.arrangement_set_at, own))
-        self.sender.update_config(self._config)
-        self._reflect_look()
-        self._reflect_ways()
+        self._write_ways(side=pc_edge)
 
     def _set_hold_full_screen(self, enabled: bool) -> None:
         if self._config is None:
@@ -1079,29 +1232,32 @@ class WindowsApplication(QWidget):
         self.sender.update_config(self._config)
 
     def _set_corner(self, corner: str) -> None:
-        if self._config is None:
+        self._write_ways(corner=corner)
+
+    def _tell(self, peer: str) -> None:
+        """This PC's side for `peer` as held, stamped as held, with whether a way leads there (WIRE.md
+        section 8), over whichever link is up. Nothing while no side is set."""
+        settings = self._crossing_settings()
+        entry = next((item for item in settings["peers"] if item.get("id") == peer), None)
+        if entry is None or entry.get("side") not in return_edge.EDGES or not entry.get("side_set_at"):
             return
-        self._config.crossing_corner = corner
-        self._persist()
-        self.sender.update_config(self._config)
-        self._reflect_ways()
+        author = protocol.read_id(entry.get("side_by")) or protocol.read_id(self._config.machine_id)
+        target = protocol.read_id(peer)
+        if author is None or target is None:
+            return
+        self._send_to(target, protocol.arrangement_v6(entry["side"], entry["side_set_at"], author,
+                                                      way_back=ways.has_way(settings, peer)))
 
-    def _first_peer(self) -> Optional[bytes]:
-        """The peer the window shows (`peers[0]`), once it has an id."""
-        try:
-            peers = self.book.peers()
-        except Exception:
-            return None
-        return protocol.read_id(peers[0].get("id")) if peers else None
-
-    def _on_arrangement(self, peer: str, edge: str, set_at: int, by: str) -> None:
+    def _on_arrangement(self, peer: str, edge: str, set_at: int, by: str, way_back=None) -> None:
         """A peer changed the arrangement, over either link. `edge` is the edge of the PEER that
         faces this PC; one older than what this end holds, by stamp and then by id, is ignored. A
-        side that makes two zones cover one stretch turns the peer's clashing zones off."""
+        side that makes two zones cover one stretch turns the peer's clashing zones off. `way_back`
+        is kept whatever the side; a message that changed anything here is answered with this PC's
+        own, and one that changed nothing is not, so two machines never answer in turn."""
         if self._config is None:
             return
         try:
-            changed, notices = app_config.apply_arrangement(self.config_path, peer, edge, set_at, by)
+            changed, notices = app_config.apply_arrangement(self.config_path, peer, edge, set_at, by, way_back)
         except (ConfigError, OSError):
             LOGGER.exception("An arrangement could not be saved")
             return
@@ -1112,9 +1268,11 @@ class WindowsApplication(QWidget):
         self._pull_peer_fields()
         self.sender.refresh()
         self.server.peers_changed()
+        self._tell(peer)
 
     def _pull_peer_fields(self) -> None:
-        """What links and arrangements wrote into the first peer, into the window's flat view."""
+        """What links wrote into the first peer, into the window's flat view, and every machine's side
+        and zones as links and arrangements left them, into the Crossing page."""
         if self._config is None:
             return
         try:
@@ -1125,14 +1283,14 @@ class WindowsApplication(QWidget):
         for name, value in learned.items():
             setattr(self._config, name, value)
         self.sender.update_config(self._config)
-        self.edge_choice.set_value(self._config.mac_return_edge)
+        self._read_crossing()
         self._reflect_look()
         self._reflect_ways()
 
     def _resistance_module(self, current: Config) -> QWidget:
         module = widgets.Module("Resistance")
         self.resistance_strip = PushStrip()
-        self.resistance_strip.set_edge(current.mac_return_edge or "right")
+        self.resistance_strip.set_edge("right")
         self.resistance_strip.set_value(current.crossing_resistance_px)
         module.body.addWidget(self.resistance_strip)
         row = QHBoxLayout()
@@ -1177,9 +1335,9 @@ class WindowsApplication(QWidget):
         layout.addWidget(self._speed_module(current))
 
     def _speed_module(self, current: Config) -> QWidget:
-        """How the other machine's pointer feels on this PC: it sends what its own acceleration made of
+        """How a driving machine's pointer feels on this PC: it sends what its own acceleration made of
         the hand's movement, and this PC's settings decide the rest."""
-        module = widgets.Module("The other machine's pointer here")
+        module = widgets.Module("Another machine's pointer here")
         self.speed_sliders = {}
         self.speed_readouts = {}
         for key, name, value in (("pointer_speed", "Pointer speed", current.pointer_speed),
@@ -1196,9 +1354,9 @@ class WindowsApplication(QWidget):
             module.body.addLayout(row)
             self.speed_sliders[key], self.speed_readouts[key] = slider, readout
         module.body.addWidget(widgets.label(
-            "For the other machine's trackpad or mouse while it drives this PC.", "note", wrap=True
+            "For the trackpad or mouse of whichever machine drives this PC.", "note", wrap=True
         ))
-        self.reverse_scroll_switch = widgets.Switch("Reverse the other machine's scrolling")
+        self.reverse_scroll_switch = widgets.Switch("Reverse scrolling from other machines")
         self.reverse_scroll_switch.setFont(theme.font(theme.TYPE["body"]))
         self.reverse_scroll_switch.setChecked(current.reverse_scroll)
         self.reverse_scroll_switch.toggled.connect(self._reverse_scroll_changed)
@@ -1279,7 +1437,7 @@ class WindowsApplication(QWidget):
             "These keep working on this PC while its input is on another machine: a mouse's back button for "
             "this PC's browser, say, or a volume key for its speakers."
             if entries
-            else "Nothing yet. Every key and button goes to the other machine while it has input. Add one to keep "
+            else "Nothing yet. Every key and button goes to the machine that has input. Add one to keep "
             "it here: a mouse's back button for this PC's browser, say, or a volume key for its speakers."
         )
         self.ignored_note.setText(text)
@@ -1318,9 +1476,15 @@ class WindowsApplication(QWidget):
         module = widgets.Module("Shortcut")
         module.body.addWidget(
             widgets.label(
-                "Use this key to send input to the other machine, and to bring it back.", "note", wrap=True
+                "Use this key to send input to another machine, and to bring it back.", "note", wrap=True
             )
         )
+        self.wayland_shortcut_note = widgets.label(
+            "On Wayland the shortcut only brings input back: the desktop lets input go to another machine only "
+            "when the pointer pushes through an edge, and keys on the Stays on this PC list cannot stay here "
+            "while input is away.", "note", wrap=True)
+        self.wayland_shortcut_note.setVisible(platform_parts.WAYLAND)
+        module.body.addWidget(self.wayland_shortcut_note)
         self.trigger_recorder = widgets.InputRecorder(
             TRIGGER_KEYS.get(current.trigger_key, current.trigger_key),
             self._record_trigger,
@@ -1394,7 +1558,7 @@ class WindowsApplication(QWidget):
 
     def _update_style_hint(self, style: str) -> None:
         text = (
-            "Input is on the other machine for as long as the key is held."
+            "Input is on another machine for as long as the key is held."
             if style == "hold"
             else "Tap twice to switch; tap twice again to come back."
         )
@@ -1449,7 +1613,7 @@ class WindowsApplication(QWidget):
         module.body.addWidget(self._own_note())
         module.body.addWidget(
             widgets.label(
-                "Lights this PC as you push toward the other machine. Switched off, crossing still works. "
+                "Lights this PC as you push toward another machine. Switched off, crossing still works. "
                 "Each machine sets how its own edge looks.",
                 "note",
                 wrap=True,
@@ -1475,7 +1639,6 @@ class WindowsApplication(QWidget):
 
     def _edge_look_module(self, current: Config) -> QWidget:
         module = widgets.Module("Style and colour")
-        edge = current.mac_return_edge or "right"
         colours = app_config.palette_colours(current.glow_colour)
         # Which animation the tiles below choose. Not saved: it only says which one is being worked on.
         self.design_mode_choice = widgets.Choice(
@@ -1587,9 +1750,9 @@ class WindowsApplication(QWidget):
             self.design_mode_choice.set_value("crossing")
         switching = landing and self.design_mode_choice.value == "switch"
         style = self.glow_style_choice.value
-        edge = (self._config.mac_return_edge if self._config is not None else "") or "right"
+        edge = ways.ways(self._crossing_settings(), self._chosen_machine())["side"] or "right"
         colour = self.glow_colour_choice.value or "signal"
-        methods = self._config.crossing_methods if self._config is not None else ()
+        methods = sorted(self._ways_in())
         if not self._place_chosen:
             # Until a place is picked here, the preview opens where the pointer actually crosses.
             self.effect_method_choice.set_value(pages_win.preview_place(methods))
@@ -1630,7 +1793,10 @@ class WindowsApplication(QWidget):
                   else effects.CLASSIC.get(style)) or effects.CLASSIC["glow"]
             self.effect_name.setText(f"{fx.name}, {fx.intensity}")
         self.effect_note.setText(
-            "The effects stopped working and are off until Beamer restarts, so crossings show Glow in "
+            "On Wayland the desktop does not let Beamer draw at the edges of the screen, so crossings show no "
+            "effect on this machine. The other machines still show theirs."
+            if platform_parts.WAYLAND
+            else "The effects stopped working and are off until Beamer restarts, so crossings show Glow in "
             "the same colours. The log says why."
             if self._effects_failed
             else f"{fx.blurb} It plays around the pointer when the shortcut or a menu brings input to this PC."
@@ -1672,7 +1838,7 @@ class WindowsApplication(QWidget):
     def _persist(self) -> bool:
         if self._config is None:
             return False
-        # A change to a shared setting while Same on both machines is on is stamped here, where
+        # A change to a shared setting while Same on all machines is on is stamped here, where
         # every page's changes are saved, and sent once saved.
         fields = self._same_fields()
         shared = self._same_seen is not None and fields != self._same_seen and self._config.same_on_both
@@ -1726,7 +1892,7 @@ class WindowsApplication(QWidget):
             return None
         name = settings.get("name") or pairing.machine_name()
         return PairingService(
-            name, identity, "windows", self._announced_port, self.book.peers, self._store_peer,
+            name, identity, OWN_PLATFORM, self._announced_port, self.book.peers, self._store_peer,
             on_paired=self.bridge.paired.emit, logger=LOGGER,
         )
 
@@ -1737,8 +1903,8 @@ class WindowsApplication(QWidget):
         with app_config.SETTINGS_LOCK:
             settings = app_config.load_settings(self.config_path)
             if replaced is not None:
-                # `replaced` was read before this lock: a link may have learnt the migrated entry's
-                # id or linked it since, or it may be gone (WIRE.md section 6, item 4).
+                # `replaced` was read before this lock: it may have changed or gone since
+                # (WIRE.md section 6, item 4).
                 held = next((peer for peer in settings["peers"] if peer.get("token") == replaced.get("token")), None)
                 if held is None or held.get("id") != replaced.get("id") or held.get("linked") != replaced.get("linked"):
                     raise ConfigError("the machine being replaced changed while pairing")
@@ -1773,18 +1939,22 @@ class WindowsApplication(QWidget):
 
     def _refresh_peers(self) -> None:
         try:
-            peers = self.book.peers()
+            peers, zones = self.book.peers(), self.book.zones()
         except (ConfigError, OSError):
             LOGGER.exception("The peers could not be read")
-            peers = []
-        self._peer_entries = peers
+            peers, zones = [], []
+        self._peer_entries, self._zone_entries = peers, zones
         self.machines.set_peers(self._peer_items(peers))
         if hasattr(self, "arrangement_diagram"):
             self._reflect_other_name()
+            # A machine paired, removed or renamed, or a side or zone a link wrote: the Crossing page follows.
+            seen = repr((peers, zones, self._hide_addresses()))
+            if seen != self._crossing_seen:
+                self._crossing_seen = seen
+                self._reflect_ways()
 
     def _reflect_other_name(self) -> None:
         name = self._machines_name() if len(self._peer_entries) == 1 else ""
-        self.arrangement_diagram.set_other_name(name)
         self.resistance_strip.set_other_name(name)
 
     def _refresh_peer_states(self) -> None:
@@ -1792,10 +1962,10 @@ class WindowsApplication(QWidget):
         self.machines.set_peers(self._peer_items(self._peer_entries))
 
     def _any_send(self) -> bool:
-        return any(entry.get("send") and protocol.is_paired_token(entry.get("token")) for entry in self._peer_entries)
+        return any(entry.get("send") and protocol.linkable(entry) for entry in self._peer_entries)
 
     def _label_of(self, peer: Optional[bytes]) -> str:
-        return self._labels_by_id.get(peer, "the other machine") if peer is not None else ""
+        return self._labels_by_id.get(peer, "another machine") if peer is not None else ""
 
     def _edit_peer(self, token: str, **fields) -> bool:
         try:
@@ -1865,6 +2035,28 @@ class WindowsApplication(QWidget):
             on = bool(entries) and all(entry.get(field) for entry in entries)
             if action.isChecked() != on:
                 action.setChecked(on)
+
+    def _refresh_tray_machines(self) -> None:
+        """With more than one machine to send to, the tray has "Send input to" for each, and the toggle
+        is only there to bring input back; with one, the toggle names it, as it always did."""
+        labels = peerlist.labels(self._peer_entries)
+        sendable = [(entry["id"], f"Send input to {self._shown(labels[entry['token']])}") for entry in self._peer_entries
+                    if entry.get("send") and entry.get("port") and protocol.read_id(entry.get("id")) is not None]
+        items = sendable if len(sendable) > 1 else []
+        if items != [(ident, action.text()) for ident, action in self.machine_actions.items()]:
+            for action in self.machine_actions.values():
+                self.tray_menu.removeAction(action)
+                action.deleteLater()
+            self.machine_actions = {}
+            for ident, text in items:
+                action = QAction(text, self.tray_menu)
+                action.triggered.connect(lambda _checked=False, peer=protocol.read_id(ident): self.sender.go(peer))
+                self.tray_menu.insertAction(self.pause_action, action)
+                self.machine_actions[ident] = action
+        on = self.sender.owner
+        for ident, action in self.machine_actions.items():
+            action.setEnabled(protocol.read_id(ident) != on)
+        self.redirect_action.setVisible(not self.machine_actions or self.sender.redirecting)
 
     def _after_peers_edit(self) -> None:
         """Whatever changed the peers list: the flat view and the links follow, and the machines are listed again."""
@@ -1977,7 +2169,7 @@ class WindowsApplication(QWidget):
         if service is None:
             return
         if self._pairing_open:
-            self.sheet.set_machines(service.machines())
+            self.sheet.set_machines(service.machines(), self._shown)
         code = service.code
         if code is not None:
             hide = self._hide_addresses()
@@ -2336,6 +2528,7 @@ class WindowsApplication(QWidget):
         self.open_action.triggered.connect(self.show_window)
         self.status_action = menu.addAction(self._title())
         self.status_action.setEnabled(False)
+        self.tray_menu = menu
         self.redirect_action = menu.addAction("Send input across")
         self.redirect_action.triggered.connect(self.toggle_redirect)
         self.pause_action = menu.addAction("Pause crossing")
@@ -2400,8 +2593,6 @@ class WindowsApplication(QWidget):
         self.double_tap_readout.setText(f"{config.double_tap_ms} ms")
         self.resistance_strip.set_value(config.crossing_resistance_px)
         motion.set_shown(self.double_tap_row, config.trigger_style != "hold")
-        self.corner_choice.set_value(config.crossing_corner)
-        self.edge_choice.set_value(config.mac_return_edge)
         self.trigger_recorder.set_title(TRIGGER_KEYS.get(config.trigger_key, config.trigger_key))
         self.trigger_style_choice.set_value(config.trigger_style)
         self._update_style_hint(config.trigger_style)
@@ -2435,12 +2626,9 @@ class WindowsApplication(QWidget):
             self.show_window()
 
     def start(self) -> None:
-        if platform_parts.NOT_YET:
-            # Nothing listens, announces or checks for updates: the parts behind them are not built.
-            self._set_status(ServerState.STOPPED, platform_parts.NOT_YET)
-            self._on_firewall(platform_parts.firewall.status("", self._config.port if self._config else protocol.DEFAULT_PORT))
-            return
-        self.update_checker.start()
+        if not sys.platform.startswith("linux"):
+            # No release has a Linux build yet, so a newer one is nothing this machine can install.
+            self.update_checker.start()
         if getattr(sys, "frozen", False) and firewall_win.is_elevated():
             # Beamer's own rules before any socket opens: a listener Windows has no rule for makes
             # it ask, and a click on Allow there writes rules for every network, public ones too,
@@ -2468,6 +2656,11 @@ class WindowsApplication(QWidget):
         if self._config is not None and self._paired:
             self._start_receiver(self._config)
             self._start_sending(self._config)
+            # Wayland's remote control session, opened now so the desktop asks while someone is at
+            # this machine; the clipboard rides on it.
+            start_injector = getattr(platform_parts.injector, "start", None)
+            if start_injector is not None:
+                start_injector()
         # After the rules, so the firewall module reads what start() just wrote, and with no config
         # the receiver never starts, so nothing else would ever read it.
         self._check_firewall()
@@ -2476,8 +2669,6 @@ class WindowsApplication(QWidget):
         self._trigger.configure(config.trigger_key, config.trigger_style, config.double_tap_ms)
 
     def _start_receiver(self, config: Config) -> None:
-        if platform_parts.NOT_YET:
-            return
         if self.server.listening and self._receiver_port != config.port:
             self.server.stop()
         self._receiver_port = config.port
@@ -2488,7 +2679,7 @@ class WindowsApplication(QWidget):
         when sending is on: they are the one part of Beamer that can take this
         PC's own keyboard away, so an install that never sends never installs
         them."""
-        if not self._any_send() or platform_parts.NOT_YET:
+        if not self._any_send():
             return
         self._configure_trigger(config)
         try:
@@ -2498,6 +2689,15 @@ class WindowsApplication(QWidget):
             self._sending_detail = f"This PC's keyboard could not be captured: {exc}"
             return
         self.sender.start(config)
+
+    def _capture_stopped(self, error: BaseException) -> None:
+        """On the capture thread, when capture ended on its own (the X server gone, a stalled
+        thread's connection ended, the desktop refusing or ending a portal session): nothing holds
+        this machine's keyboard any more, so input comes home rather than staying on a peer no key
+        can reach. A portal's error carries the whole sentence."""
+        self.sender.set_redirecting(False)
+        sentence = getattr(error, "sentence", None) or f"This machine's keyboard and mouse are no longer captured: {error}"
+        self.bridge.alert.emit("Beamer", sentence)
 
     def _on_hook_mouse(self, message: int, x: int, y: int, mouse_data: int) -> bool:
         """Every mouse message, on the hook thread: what Windows said becomes the sender's neutral
@@ -2632,6 +2832,9 @@ class WindowsApplication(QWidget):
             self.pairing.stop()
         self.server.stop()
         self._stop_sending()
+        stop_injector = getattr(platform_parts.injector, "stop", None)
+        if stop_injector is not None:
+            stop_injector()
         self._hide_crossing()
         self.tray.hide()
         QApplication.quit()
@@ -2674,7 +2877,7 @@ class WindowsApplication(QWidget):
         return self.effects
 
     def _on_pressure(self, edge: str, pressure: float, crossed: bool, part=None) -> None:
-        if self._closing or self._config is None or not self._config.edge_glow:
+        if self._closing or self._config is None or not self._config.edge_glow or platform_parts.WAYLAND:
             return
         overlay = self._effect_overlay()
         if overlay is not None:
@@ -2691,6 +2894,8 @@ class WindowsApplication(QWidget):
     def _on_arrival(self, method: str, edge: str, x: float, y: float) -> None:
         """A crossing landed the pointer on `edge`, or with method "switch" input came here by a
         switch and the pointer is wherever it was left."""
+        if platform_parts.WAYLAND:
+            return
         if method == "switch":
             overlay = self._switch_overlay()
             if overlay is not None:
@@ -2820,6 +3025,7 @@ class WindowsApplication(QWidget):
         else:
             self._refresh_peer_states()
         self._refresh_tray_directions()
+        self._refresh_tray_machines()
         self._refresh_pairing()
 
     def _title(self) -> str:
@@ -2842,7 +3048,19 @@ def _windows_kernel32():
     kernel32.CloseHandle.argtypes = [ctypes.c_void_p]
     kernel32.GetCurrentProcess.restype = ctypes.c_void_p
     kernel32.SetPriorityClass.argtypes = [ctypes.c_void_p, ctypes.c_ulong]
+    kernel32.SetProcessInformation.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_void_p, ctypes.c_ulong]
     return kernel32
+
+
+def _stay_unthrottled(kernel32) -> None:
+    """Opts out of Windows' power throttling (EcoQoS), the counterpart of the Mac's App Nap
+    activity. Beamer sits in the tray with no window in front, which is what Windows' heuristics
+    throttle, and a throttled Beamer sends its pings and acks late enough for the far side to give
+    the link up. ProcessPowerThrottling (4) with execution speed in the control mask and not in
+    the state mask: never throttled, whatever the power plan."""
+    state = (ctypes.c_uint32 * 3)(1, 0x1, 0)  # Version, ControlMask, StateMask
+    if not kernel32.SetProcessInformation(kernel32.GetCurrentProcess(), 4, ctypes.byref(state), ctypes.sizeof(state)):
+        LOGGER.warning("Could not opt Beamer out of power throttling: %s", ctypes.WinError(ctypes.get_last_error()))
 
 
 def _claim_instance():
@@ -2887,6 +3105,7 @@ def main() -> None:
         kernel32 = _windows_kernel32()
         if not kernel32.SetPriorityClass(kernel32.GetCurrentProcess(), 0x8000):  # ABOVE_NORMAL_PRIORITY_CLASS
             LOGGER.warning("Could not raise Beamer's priority: %s", ctypes.WinError(ctypes.get_last_error()))
+        _stay_unthrottled(kernel32)
     try:
         app = QApplication(sys.argv)
         app.setApplicationName("Beamer")

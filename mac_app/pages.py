@@ -9,6 +9,7 @@ from __future__ import annotations
 import re
 
 from core import effects
+from core import peerlist
 
 # (key, name, SF Symbol, what the page is for), in sidebar order, which is the order a new Mac is
 # set up in after the Overview; Cmd+1 is the first.
@@ -19,10 +20,10 @@ PAGES = (
     ("permissions", "Permissions", "lock.shield",
      "macOS must allow Beamer to read this keyboard and trackpad before it can send them anywhere."),
     ("crossing", "Crossing", "cursorarrow.motionlines",
-     "Choose how the pointer or a key moves input to the other machine, and how hard the edge pushes back first."),
+     "Choose how the pointer or a key moves input to each machine, and how hard the edge pushes back first."),
     ("keyboard", "Keyboard", "keyboard",
-     "How this Mac's modifier keys arrive on the other machine, which keys and buttons stay on this Mac, "
-     "and how fast the other machine's pointer moves here. The switch key is on the Crossing page."),
+     "How this Mac's modifier keys arrive on other machines, which keys and buttons stay on this Mac, "
+     "and how fast another machine's pointer moves here. The switch key is on the Crossing page."),
     ("design", "Design", "paintpalette",
      "How crossing looks and feels on this Mac: the edge, the corner, the notch and the trackpad."),
     ("connection", "Connection", "network",
@@ -32,12 +33,13 @@ KEYS = tuple(page[0] for page in PAGES)
 # Under the purpose on the pages whose settings are this Mac's alone, so nobody looks for the other
 # machine's on the Mac: each app sets only its own machine, and the other's are in Beamer there.
 SCOPE = {
-    "crossing": "For this Mac only; the other machine keeps its own. Only which side the other machine is on is shared. This "
-                "Mac's resistance is also what its pointer meets at the other machine's edge on the way back.",
-    "design": "For this Mac's screen only; the other machine keeps its own.",
-    "keyboard": "For this Mac's keyboard only; the other machine keeps its own.",
+    "crossing": "For this Mac only; every other machine keeps its own. Only which side each machine is on is shared, "
+                "with that machine. This Mac's resistance is also what its pointer meets at another machine's edge on "
+                "the way back.",
+    "design": "For this Mac's screen only; every other machine keeps its own.",
+    "keyboard": "For this Mac's keyboard only; every other machine keeps its own.",
 }
-# With Same on both machines on, under each row of the shared pages that stays this Mac's own.
+# With Same on all machines on, under each row of the shared pages that stays this Mac's own.
 OWN_ROW = "This Mac only."
 OWN_NOTCH = "The notch is this Mac only."
 # The window's footer, and the pages where its first sentence would be untrue.
@@ -180,20 +182,144 @@ MARK = 3.0
 CORNER_MARK = 12.0
 
 
+DIAGRAM_SPLIT_GAP = 6.0
+DIAGRAM_MARGIN = 12.0
+SIDES = ("left", "right", "top", "bottom")
+PART_ORDER = ("start", "middle", "end")
+
+
 def arrangement(width, height, side):
-    """Where the two screens sit in a diagram `width` by `height`, top left at the origin: (this,
-    other) as (x, y, w, h), the pair centred with the other screen on `side` of this one."""
+    """Where the two screens sit with one machine paired: (this, other) as (x, y, w, h)."""
+    this, (other,) = diagram_layout(width, height, [(side, None)])
+    return this, other
+
+
+def diagram_layout(width, height, machines):
+    """Where this Mac and each machine sit in a drawing `width` by `height`, top left at the origin.
+    `machines` is (side, first third) per machine: side "" when it is not placed, first third the
+    index of its first third when it crosses by Part of the edge, else None. Returns (this, frames),
+    a frame (x, y, w, h) or None for each machine. Two or more on one side share it, each as much
+    shorter as there are of them, in the order of their thirds when all have some, else of the
+    list; the whole is centred, and shrinks to fit only when it must."""
     tw, th = DIAGRAM_THIS
     ow, oh = DIAGRAM_OTHER
-    if side in ("left", "right"):
-        left = (width - (tw + DIAGRAM_GAP + ow)) / 2
-        this_x = left + ow + DIAGRAM_GAP if side == "left" else left
-        other_x = left if side == "left" else left + tw + DIAGRAM_GAP
-        return (this_x, (height - th) / 2, tw, th), (other_x, (height - oh) / 2, ow, oh)
-    top = (height - (th + DIAGRAM_GAP + oh)) / 2
-    this_y = top + oh + DIAGRAM_GAP if side == "top" else top
-    other_y = top if side == "top" else top + th + DIAGRAM_GAP
-    return ((width - tw) / 2, this_y, tw, th), ((width - ow) / 2, other_y, ow, oh)
+    placed = [None] * len(machines)
+    for side in SIDES:
+        at = [index for index, (where, _third) in enumerate(machines) if where == side]
+        if at and all(machines[index][1] is not None for index in at):
+            at.sort(key=lambda index: machines[index][1])
+        count = len(at)
+        if not count:
+            continue
+        w, h = ow / count, oh / count
+        upright = side in ("left", "right")
+        step = (h if upright else w) + DIAGRAM_SPLIT_GAP
+        start = ((th if upright else tw) - (step * count - DIAGRAM_SPLIT_GAP)) / 2
+        for order, index in enumerate(at):
+            along = start + order * step
+            placed[index] = {
+                "left": (-DIAGRAM_GAP - w, along), "right": (tw + DIAGRAM_GAP, along),
+                "top": (along, -DIAGRAM_GAP - h), "bottom": (along, th + DIAGRAM_GAP),
+            }[side] + (w, h)
+    frames = [(0.0, 0.0, tw, th)] + [frame for frame in placed if frame is not None]
+    left = min(x for x, _y, _w, _h in frames)
+    top = min(y for _x, y, _w, _h in frames)
+    span_w = max(x + w for x, _y, w, _h in frames) - left
+    span_h = max(y + h for _x, y, _w, h in frames) - top
+    scale = 1.0
+    if span_w > width or span_h > height:
+        scale = min((width - 2 * DIAGRAM_MARGIN) / span_w, (height - 2 * DIAGRAM_MARGIN) / span_h)
+    dx = (width - span_w * scale) / 2 - left * scale
+    dy = (height - span_h * scale) / 2 - top * scale
+
+    def fit(frame):
+        x, y, w, h = frame
+        return (dx + x * scale, dy + y * scale, w * scale, h * scale)
+
+    return fit(frames[0]), [None if frame is None else fit(frame) for frame in placed]
+
+
+def placement(machine):
+    """A machine as diagram_layout takes it: its side, and its first third when it crosses by Part
+    of the edge."""
+    parts = [PART_ORDER.index(part) for part in machine["parts"] if part in PART_ORDER]
+    return machine["side"] if machine["side"] in SIDES else "", min(parts) if "part" in machine["methods"] and parts else None
+
+
+def diagram_marks(this, machines):
+    """What lights on this Mac's screen in the drawing. `machines` are dicts with `key`, `side`,
+    `methods`, `parts`, `corner` and `chosen`. Returns (marks, notch): marks maps (key, "edge"),
+    (key, "corner") and (key, "part", third) to (frame or None, tone or None), the tone "chosen"
+    for the chosen machine's ways, "other" for another's, "track" for a third of the chosen
+    machine's edge it does not use and no other machine does, and None for nothing lit; notch is
+    the tone of the notch, or None."""
+    held = {}
+    for machine in machines:
+        side, methods = machine["side"], machine["methods"]
+        if side in SIDES and ("edge" in methods or "part" in methods):
+            for part in PART_ORDER if "edge" in methods else machine["parts"]:
+                held.setdefault((side, part), []).append(machine["key"])
+    marks = {}
+    for machine in machines:
+        key, side, methods = machine["key"], machine["side"], machine["methods"]
+        tone = "chosen" if machine["chosen"] else "other"
+        placed = side in SIDES
+        marks[(key, "edge")] = (side_mark(this, side) if placed else None, tone if placed and "edge" in methods else None)
+        thirds = third_marks(this, side) if placed else {}
+        for part in PART_ORDER:
+            lit = None
+            if placed and "part" in methods:
+                if part in machine["parts"]:
+                    lit = tone
+                elif machine["chosen"] and not held.get((side, part)):
+                    lit = "track"
+            marks[(key, "part", part)] = (thirds.get(part), lit)
+        marks[(key, "corner")] = (corner_mark(this, machine["corner"]), tone if "corner" in methods else None)
+    notch = [machine["chosen"] for machine in machines if "notch" in machine["methods"]]
+    return marks, ("chosen" if any(notch) else "other") if notch else None
+
+
+_WHERE = {"left": "to the left of", "right": "to the right of", "top": "above", "bottom": "below"}
+
+
+def _joined(names):
+    return names[0] if len(names) == 1 else ", ".join(names[:-1]) + " and " + names[-1]
+
+
+def not_placed(machines):
+    """The line under the drawing naming the machines with no side yet; "" when every one has one."""
+    names = [machine["label"] for machine in machines if machine["side"] not in SIDES]
+    return f"Not placed yet: {_joined(names)}" if names else ""
+
+
+def arrangement_description(machines, sentence):
+    """What VoiceOver reads for the drawing: where every machine is, then the chosen one's ways in."""
+    where = [f"{machine['label']} is {_WHERE[machine['side']]} this Mac." if machine["side"] in SIDES
+             else f"{machine['label']} is not placed yet." for machine in machines]
+    return " ".join(where + [sentence + "." if sentence else "No way in is on."])
+
+
+def send_items(peers, on, hide):
+    """The menu bar's items for sending input with more than one machine to send to: (id, title)
+    for each machine this Mac sends to, "Bring input back" on the one input is on (`on`). [] with
+    one or none, where the one Send input item stands as it always has."""
+    labels = peerlist.labels(peers)
+    targets = [entry for entry in peers if entry.get("id") and entry.get("send") is True and entry.get("port") != 0]
+    if len(targets) < 2:
+        return []
+    return [(entry["id"], "Bring input back" if entry["id"] == on else redact(f"Send input to {labels[entry['token']]}", hide))
+            for entry in targets]
+
+
+def where_caption(label):
+    """The caption of the side control: today's words with one machine, the chosen one's name with several."""
+    return f"Where {label} is" if label else "Where the other machine is"
+
+
+def shown_side(side, machines):
+    """The side the page shows for a machine. With one machine paired, or none, one not placed yet
+    shows Right as it always has; with several, nothing, so no two default onto one side."""
+    return side or ("right" if machines <= 1 else "")
 
 
 def side_mark(screen, side):
@@ -297,10 +423,11 @@ def notch_or_corner_only(methods):
     return bool(chosen & {"notch", "corner"}) and not chosen & {"edge", "part"}
 
 
-NOTCH_OR_CORNER_NOTE = (
-    "With only the notch or a corner on, input arrives by the notch's or corner's own side, so this "
-    "choice does nothing on this Mac; the other machine's own push still follows it."
-)
+def notch_or_corner_note(label):
+    """The note under the side control while only the notch or a corner leads there; `label` is the
+    chosen machine's with several paired, None with one."""
+    return ("With only the notch or a corner on, input arrives by the notch's or corner's own side, so this "
+            f"choice does nothing on this Mac; {label or 'the other machine'}'s own push still follows it.")
 
 
 def crossing_rows(methods):

@@ -117,8 +117,6 @@ SENT_HOME_SECONDS = 5.0
 OUTBOX_LIMIT = 512
 
 ADMITTED = "admitted"
-FIRST_LINK = "first_link"
-FOLDED = "folded"
 WRONG_ID = "wrong_id"
 GONE = "gone"
 
@@ -224,14 +222,13 @@ def zone_stretch(zone: dict, sides: dict) -> set:
 
 
 @functools.lru_cache(maxsize=128)
-def _key_id_of(token) -> Optional[bytes]:
-    # Only for a token made by pairing: a key id is an offline test of its token (section 2).
-    return protocol.key_id(token) if protocol.is_paired_token(token) else None
+def _key_id_of(token) -> bytes:
+    return protocol.key_id(token)
 
 
 def _entry_key_id(entry) -> Optional[bytes]:
-    token = entry.get("token") if isinstance(entry, dict) else None
-    return _key_id_of(token) if isinstance(token, str) else None
+    # Only for an entry made by pairing: a key id is an offline test of its token (section 2).
+    return _key_id_of(entry["token"]) if protocol.linkable(entry) else None
 
 
 class HandshakeSlots:
@@ -303,83 +300,22 @@ class PeerBook:
         """Section 2's id checks for a link under `key_id` whose first frame named `peer_id`, and on
         success the entry's update from it, in one step under the lock: `(outcome, entry)`.
         WRONG_ID when `peer_id` is this machine's own or is not the entry's; GONE when no entry has
-        the key id any longer; FIRST_LINK when the entry migrated from 1.4.x (id "") learnt its id
-        here (its zones are rewritten to name it); FOLDED when the migrated entry's link named
-        another entry's id, so that machine was paired again since the upgrade: the migrated entry
-        is dropped into that one (`fold`) and `entry` is that one; ADMITTED otherwise. `changes`
-        and `linked` are applied and saved when they change anything."""
+        the key id any longer; ADMITTED otherwise. `changes` and `linked` are applied and saved when
+        they change anything."""
         with self.lock:
             settings = copy.deepcopy(self._load() or {})
             peers = settings.get("peers") or []
             entry = next((p for p in peers if _entry_key_id(p) is not None and hmac.compare_digest(_entry_key_id(p), key_id)), None)
             if entry is None:
                 return GONE, None
-            text = protocol.id_text(peer_id)
-            first = not entry.get("id")
-            if peer_id == own_id:
+            if peer_id == own_id or entry.get("id") != protocol.id_text(peer_id):
                 return WRONG_ID, None
-            if not first and entry.get("id") != text:
-                return WRONG_ID, None
-            if first:
-                other = next((p for p in peers if p is not entry and p.get("id") == text), None)
-                if other is not None:
-                    # Only into a desktop of the platform 1.4.x paired: a phone never had a 1.4.x
-                    # pairing, and a machine of another platform is not the one it was.
-                    if not other.get("port") or other.get("platform") != entry.get("platform"):
-                        return WRONG_ID, None
-                    fold(settings, entry, other)
-                    self._save(settings)
-                    return FOLDED, dict(copy.deepcopy(other), folded=copy.deepcopy(entry))
             before = copy.deepcopy(entry)
             entry.update(changes)
             entry["linked"] = True
-            if first:
-                entry["id"] = text
-                for zone in settings.get("zones") or ():
-                    if isinstance(zone, dict) and zone.get("peer") == "":
-                        zone["peer"] = text
             if entry != before:
                 self._save(settings)
-            return (FIRST_LINK if first else ADMITTED), copy.deepcopy(entry)
-
-
-def fold(settings: dict, migrated: dict, into: dict) -> None:
-    """Drops the entry migrated from 1.4.x (`migrated`, id "") into `into`, the entry of the same
-    machine paired again since: only that machine holds the 1.4.x token, so a link under it that
-    names `into`'s id is that machine (section 2, step 8). The migrated entry goes; `into` takes
-    its side when it has never had one (`side_set_at` 0); each of its zones moves to `into` unless
-    `into` has one of that kind already, which wins; and one pass over the zones in use, other
-    peers' first, then `into`'s own, then the moved ones, turns off any that would cover a stretch
-    already covered (section 8), so the list stays one the apps will save. Changes `settings` in
-    place."""
-    text = into["id"]
-    settings["peers"] = [peer for peer in settings.get("peers") or [] if peer is not migrated]
-    if not into.get("side") and not into.get("side_set_at") and migrated.get("side") in crossing.EDGES:
-        into.update(side=migrated["side"], side_set_at=migrated.get("side_set_at", 0), side_by=migrated.get("side_by", ""))
-    kinds = {zone.get("kind") for zone in settings.get("zones") or [] if isinstance(zone, dict) and zone.get("peer") == text}
-    zones, moved = [], []
-    for zone in settings.get("zones") or []:
-        if isinstance(zone, dict) and zone.get("peer") == "":
-            if zone.get("kind") in kinds:
-                continue
-            zone["peer"] = text
-            kinds.add(zone.get("kind"))
-            moved.append(zone)
-        zones.append(zone)
-    settings["zones"] = zones
-    sides = {peer.get("id"): peer.get("side", "") for peer in settings["peers"]}
-    dicts = [zone for zone in zones if isinstance(zone, dict)]
-    own = [zone for zone in dicts if zone.get("peer") == text and not any(zone is other for other in moved)]
-    others = [zone for zone in dicts if zone.get("peer") != text]
-    covered = set()
-    for zone in others + own + moved:
-        if zone.get("off") is True:
-            continue
-        stretch = zone_stretch(zone, sides)
-        if stretch & covered:
-            zone["off"] = True
-        else:
-            covered |= stretch
+            return ADMITTED, copy.deepcopy(entry)
 
 
 class _Link:
@@ -474,8 +410,7 @@ class LinkResponder:
     `owner_callback(peer or None)` when ownership begins or ends, always in the order it did; `arrival_callback(edge, x, y)`
     and `pressure_callback(edge, pressure, crossed, part)` for the crossing effects;
     `arrangement_callback(peer, {edge, set_at, by})`; `settings_callback(peer, data)`, only from a
-    peer whose `caps` list `settings`; `paired_callback(peer, ids)`; `notice_callback(text)` for the
-    one-time notice when a migrated pairing learns its peer; `link_callback(peer, up)`; and
+    peer whose `caps` list `settings`; `paired_callback(peer, ids)`; `link_callback(peer, up)`; and
     `announce(peer)`, the messages to send once a link is up (section 3, announcements).
     `status_callback(state, detail)` takes ServerState.
 
@@ -503,7 +438,6 @@ class LinkResponder:
         arrangement_callback=None,
         settings_callback=None,
         paired_callback=None,
-        notice_callback=None,
         link_callback=None,
         announce=None,
     ) -> None:
@@ -521,7 +455,7 @@ class LinkResponder:
         self._callbacks = {
             "owner": owner_callback, "arrival": arrival_callback, "pressure": pressure_callback,
             "arrangement": arrangement_callback, "settings": settings_callback, "paired": paired_callback,
-            "notice": notice_callback, "link": link_callback,
+            "link": link_callback,
         }
         self._announce = announce or (lambda peer: [])
         # This machine's speed for a peer's pointer and scroll, and whether
@@ -756,25 +690,10 @@ class LinkResponder:
             if outcome == GONE:
                 LOGGER.info("The pairing %s linked under was removed during its handshake; closed", host)
                 return None
-            if outcome == FOLDED:
-                # Answered with the welcome, so the far side's own step 7 folds its 1.4.x entry
-                # too, then closed: the pairing this link came under is gone.
-                name = peerlist.label_for(self._settings_now()[0], token=entry.get("token")) or entry.get("name") or host
-                LOGGER.info("%s linked under its 1.4.x pairing after pairing again; folded into the new one", name)
-                self._callback("notice", f"{name} linked from {host} under its Beamer 1.4 pairing, {entry['folded'].get('name') or 'unnamed'}, which is now part of {name}.")
-                welcome = protocol.welcome_v6(
-                    own_id, identity["name"], identity["platform"], identity["app"], identity["caps"], entry.get("allow_drive") is True, self._hardware_towards(host, identity)
-                )
-                self._answer(connection, host, session.seal(welcome))
-                return None
             if outcome == WRONG_ID:
                 LOGGER.warning("%s holds a pairing of this machine's under another machine's id", host)
                 self._answer(connection, host, session.seal(protocol.wrong_id_v6()))
                 return None
-            if outcome == FIRST_LINK:
-                # Said the moment the id is saved: a claimer that resets before its welcome still
-                # holds the entry, and this notice is how the user learns who took it.
-                self._callback("notice", f"Linked with {hello['name']} at {host} for the first time on Beamer 1.5.0.")
             allow_drive = entry.get("allow_drive") is True
             welcome = protocol.welcome_v6(
                 own_id, identity["name"], identity["platform"], identity["app"], identity["caps"], allow_drive, self._hardware_towards(host, identity)
@@ -879,7 +798,7 @@ class LinkResponder:
                         continue
                     message = protocol.parse_message(plain)
                 except socket.timeout:
-                    LOGGER.warning("%s went quiet; its link is over", link.name)
+                    LOGGER.warning("%s went quiet, or took too long over one message; its link is over", link.name)
                     break
                 except (protocol.ConnectionClosed, protocol.ProtocolError, OSError) as exc:
                     if not link.closed.is_set():
@@ -1378,7 +1297,7 @@ class LinkResponder:
             return
         if "clipboard" not in link.caps or not text or len(text.encode("utf-8", "replace")) > protocol.CLIPBOARD_MAX_BYTES:
             text = None
-        if "clipboard_image" not in link.caps or image is None or len(image) > protocol.CLIPBOARD_IMAGE_MAX_BYTES:
+        if "clipboard_image" not in link.caps or image is None or not protocol.png_fits(image):
             image = None
         if text is None and image is None:
             return

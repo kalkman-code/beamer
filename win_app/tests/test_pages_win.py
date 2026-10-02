@@ -1,6 +1,5 @@
 import os
 import unittest
-from types import SimpleNamespace
 import sys
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
@@ -169,32 +168,7 @@ class CrossingWaysTest(unittest.TestCase):
 
 
 class ArrangementGeometryTest(unittest.TestCase):
-    SCREEN = (120.0, 75.0)
-
-    def test_the_mac_sits_on_the_chosen_side_of_this_pc(self):
-        for side, check in (
-            ("right", lambda pc, mac: mac[0] == pc[0] + 134 and mac[1] == pc[1]),
-            ("left", lambda pc, mac: mac[0] == pc[0] - 134 and mac[1] == pc[1]),
-            ("top", lambda pc, mac: mac[1] == pc[1] - 89 and mac[0] == pc[0]),
-            ("bottom", lambda pc, mac: mac[1] == pc[1] + 89 and mac[0] == pc[0]),
-        ):
-            pc, mac, _height = pages_win.arrangement_rects(400.0, 0.0, pages_win.SIDE_ANGLE[side], self.SCREEN, 14.0)
-            self.assertTrue(check(pc, mac), (side, pc, mac))
-
-    def test_the_pair_is_centred_and_only_as_tall_as_it_needs(self):
-        pc, mac, height = pages_win.arrangement_rects(400.0, 10.0, 0.0, self.SCREEN, 14.0)
-        self.assertEqual(height, 75.0)
-        self.assertEqual((pc[0] + mac[0] + mac[2]) / 2.0, 200.0)
-        self.assertEqual(pc[1], 10.0)
-        _pc, _mac, stacked = pages_win.arrangement_rects(400.0, 0.0, 90.0, self.SCREEN, 14.0)
-        self.assertEqual(stacked, 164.0)
-
-    def test_the_mac_goes_round_this_pc_never_through_it(self):
-        for angle in range(0, 360, 5):
-            pc, mac, _height = pages_win.arrangement_rects(400.0, 0.0, float(angle), self.SCREEN, 14.0)
-            apart_x = mac[0] >= pc[0] + pc[2] or mac[0] + mac[2] <= pc[0]
-            apart_y = mac[1] >= pc[1] + pc[3] or mac[1] + mac[3] <= pc[1]
-            self.assertTrue(apart_x or apart_y, angle)
+    # Where each screen sits: test_pc_three_machines.DiagramGeometryTests, one machine and several.
 
     def test_a_turn_takes_the_short_way_and_half_turns_go_round_the_top(self):
         turn = pages_win.turn_to
@@ -306,89 +280,81 @@ class DesignControlsTest(unittest.TestCase):
 
 @unittest.skipIf(widgets is None, "needs PySide6")
 class CrossingPageTest(unittest.TestCase):
-    """The Crossing page's rows and chips, set from the config without building the whole window."""
+    """The Crossing page's rows and chips, set from one machine's ways in the settings, in the real
+    window built offscreen, which starts no receiver, hooks or announcer."""
 
     def setUp(self):
-        from types import SimpleNamespace
+        import tempfile
+        from pathlib import Path
 
-        from PySide6.QtWidgets import QApplication, QCheckBox, QPushButton, QWidget
+        from PySide6.QtWidgets import QApplication
 
         os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
         self.app = QApplication.instance() or QApplication([])
-        import diagram
         import kvm_bridge_win
+        import theme
+        from core import protocol
+        from core.tests import responder_harness as harness
 
-        self.reflect = kvm_bridge_win.WindowsApplication._reflect_ways
-        self.host = QWidget()
-        self.page = SimpleNamespace(
-            _config=app_config.default_config(),
-            way_boxes={way: QCheckBox(way) for way in pages_win.WAYS},
-            part_buttons={part: QPushButton() for part in ("start", "middle", "end")},
-            parts_note=widgets.label("", "note"),
-            # Inside a window that is never shown, as on a page before the window opens.
-            crossing_rows={key: QWidget(self.host) for key in ("edge", "parts", "corner", "dragging")},
-            resistance_module=QWidget(self.host),
-            shortcut_module=QWidget(self.host),
-            pause_row=QWidget(self.host),
-            ways_summary=widgets.label("", "note"),
-            edge_unlearned=QWidget(self.host),
-            arrangement_diagram=diagram.ArrangementDiagram(),
-            resistance_strip=diagram.PushStrip(),
-        )
-        for button in self.page.part_buttons.values():
-            button.setCheckable(True)
+        theme.init_fonts()
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        self.path = Path(directory.name) / "settings.json"
+        settings = app_config.migrate(None, machine_id=protocol.id_text(harness.HERE))
+        self.peer = protocol.id_text(harness.B)
+        settings["peers"] = [harness.entry(harness.B, "Mac", side="right")]
+        settings["port"] = harness.free_port()
+        app_config.write_settings(self.path, settings)
+        self.page = kvm_bridge_win.WindowsApplication(self.path)
+        self.page._send_to = lambda peer, message: True
+        self.addCleanup(self.page.deleteLater)
+        self.addCleanup(self.page.server.stop)
+
+    def ways(self, methods=(), parts=("middle",), side=None):
+        app_config.set_ways(self.path, self.peer, side=side, methods=list(methods), parts=list(parts), corner="top_left")
+        self.page._pull_peer_fields()
 
     def shown(self):
+        import motion
+
         page = self.page
-        rows = {key for key, row in page.crossing_rows.items() if not row.isHidden()}
-        rows |= {"resistance"} - ({"resistance"} if page.resistance_module.isHidden() else set())
-        rows |= {"shortcut"} - ({"shortcut"} if page.shortcut_module.isHidden() else set())
+        rows = {key for key, row in page.crossing_rows.items() if motion.target_shown(row)}
+        rows |= {"resistance"} if motion.target_shown(page.resistance_module) else set()
+        rows |= {"shortcut"} if motion.target_shown(page.shortcut_module) else set()
         return rows
 
     def test_rows_hide_and_come_back_with_the_ways(self):
-        self.page._config.crossing_methods = ["shortcut"]
-        self.reflect(self.page)
+        self.ways()
         self.assertEqual(self.shown(), {"edge", "shortcut"})
-        self.page._config.crossing_methods = ["part"]
-        self.reflect(self.page)
+        self.page._ways_changed("shortcut", False)
+        self.ways(["part"])
         self.assertEqual(self.shown(), {"edge", "parts", "dragging", "resistance"})
         self.assertTrue(self.page.way_boxes["part"].isChecked())
         self.assertFalse(self.page.way_boxes["shortcut"].isChecked())
 
     def test_the_chips_are_named_for_the_current_edge(self):
-        self.page._config.mac_return_edge = "right"
-        self.page._config.crossing_edge_parts = ["start", "end"]
-        self.reflect(self.page)
+        self.ways(["part"], ["start", "end"])
         buttons = self.page.part_buttons
         self.assertEqual([buttons[p].text() for p in ("start", "middle", "end")], ["Top", "Middle", "Bottom"])
         self.assertEqual([buttons[p].isChecked() for p in ("start", "middle", "end")], [True, False, True])
-        self.page._config.mac_return_edge = "top"
-        self.reflect(self.page)
+        self.ways(["part"], ["start", "end"], side="top")
         self.assertEqual([buttons[p].text() for p in ("start", "middle", "end")], ["Left", "Middle", "Right"])
 
     def test_an_edge_learned_from_a_peer_renames_the_chips(self):
         page = self.page
-        page._config.crossing_methods = ["part"]
-        page._config.mac_return_edge = "right"
-        self.reflect(page)
-        page._config.mac_return_edge = "top"
-        self.reflect(page)
+        self.ways(["part"])
+        page._on_arrangement(self.peer, "bottom", 1790000999, self.peer)
         buttons = page.part_buttons
         self.assertEqual([buttons[p].text() for p in ("start", "middle", "end")], ["Left", "Middle", "Right"])
         self.assertIn("top edge", page.parts_note.text())
 
     def test_unticking_the_last_part_leaves_it_on(self):
-        import kvm_bridge_win
-
         page = self.page
-        page._config.crossing_edge_parts = ["middle"]
-        page._persist = lambda: True
-        page.sender = SimpleNamespace(update_config=lambda config: None)
-        page._reflect_ways = lambda: self.reflect(page)
-        page._reflect_look = lambda: None
+        self.ways(["part"], ["middle"])
         page.part_buttons["middle"].setChecked(False)
-        kvm_bridge_win.WindowsApplication._set_part(page, "middle", False)
-        self.assertEqual(page._config.crossing_edge_parts, ["middle"])
+        page._set_part("middle", False)
+        parts = [zone for zone in app_config.load_settings(self.path)["zones"] if zone["kind"] == "part"][0]["parts"]
+        self.assertEqual(parts, ["middle"])
         self.assertTrue(page.part_buttons["middle"].isChecked())
 
     def test_the_crossing_line_gives_the_first_reason_nothing_can_cross(self):

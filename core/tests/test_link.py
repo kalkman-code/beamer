@@ -3,6 +3,7 @@ LinkResponder on loopback (responder_harness.Machine) and a scripted responder w
 a peer that misbehaves."""
 
 import socket
+import struct
 import threading
 import time
 import unittest
@@ -26,7 +27,7 @@ class Side:
         self.settings.data["machine_id"] = protocol.id_text(own)
         self.own = own
         self.book = receiver.PeerBook(self.settings.load, self.settings.save)
-        self.states, self.ups, self.messages, self.notices = [], [], [], []
+        self.states, self.ups, self.messages = [], [], []
 
     def identity(self, **fields):
         data = {"id": self.own, "name": "Near", "platform": "macos", "app": "1.5.0", "caps": list(CAPS), "port": 24820}
@@ -40,7 +41,6 @@ class Side:
             state=lambda link, up, text: self.states.append((up, text)),
             up=lambda link, fields: self.ups.append(fields),
             message=lambda link, message: self.messages.append(message),
-            notice=self.notices.append,
             **kwargs,
         )
         return link
@@ -131,15 +131,6 @@ class LinkHandshakeTests(unittest.TestCase):
         self.assertEqual(link.peer_id, protocol.id_text(HERE))
         self.assertTrue(wait_for(lambda: self.machine.links))
 
-    def test_a_migrated_entry_learns_the_peer_id(self):
-        side = Side(self.machine, linked=False, from_1_4=True)
-        side.peer()["id"] = ""
-        self.start(side)
-        self.assertTrue(wait_for(lambda: side.ups), side.states)
-        self.assertEqual(side.peer()["id"], protocol.id_text(HERE))
-        self.assertTrue(side.peer()["linked"])
-        self.assertTrue(any("for the first time on Beamer 1.5.0" in text for text in side.notices), side.notices)
-
     def test_accepts_is_false_when_the_peer_does_not_let_this_machine_drive(self):
         self.machine.settings.peer(TOKENS[B])["allow_drive"] = False
         side = Side(self.machine)
@@ -160,6 +151,21 @@ class LinkHandshakeTests(unittest.TestCase):
         time.sleep(0.4)
         self.assertEqual(self.machine.links, [])
         self.assertFalse(link.live())
+
+    def test_a_migrated_entry_is_never_dialled_whatever_its_token(self):
+        for fields in ({"linked": False, "id": ""}, {"linked": True}):
+            with self.subTest(fields=fields):
+                side = Side(self.machine, from_1_4=True)
+                side.peer().update(fields)
+                now = [1000.0]
+                link = self.start(side, clock=lambda: now[0])
+                time.sleep(0.4)
+                self.assertEqual(self.machine.links, [])
+                self.assertFalse(link.live())
+                now[0] += 60
+                link.follow([{"name": "Far", "address": "127.0.0.2"}])
+                self.assertIsNone(link._try_host)
+                link.stop()
 
     def test_send_off_is_not_dialled(self):
         side = Side(self.machine)
@@ -573,6 +579,38 @@ class LinkFollowTests(unittest.TestCase):
         link.follow(beacon)
         self.assertTrue(wait_for(lambda: ("192.168.77.9", 24820) in tried), tried)
 
+    def test_a_beacon_that_names_another_machine_is_never_tried_and_one_at_its_address_is_tried_last(self):
+        clock, tried = FakeClock(), []
+        side, link = self.link(clock, tried)
+        side.settings.data["peers"].append(entry(C, "Far", token=TOKENS[C], host="192.168.77.20", port=24820, send=True))
+        link.start()
+        self.assertTrue(wait_for(lambda: tried))
+        beacons = [{"name": "Far", "address": "192.168.77.20"},
+                   {"name": "Far", "address": "192.168.77.21", "id": protocol.id_text(C)},
+                   {"name": "Far", "address": "192.168.77.22", "id": protocol.id_text(HERE)}]
+        tried.clear()
+        clock.now += 11
+        link.follow(beacons)
+        self.assertTrue(wait_for(lambda: ("192.168.77.22", 24820) in tried), tried)
+        self.assertNotIn(("192.168.77.20", 24820), tried)
+        # Two machines may have swapped addresses, so the other machine's saved one is still tried, last.
+        clock.now += 31
+        link.follow(beacons)
+        self.assertTrue(wait_for(lambda: ("192.168.77.20", 24820) in tried), tried)
+        self.assertNotIn(("192.168.77.21", 24820), tried)
+
+    def test_several_beacons_with_the_name_are_tried_in_turn(self):
+        clock, tried = FakeClock(), []
+        side, link = self.link(clock, tried)
+        link.start()
+        self.assertTrue(wait_for(lambda: tried))
+        beacons = [{"name": "Far", "address": "192.168.77.9"}, {"name": "Far", "address": "192.168.77.10"}]
+        for address in ("192.168.77.9", "192.168.77.10", "192.168.77.9"):
+            tried.clear()
+            clock.now += 31
+            link.follow(beacons)
+            self.assertTrue(wait_for(lambda: (address, 24820) in tried), (address, tried))
+
     def test_a_failed_try_shows_nothing_and_saves_nothing(self):
         clock, tried = FakeClock(), []
         side, link = self.link(clock, tried)
@@ -624,23 +662,7 @@ class LinkTunnelTests(unittest.TestCase):
         self.assertTrue(link.via_tunnel)
 
 
-class LinkFoldAndHeldTests(unittest.TestCase):
-    def test_a_migrated_entry_whose_peer_is_already_paired_is_folded_and_the_link_ends(self):
-        machine = machine_with_peer()
-        self.addCleanup(machine.stop)
-        side = Side(machine, linked=False, from_1_4=True)
-        side.peer()["id"] = ""
-        side.peer()["platform"] = "windows"
-        other = entry(HERE, "Far again", token=other_token(), host="192.168.77.9", port=24820, platform="windows")
-        side.settings.data["peers"].append(other)
-        link = side.link(reconnect_seconds=30)
-        self.addCleanup(link.stop)
-        link.start()
-        self.assertTrue(wait_for(lambda: side.notices), side.states)
-        self.assertIn("which is now part of", side.notices[0])
-        self.assertEqual([peer["name"] for peer in side.settings.data["peers"]], ["Far again"])
-        self.assertEqual(side.ups, [])
-
+class LinkHeldTests(unittest.TestCase):
     def test_held_us_is_taken_off_the_sample_and_never_goes_below_zero(self):
         def script(connection):
             session, hello = scripted_session(connection, TOKENS[B])
@@ -740,7 +762,7 @@ class LinkReviewFindingsTests(unittest.TestCase):
         self.assertLess(time.monotonic() - began, 0.05)
         states, ups = list(side.states), list(side.ups)
         time.sleep(1.2)
-        self.assertEqual((side.states, side.ups, side.notices), (states, ups, []))
+        self.assertEqual((side.states, side.ups), (states, ups))
         self.assertFalse(link.running)
         before = server.connections
         link.start()
@@ -911,6 +933,43 @@ class LinkFramingTests(unittest.TestCase):
         side, link = self.serve(after)
         self.assertTrue(wait_for(lambda: side.messages), side.states)
         self.assertEqual(side.messages[0]["data"]["route"], 3)
+
+    def test_a_frame_that_takes_longer_than_its_deadline_from_its_first_byte_ends_the_link(self):
+        # A byte every tenth of a second keeps the link alive, so only the frame's own deadline,
+        # counted from its first length byte, can end it.
+        def after(connection, session):
+            connection.sendall(struct.pack(">I", 1000))
+            for _ in range(40):
+                connection.sendall(b"\x00")
+                time.sleep(0.1)
+
+        with mock.patch.object(protocol, "FRAME_COMPLETE_SECONDS", 0.8):
+            side, link = self.serve(after)
+            self.assertTrue(wait_for(lambda: side.states and not side.states[-1][0], 3.0), side.states)
+        self.assertIn("too long", side.last_text())
+        self.assertEqual(side.messages, [])
+
+    def test_a_frame_completed_after_its_deadline_is_not_dispatched(self):
+        class Socket:
+            def __init__(self, chunks):
+                self.chunks = iter(chunks)
+
+            def recv(self, size):
+                return next(self.chunks)
+
+        frame = struct.pack(">I", protocol.MIN_FRAME_BYTES) + bytes(protocol.MIN_FRAME_BYTES)
+        sock = Socket((frame[:1], frame[1:], b""))
+        times = iter((-1.0, 0.0, 0.25))
+        link = OutboundLink("", None, lambda: {}, clock=lambda: next(times, 0.3))
+        link._sock = sock
+        session = mock.Mock()
+        session.open_raw.return_value = b"{}"
+        with mock.patch.object(protocol, "FRAME_COMPLETE_SECONDS", 0.2):
+            with mock.patch.object(protocol, "parse_message", return_value={"type": "accept", "data": {}}):
+                with mock.patch.object(link, "_deal") as deal:
+                    with self.assertRaisesRegex(link_module.LinkEnded, "took too long to send one message"):
+                        link._read(sock, session, "peer")
+        deal.assert_not_called()
 
     def test_two_frames_in_one_segment_are_two_messages(self):
         def after(connection, session):

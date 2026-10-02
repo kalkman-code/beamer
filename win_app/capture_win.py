@@ -246,6 +246,14 @@ for _index in range(1, 13):
 for _index in range(13, 21):
     VK_TO_NAME[0x7C + (_index - 13)] = f"f{_index}"
 
+# Media and browser keys are never the trigger: they are what the stays-on-this-PC list is for.
+# The undifferentiated 0x10-0x12 never reach the hook.
+NOT_TRIGGER_VKS = {0x10, 0x11, 0x12} | set(range(0xA6, 0xB4))
+# Loaded if a config names them, never offered by the recorder, as on the Mac: Backspace, Tab,
+# Enter, Esc and Space are typing keys a double-tap or a hold would take from every app, and
+# Windows gives a window no key-down for Print Screen, so it cannot be recorded at all.
+UNRECORDABLE_TRIGGER_VKS = {0x08, 0x09, 0x0D, 0x1B, 0x20, 0x2C}
+
 MODIFIER_NAMES = {
     "shift",
     "shift_r",

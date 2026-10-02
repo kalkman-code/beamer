@@ -474,26 +474,30 @@ class SavingTests(Folder):
                           mac_hardware_address="11:22:33:44:55:66", modifier_style="semantic", hide_addresses=True)
         app_config.save_config(self.path, changed)
         again = app_config.load_config(self.path)
-        skipped = {"host", "mac_resistance_px"}
+        # The ways across are each peer's, written by set_ways, never by a save of the flat view.
+        ways = {"crossing_methods", "crossing_edge_parts", "crossing_corner", "mac_return_edge", "arrangement_set_at"}
+        skipped = {"host", "mac_resistance_px"} | ways
         self.assertEqual({k: v for k, v in asdict(again).items() if k not in skipped},
                          {k: v for k, v in asdict(changed).items() if k not in skipped})
+        self.assertEqual({k: getattr(again, k) for k in ways}, {k: getattr(self.config, k) for k in ways})
 
-    def test_a_save_writes_the_peer_and_the_zones_not_the_old_names(self):
+    def test_a_save_writes_the_shortcut_and_no_zone_and_not_the_old_names(self):
+        before = self.settings()["zones"]
         app_config.save_config(self.path, replace(self.config, crossing_methods=["edge"], crossing_corner="bottom_left"))
         settings = self.settings()
         for key in MOVED_OR_DROPPED:
             self.assertNotIn(key, settings)
         self.assertIs(settings["shortcut"], False)
-        self.assertEqual([(zone["kind"], zone.get("off", False)) for zone in settings["zones"]],
-                         [("edge", False), ("part", True), ("corner", True)])
-        self.assertEqual(settings["zones"][2]["corner"], "bottom_left")
-        self.assertEqual(settings["zones"][2]["edge"], "left")
+        self.assertEqual(settings["zones"], before)
 
     def test_turning_a_way_off_keeps_its_zone_and_its_setting(self):
-        app_config.save_config(self.path, replace(self.config, crossing_methods=["edge"]))
-        app_config.save_config(self.path, replace(self.config, crossing_methods=["part"]))
+        app_config.set_ways(self.path, "", methods=["edge"], parts=["start", "end"], corner="top_right")
+        app_config.set_ways(self.path, "", methods=["part"], parts=["start", "end"], corner="top_right")
+        settings = self.settings()
+        self.assertEqual([(zone["kind"], zone.get("off", False)) for zone in settings["zones"]],
+                         [("edge", True), ("part", False), ("corner", True)])
         again = app_config.load_config(self.path)
-        self.assertEqual((again.crossing_methods, again.crossing_edge_parts), (["part"], ["start", "end"]))
+        self.assertEqual((again.crossing_methods, again.crossing_edge_parts), (["part", "shortcut"], ["start", "end"]))
 
     def test_the_machine_id_and_the_migrated_hash_never_change_in_a_save(self):
         before = self.settings()
@@ -510,14 +514,16 @@ class SavingTests(Folder):
         self.assertNotIn("host", settings)
         self.assertNotIn("mac_resistance_px", settings)
 
-    def test_a_changed_side_is_stamped_by_this_machine_and_an_unchanged_one_is_not(self):
+    def test_a_side_is_stamped_by_this_machine_only_when_set_here_never_by_a_save(self):
         settings = self.settings()
         settings["peers"][0]["side_by"] = OTHER_ID
         self.put(settings)
-        app_config.save_config(self.path, replace(self.config, pointer_speed=2.0))
-        self.assertEqual(self.settings()["peers"][0]["side_by"], OTHER_ID)
-        app_config.save_config(self.path, replace(self.config, mac_return_edge="top", arrangement_set_at=1790000005))
-        self.assertEqual(self.settings()["peers"][0]["side_by"], settings["machine_id"])
+        app_config.save_config(self.path, replace(self.config, pointer_speed=2.0, mac_return_edge="top",
+                                                  arrangement_set_at=1790000005))
+        self.assertEqual((self.settings()["peers"][0]["side"], self.settings()["peers"][0]["side_by"]), ("left", OTHER_ID))
+        app_config.set_ways(self.path, "", side="top", methods=["edge"], parts=["middle"], corner="top_left")
+        self.assertEqual((self.settings()["peers"][0]["side"], self.settings()["peers"][0]["side_by"]),
+                         ("top", settings["machine_id"]))
 
     def test_a_changed_port_moves_this_machines_and_the_one_peers_together(self):
         app_config.save_config(self.path, replace(self.config, port=25000))

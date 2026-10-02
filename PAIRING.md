@@ -127,11 +127,21 @@ keeps every one.
 1. **A host answers one `pair_start` per code.** The first one binds the code. The same
    datagram again gets the same answer (UDP retransmits). A different one gets `refused`, and
    the exchange under way is left alone. Every answer would be another guess for its sender.
-2. **A requester judges one `pair_answer` per share.** It takes the first `pair_answer` from
-   the host's address that carries its `pair` and decides on it. It never waits for a better
+2. **A requester judges one `pair_answer` per share.** It takes the first `pair_answer` that
+   carries its `pair` from the address it asked and decides on it. It never waits for a better
    one: each answer it judged would be a guess for whoever is answering. A new attempt means a
-   new nonce and a new scalar. The source address only sorts the replies; it proves nothing,
-   and nothing may rest on it.
+   new nonce and a new scalar. The source address proves nothing, but it sorts the replies: a
+   host whose routing table sends the requester's network through a VPN answers from the VPN's
+   address, and a stranger who read the `pair` from a beacon can send from any address. So an
+   answer from elsewhere is held (the first `ok:true` one and the first refusal, no more), and
+   is the one judged only when a resend's 1.5 seconds pass with nothing from the address asked,
+   counting what has already arrived, an `ok:true` one before a refusal; an answer from the
+   address asked beats a stranger's from anywhere else. Each side sends from its own address on
+   the other's network where it has one and the routing table would pick another, so this
+   fallback is for hosts older than 1.5.0-beta.4. A `pair_done` from the address asked decides
+   as before. One from elsewhere decides at once if its tag checks out; an `ok:true` one whose
+   tag fails is ignored, since checking it tests no guess, and a refusal is held like an
+   answer.
 3. **A requester does not send a code again once an `ok:true` answer to it has failed.** Whoever
    sent that answer has had a guess at the code. The real host has by then bound the code to
    that attempt or dropped it, so sending it again cannot pair; it would only buy a second
@@ -170,8 +180,8 @@ keeps every one.
 - The requester's list of hosts holds 64. When it is full, the one heard from longest ago makes
   way for a new one, except a host the user asked for by address, which always stays.
 - The requester sends each datagram up to three times, 1.5 seconds apart, until the reply
-  comes. It keeps only replies from the host's address that carry its pairing id, at most 64
-  of them, and only while an attempt is under way.
+  comes. It keeps only replies that carry its pairing id, from any address and sorted as rule 2
+  says, at most 64 of them, and only while an attempt is under way.
 - A datagram that does not parse, a nest of brackets included, is dropped, and nothing one
   datagram does ends the loop that read it.
 

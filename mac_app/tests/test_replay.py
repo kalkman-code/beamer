@@ -105,7 +105,7 @@ class WholeConnectionReplayTests(unittest.TestCase):
         self.assertTrue(wait_for(lambda: pc.arrivals), "the take never placed the PC's pointer")
         duo.mac_move(1727, 500, 7)
         self.assertTrue(wait_for(lambda: ("move", 7, 0) in pc.injected()), "the Mac's input never arrived")
-        self.assertTrue(duo.mac.send_arrangement("left", 500))
+        self.assertTrue(duo.mac.send_arrangement(protocol.id_text(HERE), "left", 500))
         self.assertTrue(wait_for(lambda: any(read["set_at"] == 500 for _, read in pc.arrangements)), "the arrangement never arrived")
         duo.mac.stop()
         self.assertTrue(wait_for(lambda: pc.responder.owner is None and not pc.responder.links()))

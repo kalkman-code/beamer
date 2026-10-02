@@ -13,14 +13,16 @@ shell reaches the same code. Keys arrive with the names Windows capture gives th
 key as "ctrl" and Ctrl as "cmd", and leave as the physical key (`PHYSICAL`) before core/keytable.py
 names them for each peer.
 
-Which peer a shortcut, the tray or a menu picks is the first one the UI shows (`peers[0]`); a push
-through a zone picks that zone's peer.
+The shortcut and the Send button pick the machine core.ways.shortcut_peer names: the one input was
+last on while it can take input, else the first that can. A tray item per machine picks its own,
+and a push through a zone picks that zone's peer.
 """
 
 import collections
 import ipaddress
 import logging
 import queue
+import sys
 import threading
 import time
 from typing import Callable, Optional
@@ -32,6 +34,7 @@ from core import peerlist
 from core import protocol
 from core import receiver
 from core import return_edge
+from core import ways
 from core import wol
 
 LOGGER = logging.getLogger(__name__)
@@ -54,7 +57,8 @@ PHYSICAL = {"cmd": "ctrl", "cmd_r": "ctrl_r", "ctrl": "cmd", "ctrl_r": "cmd_r"}
 MEDIA_KEYS = frozenset(
     {"volume_mute", "volume_down", "volume_up", "media_next", "media_prev", "media_stop", "media_play_pause"}
 )
-OWN_PLATFORM = "windows"
+# What this machine tells its peers it is (WIRE.md section 2); Linux and Windows read keys alike.
+OWN_PLATFORM = "linux" if sys.platform.startswith("linux") else "windows"
 INPUT_TYPES = protocol.INPUT_TYPES
 
 # What the owner's reasons for bringing input home say, naming the machine (WIRE.md section 5).
@@ -109,8 +113,8 @@ class LinkSender:
 
     `book` is a `receiver.PeerBook` over the app's settings and `zones()` gives this PC's zones as
     settings.json keeps them. `identity()` is this machine as a `hello` says it. Callbacks, each
-    from a worker thread (a GUI marshals them): `status_callback(connected, detail)` for the first
-    peer, `redirect_callback(redirecting)`, `pressure_callback(edge, pressure, crossed, part)` and
+    from a worker thread (a GUI marshals them): `status_callback(connected, detail)` for the machine
+    the shortcut would pick, `redirect_callback(redirecting)`, `pressure_callback(edge, pressure, crossed, part)` and
     `arrival_callback(edge, x, y)`. `driven()` says whether a peer's input is on this PC, and
     `send_peer_home()` sends it home, both the responder's, handed in by the app that owns both
     halves. `desktop` and `clipboard` are the platform's modules. `hardware(host)` is this PC's
@@ -172,12 +176,16 @@ class LinkSender:
         self._monitors = None
         self._monitors_at = 0.0
         self._clipboard_stamp = None
+        # The machine this PC's input last landed on, as an id text, for the shortcut's choice.
+        self._last_on: Optional[str] = None
         self._reported_redirecting = False
         self._followed_at = 0.0
         self._overflowed = False
         self._armed_for = frozenset()
         self._clip_wait: dict = {}      # peer: actions held back while its clipboard is read
         self._clip_lock = threading.Lock()
+        self._clip_jobs = collections.deque()
+        self._clip_busy = False
         self._statuses: dict = {}
         self._waking = set()
         self._wake_lock = threading.Lock()
@@ -196,6 +204,10 @@ class LinkSender:
         # changed (section 6); the pairing window supplies it.
         self.machines: Callable[[], list] = lambda: []
         self.hw_learned: Optional[Callable[[bytes, str], None]] = None
+        # Whether this machine's input can be taken now. Always, except where only the desktop can
+        # capture it (Wayland), which it does at an edge barrier: there the shortcut and the tray
+        # cannot send input away, only an edge push can.
+        self.input_held: Callable[[], bool] = lambda: True
         # The responder's: whether a peer's input is on this PC, and sending it home.
         self.driven: Callable[[], bool] = lambda: False
         self.send_peer_home: Callable[[], bool] = lambda: False
@@ -205,7 +217,6 @@ class LinkSender:
         self.arrangement_callback: Optional[Callable] = None
         self.settings_callback: Optional[Callable] = None
         self.paired_callback: Optional[Callable] = None
-        self.notice_callback: Optional[Callable[[str], None]] = None
         self.link_callback: Optional[Callable[[bytes, bool], None]] = None
 
         self.links = links(self) if links is not None else _default_links(self)
@@ -231,13 +242,26 @@ class LinkSender:
 
     @property
     def connected(self) -> bool:
-        peer = self._primary()
+        peer = self.shortcut_target()
         return peer is not None and self.links.up(peer)
 
     @property
     def status(self) -> str:
-        peer = self._primary_key()
-        return self._statuses.get(peer) or NOT_CONNECTED_STATUS
+        """The link status of the machine the shortcut would take input to; before any entry has an
+        id (the one migrated from 1.4.x), of the first this PC dials, by its token."""
+        peer = self.shortcut_target()
+        entry = self._peers.get(peer) if peer is not None else next(
+            (item for item in self._entries if item.get("send") and item.get("host") and item.get("port")), None)
+        return (self._statuses.get(self.links.key_of(entry)) if entry is not None else None) or NOT_CONNECTED_STATUS
+
+    def shortcut_target(self) -> Optional[bytes]:
+        """Where the shortcut, the Send button and the tray's toggle send this PC's input (WIRE.md
+        section 5, core.ways.shortcut_peer); None when this PC sends to no machine."""
+        def ready(ident) -> bool:
+            peer = protocol.read_id(ident)
+            return peer is not None and self.links.up(peer) and self._accepts.get(peer) is True
+
+        return protocol.read_id(ways.shortcut_peer(self._entries, self._last_on, ready))
 
     @property
     def waking(self) -> bool:
@@ -294,7 +318,7 @@ class LinkSender:
         self.set_redirecting(False)
         # The let-go and the releases ahead of it are sent before anything stops.
         deadline = self._clock() + 1.0
-        while self._threads and (not self._outbound.empty() or self._clip_wait) and self._clock() < deadline:
+        while self._threads and (not self._outbound.empty() or self._clip_wait or self._clip_busy) and self._clock() < deadline:
             time.sleep(0.01)
         self._stop_event.set()
         self.links.stop()
@@ -489,6 +513,13 @@ class LinkSender:
             # border, read from the other end.
             self._go(target, outcome.edge, offset)
 
+    def zone_models(self) -> list:
+        """The models of this PC's ways out, where a desktop that captures input at barriers puts
+        them; none while the edges are held."""
+        if self.edges_held or self._owner is None:
+            return []
+        return [model for _peer, model in list(self._models)]
+
     def _still_dragging(self) -> bool:
         """A release the hook never saw -- let go over the secure desktop or an elevated window --
         would otherwise hold the edge shut for good, so each button is asked of Windows again."""
@@ -504,12 +535,12 @@ class LinkSender:
     # -- switching ----------------------------------------------------------
 
     def set_redirecting(self, value, came_home=True) -> bool:
-        """Moves this PC's input to the first peer, or home, as the shortcut, the tray and the
-        direction switch do. False when nothing moved."""
+        """Moves this PC's input to the shortcut's machine, or home, as the shortcut, the Send button,
+        the tray and the direction switch do. False when nothing moved."""
         if value:
             if self.redirecting:
                 return False
-            peer = self._primary()
+            peer = self.shortcut_target()
             if peer is None:
                 self._alert(f"Cannot switch — {self.status}")
                 return False
@@ -533,6 +564,10 @@ class LinkSender:
     def _go(self, peer: bytes, edge=None, offset=None) -> bool:
         owner = self._owner
         if owner is None:
+            return False
+        if not self.input_held():
+            self._alert("Cannot switch — on this desktop input goes to another machine only by pushing the pointer "
+                        "through an edge")
             return False
         if self.driven():
             # A machine that is driven does not drive (section 4): its driver goes home first, then
@@ -672,13 +707,19 @@ class LinkSender:
         """Hands what the owner answered to the outbound worker, in order. Called with the lock still
         held, in the same step as the decision, so two threads' decisions cannot reach the worker the
         other way round (a release behind the press it releases would leave the key down)."""
-        for action in actions:
-            if isinstance(action, (owner_module.Send, owner_module.SendClipboard, owner_module.SetClipboard)):
+        for index, action in enumerate(actions):
+            if isinstance(action, (owner_module.Send, owner_module.SendClipboard, owner_module.SetClipboard, owner_module.Drop)):
                 try:
                     self._outbound.put_nowait(action)
                 except queue.Full:
                     LOGGER.error("the outbound queue filled up; input returns to this PC")
                     self._overflowed = True
+                    # What is lost with the rest can be sent again, but a link the owner has
+                    # already counted as closed must still close, or that machine stays owned.
+                    for lost in actions[index:]:
+                        if isinstance(lost, owner_module.Drop):
+                            self._forget_held(lost.peer)
+                            self.links.close(lost.peer, owner_module.DROPPED)
                     return
 
     def _report(self, actions) -> None:
@@ -712,11 +753,19 @@ class LinkSender:
     def _deliver(self, action) -> None:
         """Sends in the order the owner gave them, except that reading the clipboard (which can be
         slow) never holds up another peer's messages: what follows a clipboard read for the same
-        peer waits for it, and everything else goes on."""
+        peer waits for it, and everything else goes on. The clipboard's reads and writes go one at a
+        time, in the order decided, on a thread of their own, so a read never overtakes a write
+        decided before it."""
         if isinstance(action, owner_module.SetClipboard):
-            self._set_clipboard(action.message)
+            self._on_clipboard(lambda message=action.message: self._set_clipboard(message))
             return
         peer = action.peer
+        if isinstance(action, owner_module.Drop):
+            # A hand-over given up before its answer: closing the link ends any ownership a late
+            # accept began there, and it reconnects (WIRE.md section 5).
+            self._forget_held(peer)
+            self.links.close(peer, owner_module.DROPPED)
+            return
         with self._clip_lock:
             waiting = self._clip_wait.get(peer)
             if waiting is not None:
@@ -725,7 +774,7 @@ class LinkSender:
             if isinstance(action, owner_module.SendClipboard):
                 waiting = self._clip_wait[peer] = collections.deque()
                 try:
-                    threading.Thread(target=self._clipboard_then_rest, args=(peer, waiting), name="Beamer-links-clipboard", daemon=True).start()
+                    self._on_clipboard_locked(lambda peer=peer: self._clipboard_then_rest(peer, waiting))
                 except RuntimeError:
                     # No thread at shutdown: nothing must wait behind a read that never starts.
                     del self._clip_wait[peer]
@@ -736,7 +785,8 @@ class LinkSender:
     def _clipboard_then_rest(self, peer: bytes, waiting) -> None:
         """The clipboard for `peer`, then what `waiting` held behind it, in order. `waiting` belongs to
         the link it was made on: once that link is lost (`_forget_held`) none of it is sent, as the
-        machine that reconnects will be taken afresh."""
+        machine that reconnects will be taken afresh. A clipboard asked for again takes its turn
+        among the clipboard's other work, behind any write decided before it."""
         try:
             self._send_clipboard(peer, waiting)
         except Exception:
@@ -749,13 +799,42 @@ class LinkSender:
                     del self._clip_wait[peer]
                     return
                 action = waiting.popleft()
-            try:
                 if isinstance(action, owner_module.SendClipboard):
-                    self._send_clipboard(peer, waiting)
-                else:
-                    self._send(peer, action.message)
+                    self._on_clipboard_locked(lambda peer=peer: self._clipboard_then_rest(peer, waiting))
+                    return
+            try:
+                self._send(peer, action.message)
             except Exception:
                 LOGGER.exception("A message held behind the clipboard could not be sent")
+
+    def _on_clipboard(self, job) -> None:
+        with self._clip_lock:
+            self._on_clipboard_locked(job)
+
+    def _on_clipboard_locked(self, job) -> None:
+        """Under `_clip_lock`: `job` done after every clipboard job before it, on the one thread
+        that does them, started when there is none."""
+        self._clip_jobs.append(job)
+        if self._clip_busy:
+            return
+        try:
+            threading.Thread(target=self._clipboard_worker, name="Beamer-links-clipboard", daemon=True).start()
+        except RuntimeError:
+            self._clip_jobs.pop()
+            raise
+        self._clip_busy = True
+
+    def _clipboard_worker(self) -> None:
+        while True:
+            with self._clip_lock:
+                if not self._clip_jobs:
+                    self._clip_busy = False
+                    return
+                job = self._clip_jobs.popleft()
+            try:
+                job()
+            except Exception:
+                LOGGER.exception("Clipboard work failed")
 
     def _forget_held(self, peer: bytes) -> None:
         """`peer`'s link is lost: what waited for its clipboard is for a link that is gone."""
@@ -839,7 +918,7 @@ class LinkSender:
         caps = self.links.caps(peer)
         if text and ("clipboard" not in caps or len(text.encode("utf-8")) > protocol.CLIPBOARD_MAX_BYTES):
             text = None
-        if image is not None and ("clipboard_image" not in caps or len(image) > protocol.CLIPBOARD_IMAGE_MAX_BYTES):
+        if image is not None and ("clipboard_image" not in caps or not protocol.png_fits(image)):
             image = None
         if not text and image is None:
             return
@@ -860,6 +939,7 @@ class LinkSender:
 
     def _moved(self, moved: owner_module.Moved) -> None:
         if moved.to is not None:
+            self._last_on = protocol.id_text(moved.to)
             if self._pin_point is None:
                 self._pin_point = self._desktop_module().cursor_position()
             LOGGER.info("input is on %s", self._name(moved.to))
@@ -943,7 +1023,7 @@ class LinkSender:
         queued: the person switches again once it is up. False when there is no address to wake,
         the peer answered and refused (it is awake; waking it would hide why), or a wake is
         already in flight."""
-        peer = peer or self._primary()
+        peer = peer or self.shortcut_target()
         entry = self._peers.get(peer) if peer is not None else None
         address = (entry or {}).get("hw") or ""
         if not address or self.links.up(peer) or self.links.refused(peer):
@@ -1022,21 +1102,6 @@ class LinkSender:
         except Exception:
             LOGGER.exception("Could not arm the zones")
             self._models = []
-
-    def _primary_key(self):
-        """The first peer the UI shows that this PC dials: by id once it has one, else by its token's
-        key id, which is all a migrated entry has until its first link."""
-        for entry in self._entries:
-            if entry.get("send") and entry.get("host") and entry.get("port"):
-                return self.links.key_of(entry)
-        return None
-
-    def _primary(self) -> Optional[bytes]:
-        for entry in self._entries:
-            peer = protocol.read_id(entry.get("id"))
-            if peer is not None and entry.get("send") and entry.get("host") and entry.get("port"):
-                return peer
-        return None
 
     def _status_of(self, peer) -> str:
         entry = self._peers.get(peer) or {}
@@ -1117,8 +1182,8 @@ class LinkSender:
 
 
 class LinkSet:
-    """One core.link.OutboundLink for each peer entry this PC dials, keyed by the entry's token (all a
-    migrated entry has until its first link says who it is) and found by peer id once up. What
+    """One core.link.OutboundLink for each peer entry this PC dials, keyed by the entry's token and
+    found by peer id once up. What
     `LinkSender` asks of its links, and what each tells it back."""
 
     REFUSALS = ("older", "newer", "wrong_id", "unauthenticated", "different")
@@ -1154,7 +1219,7 @@ class LinkSet:
         turned local is stopped. The link itself ends and waits when `send` is off."""
         wanted = {
             entry["token"]: entry for entry in entries
-            if protocol.is_paired_token(entry.get("token")) and not self._is_local(entry.get("host") or "")
+            if protocol.linkable(entry) and not self._is_local(entry.get("host") or "")
         }
         with self._lock:
             gone = [token for token in self._links if token not in wanted]
@@ -1174,7 +1239,7 @@ class LinkSet:
             for token in added:
                 link = self._link_class(
                     token, self._sender._book, self._sender._identity,
-                    state=self._state, up=self._up, message=self._message, notice=self._notice, **hooks,
+                    state=self._state, up=self._up, message=self._message, **hooks,
                 )
                 self._links[token] = link
                 fresh.append(link)
@@ -1218,10 +1283,10 @@ class LinkSet:
         link = self._link(peer)
         return link is not None and link.send_input(message)
 
-    def close(self, peer) -> None:
+    def close(self, peer, reason="The link went quiet") -> None:
         link = self._link(peer)
         if link is not None:
-            link.drop("The link went quiet")
+            link.drop(reason)
 
     def round_trip_ms(self, peer) -> Optional[int]:
         """The upper median of the last few trips, with the time the peer held each ACK taken off, or
@@ -1285,11 +1350,6 @@ class LinkSet:
         peer = protocol.read_id(link.peer_id)
         if peer is not None:
             self._sender.on_message(peer, message, getattr(message, "began_at", None))
-
-    def _notice(self, text) -> None:
-        callback = self._sender.notice_callback
-        if callback is not None:
-            self._sender._call(callback, text)
 
 
 def _outbound_link():

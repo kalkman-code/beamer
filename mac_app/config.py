@@ -77,7 +77,7 @@ class Config:
     check_updates: bool = True
     # Every address the window shows is hidden; see pages.redact.
     hide_addresses: bool = False
-    # Same on both machines: the Crossing and Design pages kept in step with the PC's, and the unix
+    # Same on all machines: the Crossing and Design pages kept in step with the PC's, and the unix
     # seconds of the last change to that or to a shared value; see settings_sync.
     same_on_both: bool = False
     same_set_at: int = 0

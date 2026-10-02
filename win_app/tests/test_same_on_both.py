@@ -1,4 +1,4 @@
-"""Same on both machines in the real window: the Overview switch, a Mac's settings arriving, and a
+"""Same on all machines in the real window: the Overview switch, a Mac's settings arriving, and a
 change here going out. Built offscreen from a synthetic config as test_style_for builds it, which
 starts no receiver, hooks or announcer; the two links' sends are recorded instead."""
 
@@ -41,7 +41,7 @@ class SameOnBothTest(unittest.TestCase):
         folder = Path(tempfile.mkdtemp())
         self.path = folder / "settings.json"
         (folder / "config.json").write_text(json.dumps({
-            "host": "192.168.1.20", "port": 24820, "auth_token": "synthetic", "paired_with": "MacBook Pro",
+            "host": "192.168.1.20", "port": harness.free_port(), "auth_token": "synthetic", "paired_with": "MacBook Pro",
             "mac_host": "192.168.1.10", "mac_return_edge": "left", "edge_glow": True,
         }))
         self.window = kvm_bridge_win.WindowsApplication(self.path)
@@ -52,6 +52,7 @@ class SameOnBothTest(unittest.TestCase):
         self.window._refresh_window()
 
     def tearDown(self):
+        self.window.server.stop()
         self.window.deleteLater()
 
     def test_off_by_default_with_each_page_its_own(self):

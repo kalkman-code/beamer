@@ -12,14 +12,25 @@ import unittest
 from unittest import mock
 
 from core import protocol, receiver
+from core.tests import pngs
 from core.receiver import ServerState
 from core.tests.responder_harness import (
     B, C, HERE, TOKENS, Initiator, Machine, entry, ident, silent_close, wait_for,
 )
-from core.tests.test_responder_handshake import SlotPerConnection
 
 ACCEPT, ACK, SWITCH, CLIPBOARD = protocol.MSG_ACCEPT, protocol.MSG_ACK, protocol.MSG_SWITCH, protocol.MSG_CLIPBOARD
-PNG = protocol.PNG_SIGNATURE + b"\x00" * 64
+PNG = pngs.png()
+
+
+class SlotPerConnection(receiver.HandshakeSlots):
+    """Slots keyed by connection, for tests that need several handshakes at once from loopback's
+    one address."""
+
+    def take(self, host, connection):
+        return super().take((host, id(connection)), connection)
+
+    def free(self, host, connection):
+        super().free((host, id(connection)), connection)
 
 
 class Case(unittest.TestCase):
@@ -203,6 +214,11 @@ class TheClipboardOnLettingGo(Case):
     def test_an_oversized_image_is_dropped_and_the_text_kept(self):
         link = self.link()
         self.visit(link, "shot.png", protocol.PNG_SIGNATURE + b"\x00" * protocol.CLIPBOARD_IMAGE_MAX_BYTES)
+        self.assertEqual(link.expect(CLIPBOARD), {"text": "shot.png"})
+
+    def test_an_image_too_large_to_decode_is_dropped_and_the_text_kept(self):
+        link = self.link()
+        self.visit(link, "shot.png", pngs.png(16384, 16384))
         self.assertEqual(link.expect(CLIPBOARD), {"text": "shot.png"})
 
     def test_inbound_text_and_a_png_set_both(self):

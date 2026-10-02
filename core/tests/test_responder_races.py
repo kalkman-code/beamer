@@ -3,13 +3,15 @@ Opus as an attacker, and Gemini 3.1 Pro on the handshake), written before its fi
 
 import os
 import socket
+import struct
 import threading
 import time
 import unittest
 from unittest import mock
 
 from core import protocol, receiver
-from core.tests.responder_harness import B, C, TOKENS, Initiator, Machine, entry, token, wait_for
+from core.tests import pngs
+from core.tests.responder_harness import B, C, TOKENS, Initiator, Machine, entry, wait_for
 
 ACCEPT, REFUSE = protocol.MSG_ACCEPT, protocol.MSG_REFUSE
 
@@ -64,26 +66,6 @@ class TheClipboardAndTheOwnerCallbacks(Case):
         self.assertEqual(events, [("set", "from b"), ("owner", None)])
 
 
-class TheNotice(Case):
-    peers = [entry("", "Old PC", token=token(50), from_1_4=True, linked=False, paired_at=0)]
-
-    def test_the_notice_shows_even_when_the_welcome_cannot_be_sent(self):
-        real = protocol.send_msg
-
-        def refuse_welcome(sock, session, message):
-            if message.get("type") == protocol.MSG_WELCOME:
-                raise ConnectionResetError("the claimer reset the connection")
-            return real(sock, session, message)
-
-        with mock.patch.object(protocol, "send_msg", refuse_welcome):
-            link = Initiator(self.machine, B, key=token(50))
-            self.addCleanup(link.close)
-            with self.assertRaises((protocol.ConnectionClosed, OSError)):
-                link.handshake(link.hello(name="Claimer"))
-        self.assertEqual(self.machine.settings.peer(token(50))["id"], protocol.id_text(B))
-        self.assertEqual(self.machine.notices, ["Linked with Claimer at 127.0.0.1 for the first time on Beamer 1.5.0."])
-
-
 class ALargeFrameToASlowReader(Case):
     def test_a_slow_but_working_reader_keeps_the_link(self):
         with mock.patch.object(receiver, "LINK_READ_TIMEOUT_SECONDS", 0.5):
@@ -95,7 +77,7 @@ class ALargeFrameToASlowReader(Case):
             while time.monotonic() < deadline:
                 if protocol.recv_msg(b.sock, b.session).get("type") == ACCEPT:
                     break
-            self.machine.clipboard.image = protocol.PNG_SIGNATURE + os.urandom(3_000_000)
+            self.machine.clipboard.image = pngs.png(64, 64, pngs.chunk(b"tEXt", b"noise\x00" + os.urandom(3_000_000)))
             self.machine.clipboard.stamp += 1
             b.send(protocol.focus_v6(2, B))
             received, started = 0, time.monotonic()
@@ -112,6 +94,27 @@ class ALargeFrameToASlowReader(Case):
                 time.sleep(0.03)
             self.assertGreaterEqual(received, 4_000_000)
             self.assertIn(B, self.machine.responder.links())
+
+
+class AFrameThatNeverFinishes(Case):
+    def test_a_frame_still_arriving_past_its_deadline_from_its_first_byte_ends_the_link(self):
+        # A byte every tenth of a second keeps the link alive, so only the frame's own deadline,
+        # counted from its first length byte, can end it.
+        with mock.patch.object(protocol, "FRAME_COMPLETE_SECONDS", 0.8):
+            b = Initiator(self.machine, B)
+            self.addCleanup(b.close)
+            b.handshake()
+            self.assertTrue(wait_for(lambda: B in self.machine.responder.links()))
+            started = time.monotonic()
+            b.sock.sendall(struct.pack(">I", 1000))
+            while B in self.machine.responder.links() and time.monotonic() - started < 3:
+                try:
+                    b.sock.sendall(b"\x00")
+                except OSError:
+                    break
+                time.sleep(0.1)
+            self.assertNotIn(B, self.machine.responder.links())
+            self.assertLess(time.monotonic() - started, 2.0)
 
 
 def receiver_id(machine):

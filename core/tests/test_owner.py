@@ -5,7 +5,7 @@ the timers."""
 import unittest
 
 from core import owner
-from core.owner import LOCAL, Moved, Send, SendClipboard, SetClipboard, Unreachable
+from core.owner import LOCAL, Drop, Moved, Send, SendClipboard, SetClipboard, Unreachable
 
 
 class Clock:
@@ -344,12 +344,22 @@ class SwitchTests(OwnerCase):
         self.assertEqual(focuses(actions, "C"), [])
 
     def test_a_late_accept_is_let_go_naming_where_the_input_is_now(self):
+        # A hand-over given up closes its link, so what is still let go late is a take from home
+        # or from the owner's own shortcut, on a link that stayed up.
+        self.take("B")
+        self.o.go("C")          # route 2, eager: B let go, C taken
+        self.o.go("D")          # route 3, before C answered: C let go, D taken
+        self.assertEqual(sent(self.o.accept("C", {"route": 2})),
+                         [("C", {"type": "focus", "data": {"route": 3, "target": "D"}})])
+        self.assertEqual(self.o.on, "D")
+
+    def test_a_late_accept_on_a_link_closed_for_it_is_ignored(self):
+        # Read before the link closed, and acted on after: the close already ended that ownership.
         self.take("B")
         self.switch("B", "C")
         self.clock.now = 1001.0
-        self.o.tick()           # the stay is route 3
-        self.assertEqual(sent(self.o.accept("C", {"route": 2})),
-                         [("C", {"type": "focus", "data": {"route": 3, "target": "B"}})])
+        self.assertIn(Drop("C"), self.o.tick())
+        self.assertEqual(self.o.accept("C", {"route": 2}), [])
         self.assertEqual(self.o.on, "B")
 
     def test_a_late_accept_after_coming_home_names_the_owner(self):
@@ -358,6 +368,48 @@ class SwitchTests(OwnerCase):
         self.o.tick()           # home, route 2
         self.assertEqual(sent(self.o.accept("C", {"route": 1})),
                          [("C", {"type": "focus", "data": {"route": 2, "target": "A"}})])
+
+    def test_an_abandoned_hand_over_closes_the_next_machines_link_before_the_input_goes_anywhere(self):
+        # Its `accept` may still be on the way: closing the link is what ends an ownership nobody
+        # will use, however late that accept is or however long the owner remembers the take.
+        abandon = {
+            "no answer": lambda: (setattr(self.clock, "now", 1001.0), self.o.tick())[1],
+            "the shortcut home": lambda: self.o.go(None),
+            "the shortcut to the machine it is on": lambda: self.o.go("B"),
+            "the shortcut to a third machine": lambda: self.o.go("D"),
+            "a send-home from the machine left": lambda: self.switch("B", "A", route=1),
+            "the link to the machine left lost": lambda: self.o.link_down("B"),
+        }
+        for how, event in abandon.items():
+            with self.subTest(how=how):
+                self.setUp()
+                self.take("B")
+                self.switch("B", "C")
+                actions = event()
+                self.assertEqual([a for a in actions if isinstance(a, Drop)], [Drop("C")])
+                self.assertIsInstance(actions[0], Drop)
+                self.assertNotIn("C", self.o.reach_for(self.o.on))
+
+    def test_a_hand_over_answered_or_already_gone_closes_nothing(self):
+        answered = {
+            "refused": lambda: self.o.refuse("C", {"route": 2, "why": "owned"}),
+            "accepted": lambda: self.o.accept("C", {"route": 2}),
+            "its link lost": lambda: self.o.link_down("C"),
+            "taken again from here, on the same link": lambda: self.o.go("C"),
+        }
+        for how, event in answered.items():
+            with self.subTest(how=how):
+                self.setUp()
+                self.take("B")
+                self.switch("B", "C")
+                self.assertEqual([a for a in event() if isinstance(a, Drop)], [])
+
+    def test_a_take_from_home_with_no_answer_is_let_go_on_its_own_link_and_closes_nothing(self):
+        self.o.go("C")
+        self.clock.now = 1001.0
+        actions = self.o.tick()
+        self.assertEqual([a for a in actions if isinstance(a, Drop)], [])
+        self.assertEqual(focuses(actions, "C"), [{"route": 2, "target": "A"}])
 
     def test_an_accept_for_a_route_never_taken_there_is_ignored(self):
         self.take("B")
@@ -388,7 +440,7 @@ class SwitchTests(OwnerCase):
         self.switch("B", "C")
         actions = self.o.go("D")
         self.assertEqual(focuses(actions), [{"route": 3, "target": "D"},
-                                            {"route": 3, "target": "D", "resistance_px": 120, "reach": ["B", "C"]}])
+                                            {"route": 3, "target": "D", "resistance_px": 120, "reach": ["B"]}])
         self.assertEqual(sent(actions)[0][0], "B")
         self.o.accept("D", {"route": 3})
         self.clock.now = 1001.0
@@ -402,7 +454,7 @@ class SwitchTests(OwnerCase):
         actions = self.o.go("B")
         self.assertEqual(sent(actions), [
             ("B", {"type": "focus", "data": {"route": 3, "target": "B", "stay": True, "resistance_px": 120,
-                                             "reach": ["C", "D"]}}),
+                                             "reach": ["D"]}}),
             ("B", MOVE),
         ])
         self.clock.now = 1001.0

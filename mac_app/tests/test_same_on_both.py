@@ -1,4 +1,4 @@
-"""Same on both machines in the real window: the Overview switch, a PC's settings arriving, and a
+"""Same on all machines in the real window: the Overview switch, a PC's settings arriving, and a
 change here going out. Built as test_appearance builds it, never put on screen; the two links'
 sends are recorded instead."""
 

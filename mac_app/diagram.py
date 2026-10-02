@@ -53,9 +53,18 @@ def _collapsed(frame, side):
 
 
 class ArrangementDiagram(AppKit.NSView):
-    """This Mac's screen with the other machine's beside it on the chosen side, lit where a way in crosses."""
+    """This Mac's screen in the middle, each placed machine's beside the side it is on, and this
+    Mac lit where a way in crosses: the chosen machine's ways in the signal colour, the others'
+    quieter, so the picture says which edge leads where."""
 
-    HEIGHT = 186.0
+    # The screens take the space above the legend row (the key cap and the machines not placed),
+    # which they would otherwise run into once neighbours push this Mac off the middle.
+    HEIGHT = 210.0
+    LEGEND = 36.0
+    # A mark's colour by its tone in pages.diagram_marks. A third the chosen machine does not use
+    # stays as a dim track while Part of the edge is on, so the gaps read as walls, not as nothing.
+    # signal_dim all but vanishes on the dark ground, so the others' marks are signal held back.
+    TONES = {"chosen": "signal", "other": ("signal", 0.45), "track": "edge"}
 
     def isFlipped(self):
         return True
@@ -69,14 +78,9 @@ class ArrangementDiagram(AppKit.NSView):
         theme.tint(root, background="ground", border="rule")
         root.setBorderWidth_(1)
         root.setCornerRadius_(3)
-        self.other = _box("panel", "rule", 4)
         self.this = _box("well", "edge", 4)
         self.this_label = _text_layer(theme.TYPE["small"], "ink_2")
-        self.other_label = _text_layer(theme.TYPE["small"], "ink_3")
         self.notch = _box("ground", None, 2)
-        self.side = _box("signal", None, 1.5)
-        self.thirds = {part: _box("signal", None, 1.5) for part in ("start", "middle", "end")}
-        self.corner = _box("signal", None, 2)
         self.key = _box("well", "edge", theme.RADIUS["keycap"])
         # The shortcut as a key cap in the corner, and how it is pressed beside it: a legend, not a
         # sentence, since the note above the drawing already says it in words.
@@ -84,9 +88,13 @@ class ArrangementDiagram(AppKit.NSView):
         self.key_label.setFont_(theme.font(theme.TYPE["small"], 600))
         self.key.addSublayer_(self.key_label)
         self.key_how = _text_layer(theme.TYPE["small"], "ink_3", Quartz.kCAAlignmentLeft)
-        for layer in (self.other, self.this, self.this_label, self.other_label, self.notch, self.side,
-                      *self.thirds.values(), self.corner, self.key, self.key_how):
+        self.not_placed = _text_layer(theme.TYPE["small"], "ink_3", Quartz.kCAAlignmentRight)
+        for layer in (self.this, self.this_label, self.notch, self.key, self.key_how, self.not_placed):
             root.addSublayer_(layer)
+        # Made as machines and their marks first appear, by the machine's key, and dropped with it.
+        self.screens = {}
+        self.marks = {}
+        self.machines = []
         self.state = None
         self.lit = {}
         self.setAccessibilityElement_(True)
@@ -99,68 +107,123 @@ class ArrangementDiagram(AppKit.NSView):
             self._draw(False)
 
     @objc.python_method
-    def show(self, side, methods, parts, corner, key_text, other_name, has_notch, description, key_how=""):
-        """Draws the arrangement for these settings, moving from the last one when on screen.
-        `key_text` is the shortcut's key as its cap reads, `key_how` how it is pressed."""
-        state = (side, frozenset(methods), frozenset(parts), corner, key_text, other_name, has_notch, key_how)
+    def show(self, machines, key_text, has_notch, description, key_how="", shortcut=False):
+        """Draws these machines, moving from the last drawing when on screen. Each machine is a dict
+        with `key`, `label`, `side` ("" when not placed), its ways (`methods`, `parts`, `corner`) and
+        whether it is `chosen`. `key_text` is the shortcut's key as its cap reads, `key_how` how it
+        is pressed, `shortcut` whether it is on."""
+        state = (tuple((m["key"], m["label"], m["side"], tuple(m["methods"]), tuple(m["parts"]), m["corner"], m["chosen"])
+                       for m in machines), key_text, has_notch, key_how, shortcut)
         if state == self.state:
             return
         first = self.state is None
         self.state = state
+        self.machines = [dict(machine) for machine in machines]
         self.setAccessibilityLabel_(description)
         self._draw(not first and motion.live(self))
 
     @objc.python_method
+    def _screen(self, key):
+        if key not in self.screens:
+            screen = _box("panel", "rule", 4)
+            label = _text_layer(theme.TYPE["small"], "ink_3")
+            # Under this Mac's marks, which may sit at its edge beside a screen.
+            for layer in (screen, label):
+                self.layer().insertSublayer_below_(layer, self.this)
+            self.screens[key] = (screen, label)
+        return self.screens[key]
+
+    @objc.python_method
+    def _mark_layer(self, key):
+        if key not in self.marks:
+            layer = _box("signal", None, 2 if key[1] == "corner" else 1.5)
+            self.layer().insertSublayer_above_(layer, self.notch)
+            self.marks[key] = layer
+        return self.marks[key]
+
+    @objc.python_method
     def _draw(self, animate):
-        side, methods, parts, corner, key_text, other_name, has_notch, key_how = self.state
+        _machines, key_text, has_notch, key_how, shortcut = self.state
+        machines = self.machines
         bounds = self.bounds().size
         if bounds.width <= 0:
             return
-        this, other = pages.arrangement(bounds.width, bounds.height, side)
+        this, frames = pages.diagram_layout(bounds.width, bounds.height - self.LEGEND, [pages.placement(m) for m in machines])
+        # With one machine nothing is chosen between, and it looks as the one-machine drawing did.
+        several = len(machines) > 1
         motion.transaction(animate)
         self.this.setFrame_(_rect(this))
-        self.other.setFrame_(_rect(other))
         self.this_label.setString_("This Mac")
-        self.other_label.setString_(other_name)
         line = theme.TYPE["small"] + 4
-        for layer, (x, y, w, h) in ((self.this_label, this), (self.other_label, other)):
-            layer.setFrame_(((x + 6, y + (h - line) / 2 + (4 if layer is self.this_label and has_notch else 0)), (w - 12, line)))
+        x, y, w, h = this
+        self.this_label.setFrame_(((x + 6, y + (h - line) / 2 + (4 if has_notch else 0)), (w - 12, line)))
+        keys = {machine["key"] for machine in machines}
+        for key in [key for key in self.screens if key not in keys]:
+            for layer in self.screens.pop(key):
+                layer.removeFromSuperlayer()
+        for machine, frame in zip(machines, frames):
+            screen, label = self._screen(machine["key"])
+            strong = several and machine["chosen"]
+            screen.setHidden_(frame is None)
+            label.setHidden_(frame is None)
+            if frame is None:
+                continue
+            theme.tint(screen, border="ink_3" if strong else "rule")
+            theme.tint(label, foreground="ink" if strong else "ink_3")
+            label.setFont_(theme.font(theme.TYPE["small"], 600 if strong else 500))
+            screen.setFrame_(_rect(frame))
+            label.setString_(machine["label"])
+            fx, fy, fw, fh = frame
+            label.setFrame_(((fx + 4, fy + (fh - line) / 2), (fw - 8, line)))
+        marks, notch = pages.diagram_marks(this, machines)
+        for key in [key for key in self.marks if key not in marks]:
+            self.marks.pop(key).removeFromSuperlayer()
+            self.lit.pop(key, None)
+        sides = {machine["key"]: machine["side"] for machine in machines}
+        for key, (frame, tone) in marks.items():
+            layer = self._mark_layer(key)
+            if tone is not None:
+                theme.tint(layer, background=self.TONES[tone])
+            # The chosen machine's ways on top where two machines' marks meet.
+            layer.setZPosition_(1.0 if tone in ("chosen", "track") else 0.0)
+            self._mark(key, layer, frame, tone, sides[key[0]] if key[1] != "corner" else None, animate)
         self.notch.setFrame_(_rect(pages.notch_mark(this)))
         self.notch.setHidden_(not has_notch)
-        lit_notch = has_notch and "notch" in methods
+        lit_notch = has_notch and notch is not None
         self.notch.setBorderWidth_(1.5 if lit_notch else 0)
-        theme.tint(self.notch, border="signal", background=("signal", 0.25) if lit_notch else "ground")
-        part = "part" in methods
-        self._mark("side", self.side, pages.side_mark(this, side), "edge" in methods, side, animate)
-        for name, frame in pages.third_marks(this, side).items():
-            layer = self.thirds[name]
-            chosen = part and name in parts
-            # Unchosen thirds stay as a dim track while Part of the edge is on, so the gaps read
-            # as walls rather than as nothing.
-            theme.tint(layer, background="signal" if chosen else "edge")
-            self._mark(name, layer, frame, part, side, animate, lit=chosen)
-        self._mark("corner", self.corner, pages.corner_mark(this, corner), "corner" in methods, None, animate)
-        shortcut = "shortcut" in methods and bool(key_text)
+        theme.tint(self.notch, border=self.TONES[notch] if lit_notch else "signal",
+                   background=("signal", 0.25 if notch == "chosen" else 0.12) if lit_notch else "ground")
+        shortcut = shortcut and bool(key_text)
         self.key_label.setString_(key_text)
         self.key_how.setString_(key_how)
+        font = theme.font(theme.TYPE["small"], 500)
         width = min(bounds.width - 20, 24 + _text_width(key_text, theme.font(theme.TYPE["small"], 600)))
         top = bounds.height - 36
         self.key.setFrame_(((12, top), (width, 24)))
         self.key_label.setFrame_(((0, (24 - line) / 2), (width, line)))
-        self.key_how.setFrame_(((12 + width + 8, top + (24 - line) / 2), (max(0, bounds.width - width - 32), line)))
+        how = _text_width(key_how, font) + 4
+        self.key_how.setFrame_(((12 + width + 8, top + (24 - line) / 2), (how, line)))
         for layer in (self.key, self.key_how):
             layer.setOpacity_(1.0 if shortcut else 0.0)
+        # The machines with no side, on the key cap's line, from wherever the legend ends.
+        start = 12 + width + 8 + how + 16 if shortcut else 12
+        self.not_placed.setString_(pages.not_placed(machines))
+        self.not_placed.setFrame_(((start, top + (24 - line) / 2), (max(0, bounds.width - 12 - start), line)))
         Quartz.CATransaction.commit()
 
     @objc.python_method
-    def _mark(self, key, layer, frame, on, side, animate, lit=None):
+    def _mark(self, key, layer, frame, tone, side, animate):
         """Places a mark; switched on or newly lit while moving, it grows out from its middle as
-        it fades in."""
+        it fades in. A mark with no frame (its machine has no side) is not drawn."""
+        on = tone is not None and frame is not None
         # The side is part of the state: moved to another side, a mark grows in afresh there, which
         # reads far better than a strip stretching across the screen from one side to the other.
-        state = (on, on if lit is None else lit, self.state[0])
+        state = (on, tone, side)
         was = self.lit.get(key)
         self.lit[key] = state
+        if frame is None:
+            layer.setOpacity_(0.0)
+            return
         if not (on and was != state and animate):
             layer.setFrame_(_rect(frame))
             layer.setOpacity_(1.0 if on else 0.0)

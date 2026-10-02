@@ -59,10 +59,44 @@ class AddPeerTests(unittest.TestCase):
         peerlist.add_peer(held, peer(A, "New"), replaced=copy.deepcopy(held["peers"][0]))
         self.assertEqual([entry["id"] for entry in held["peers"]], [A, B])
 
-    def test_the_replaced_entrys_zones_go_with_it(self):
-        held = settings(peer("", token="legacy", from_1_4=True), zones=[{"peer": "", "kind": "edge"}])
+    def test_a_machine_paired_crosses_by_its_whole_edge_until_its_ways_are_chosen(self):
+        # Pairing made no zones before beta.5, so a second machine's side, once set, led nowhere
+        # (the rig and the laptop, 01-10-2026).
+        held = settings(peer(A, side="left"), zones=[{"peer": A, "kind": "edge"}])
+        peerlist.add_peer(held, peer(B, token="second"))
+        self.assertEqual(held["zones"], [{"peer": A, "kind": "edge"}, {"peer": B, "kind": "edge"}])
+
+    def test_the_replaced_entrys_zones_go_with_it_when_it_was_matched_by_name_alone(self):
+        held = settings(peer("", token="legacy", host="10.1.1.9", from_1_4=True), zones=[{"peer": "", "kind": "edge"}])
         peerlist.add_peer(held, peer(A), replaced=copy.deepcopy(held["peers"][0]))
-        self.assertEqual(held["zones"], [])
+        self.assertEqual(held["zones"], [{"peer": A, "kind": "edge"}])
+
+    def test_the_machine_at_the_1_4_entrys_host_takes_over_its_side_and_zones(self):
+        # Every 1.4.x upgrader pairs again (no token migrates), and the user is at the screen
+        # pairing that machine on purpose: its arrangement is not theirs to set a second time.
+        old = peer("", token="legacy", from_1_4=True, linked=False, side="left", side_set_at=1_790_000_000,
+                   side_by=C, paired_at=0)
+        held = settings(old, zones=[{"peer": "", "kind": "edge"}, {"peer": "", "kind": "corner", "corner": "top_left",
+                                                                    "edge": "left", "off": True}])
+        peerlist.add_peer(held, peer(A, token="fresh"), replaced=copy.deepcopy(old))
+        self.assertEqual(held["zones"], [{"peer": A, "kind": "edge"},
+                                         {"peer": A, "kind": "corner", "corner": "top_left", "edge": "left", "off": True}])
+        entry = held["peers"][0]
+        self.assertEqual((entry["side"], entry["side_set_at"], entry["side_by"]), ("left", 1_790_000_000, C))
+        self.assertEqual(entry["token"], "fresh")
+
+    def test_a_machine_at_that_host_of_another_platform_takes_nothing(self):
+        old = peer("", token="legacy", platform="macos", from_1_4=True, side="left")
+        held = settings(old, zones=[{"peer": "", "kind": "edge"}])
+        peerlist.add_peer(held, peer(A, token="fresh"), replaced=copy.deepcopy(old))
+        self.assertEqual(held["zones"], [{"peer": A, "kind": "edge"}])
+        self.assertEqual(held["peers"][0]["side"], "")
+
+    def test_an_entry_that_is_not_the_1_4_one_gives_nothing_by_host(self):
+        old = peer(B, token="legacy", linked=False, side="left")
+        held = settings(old, zones=[{"peer": B, "kind": "edge"}])
+        peerlist.add_peer(held, peer(A, token="fresh"), replaced=copy.deepcopy(old))
+        self.assertEqual(held["zones"], [{"peer": A, "kind": "edge"}])
 
     def test_zones_of_a_machine_paired_again_under_its_own_id_stay(self):
         held = settings(peer(A, linked=False), zones=[{"peer": A, "kind": "edge"}])
@@ -73,7 +107,7 @@ class AddPeerTests(unittest.TestCase):
     def test_other_machines_zones_are_left_alone(self):
         held = settings(peer(A), peer("", token="legacy", from_1_4=True), zones=[{"peer": A, "kind": "edge"}])
         peerlist.add_peer(held, peer(B), replaced=copy.deepcopy(held["peers"][1]))
-        self.assertEqual(held["zones"], [{"peer": A, "kind": "edge"}])
+        self.assertEqual(held["zones"], [{"peer": A, "kind": "edge"}, {"peer": B, "kind": "edge"}])
 
     def test_an_entry_replaced_by_token_is_found_though_the_caller_holds_a_copy(self):
         held = settings(peer(A, token="one"))
@@ -168,6 +202,16 @@ class LabelForTests(unittest.TestCase):
     def test_a_machine_nobody_knows_has_no_label(self):
         self.assertEqual(peerlist.label_for([peer(A, "Desk")], token="nope"), "")
         self.assertEqual(peerlist.label_for([], peer_id="nope"), "")
+
+
+class SharingANameTests(unittest.TestCase):
+    def test_names_are_compared_as_labels_compares_them(self):
+        machines = [{"name": " Studio "}, {"name": "studio"}, {"name": "Other"}]
+        self.assertEqual(peerlist.sharing_a_name(machines), [True, True, False])
+
+    def test_a_lone_machine_shares_with_nobody(self):
+        self.assertEqual(peerlist.sharing_a_name([{"name": "Studio"}]), [False])
+        self.assertEqual(peerlist.sharing_a_name([]), [])
 
 
 if __name__ == "__main__":

@@ -55,6 +55,8 @@ from __future__ import annotations
 
 import base64
 import contextlib
+import ctypes
+import ctypes.util
 import hashlib
 import hmac
 import ipaddress
@@ -65,6 +67,7 @@ import queue
 import secrets
 import socket
 import struct
+import sys
 import threading
 import time
 
@@ -98,6 +101,8 @@ CODE_DIGITS = 6
 MAX_DATAGRAM_BYTES = 1024
 PAIR_REPLY_TIMEOUT_SECONDS = 1.5
 PAIR_ATTEMPTS = 3
+# How many replies already waiting are read for one from the address asked before a held one decides.
+MAX_HELD_SWEEP = 64
 NONCE_BYTES = 16
 SHARE_BYTES = 32
 TAG_BYTES = 64
@@ -333,14 +338,17 @@ def peer_entry(identity: bytes, name: str, platform: str, port: int, token: str,
 def _find_known(peers: list, own: bytes, theirs: bytes, name: str, platform: str, now: float) -> tuple:
     """(refused, replaced) for a pairing that proved `theirs`, `name` and `platform`. `refused` is
     True when the id is this machine's own and otherwise the entry already holding it, None when
-    there is none; `replaced` is the entry this pairing replaces, the one left by a lost
-    pair_done."""
+    there is none; `replaced` is the entry this pairing replaces: the one left by a lost pair_done,
+    or one migrated from 1.4.x that an earlier beta linked and so knows the id of. A migrated entry
+    never links, so replacing it takes nothing that works."""
     if theirs == own:
         return True, None
     wanted = _b64(theirs)
     for known in peers:
         if known.get("id") != wanted:
             continue
+        if known.get("from_1_4") is True:
+            return None, known
         paired_at = known.get("paired_at")
         lost_done = (
             known.get("linked") is False
@@ -351,15 +359,17 @@ def _find_known(peers: list, own: bytes, theirs: bytes, name: str, platform: str
     return None, None
 
 
-def _migrated_for(peers: list, address: str):
-    """The entry migrated from 1.4.x (`id: ""`) that a fresh pairing with the machine at `address`
-    replaces, or None: left beside the new entry, its first link would be answered wrong_id.
-    ⚠ Matched by its saved host alone, never by name: a name is whatever the pairing machine
-    chose, so anyone who saw the code could otherwise evict a 1.4.x pair that still links."""
-    if not address:
-        return None
+def _migrated_for(peers: list, address: str, name: str, platform: str):
+    """The entry migrated from 1.4.x (`id: ""`) that a fresh pairing with the machine at `address`,
+    proving `name` and `platform`, replaces, or None: its saved host is `address`, or (its address
+    having changed) its name and platform are the ones proved. A name is anyone's to claim, which
+    is safe only because a migrated entry never links and a match by name carries nothing over
+    (peerlist.add_peer gives its side and zones only to the machine at its host on its platform):
+    taking it loses nothing that works, and left, it would ask to be paired again beside this pairing."""
     for known in peers:
-        if known.get("id") == "" and known.get("from_1_4") is True and known.get("host") == address:
+        if known.get("id") == "" and known.get("from_1_4") is True and (
+                (address and known.get("host") == address)
+                or (known.get("name") == name and known.get("platform") == platform)):
             return known
     return None
 
@@ -710,7 +720,7 @@ class PairingHost:
             reply = self._end(MSG_PAIR_DONE, sent, pair_id, ERROR_KNOWN, "known")
             self.known = None if known is True else known
             return reply
-        replaced = replaced or _migrated_for(peers, bound["address"])
+        replaced = replaced or _migrated_for(peers, bound["address"], bound["name"], bound["platform"])
         if _clashes(peers, bound["token"], replaced):
             return self._end(MSG_PAIR_DONE, sent, pair_id, ERROR_REFUSED, "refused")
         if replaced is None and len(peers) >= MAX_PEERS:
@@ -889,6 +899,14 @@ class PairingClient:
             raise PairingError(ERROR_REFUSED)
         return self._token
 
+    def proves(self, done: dict) -> bool:
+        """Whether an ok pair_done carries the tag only the host holding this attempt's token could
+        make. Checking it tests no guess at the code."""
+        try:
+            return self._done_tag is not None and hmac.compare_digest(_unb64(done.get("tag")), self._done_tag)
+        except PairingError:
+            return False
+
     def entry(self, address: str) -> dict:
         """Version 3: the peer entry for the host, reached at `address`, once finish() has
         returned the token."""
@@ -916,9 +934,9 @@ def local_address_towards(host: str) -> str:
         probe.close()
 
 
-def broadcast_targets(port: int) -> list:
-    """Every address worth sending a beacon to, one per local IPv4 interface plus the limited
-    broadcast as a backstop.
+def broadcast_targets(port: int, interfaces=None) -> list:
+    """Every address worth sending a beacon to, one per local IPv4 network plus the limited
+    broadcast as a backstop. `interfaces` is _interfaces()'s list, read afresh when None.
 
     ⚠ 255.255.255.255 alone is not enough and this is not theoretical: it leaves by the default
     route only, so a PC with a second interface — a Hyper-V vEthernet switch is the common case —
@@ -927,24 +945,29 @@ def broadcast_targets(port: int) -> list:
     then paired against a stale id from an older beacon that had got through, which is what
     produced `not_pairing`.
 
-    The per-interface directed broadcast assumes a /24, because the stdlib exposes no netmask.
-    A wrong guess costs one datagram that goes nowhere; the limited broadcast is still sent, so
-    this can only add delivery, never remove it."""
+    Each network's directed broadcast follows its own netmask: a /24 guess sent a 169.254/16
+    link-local interface to an address no host holds. Only where the platform will not list its
+    interfaces is a /24 still assumed. The limited broadcast is always sent, so a wrong guess can
+    only add delivery, never remove it."""
+    if interfaces is None:
+        interfaces = _interfaces()
+    if interfaces:
+        directed = [str(ipaddress.IPv4Network(f"{address}/{netmask}", strict=False).broadcast_address)
+                    for address, netmask in interfaces]
+    else:
+        directed = [".".join(address.split(".")[:3] + ["255"]) for address in _local_ipv4_addresses()
+                    if len(address.split(".")) == 4]
     targets = [("255.255.255.255", port)]
     seen = {"255.255.255.255"}
-    for address in _local_ipv4_addresses():
-        parts = address.split(".")
-        if len(parts) != 4:
-            continue
-        directed = ".".join(parts[:3] + ["255"])
-        if directed not in seen:
-            seen.add(directed)
-            targets.append((directed, port))
+    for address in directed:
+        if address not in seen:
+            seen.add(address)
+            targets.append((address, port))
     return targets
 
 
 def _local_ipv4_addresses() -> list:
-    found = []
+    found = [address for address, _netmask in _interfaces()]
     try:
         for info in socket.getaddrinfo(socket.gethostname(), None, socket.AF_INET):
             address = info[4][0]
@@ -953,6 +976,163 @@ def _local_ipv4_addresses() -> list:
     except OSError:
         pass
     return found
+
+
+def _interfaces() -> list:
+    """(address, netmask) as dotted quads for each IPv4 interface that is up and has a network to
+    broadcast on: loopback, point-to-point tunnels (a VPN's) and a /31 or /32 are left out. [] when
+    the platform will not say, and the callers then do as they did before they could ask."""
+    try:
+        listed = _windows_interfaces() if sys.platform == "win32" else _posix_interfaces()
+    except Exception:
+        # ctypes over the C library: whatever goes wrong there costs this list and nothing else.
+        return []
+    found = []
+    for address, netmask in listed:
+        try:
+            network = ipaddress.IPv4Network(f"{address}/{netmask}", strict=False)
+        except ValueError:
+            continue
+        if ipaddress.IPv4Address(address).is_loopback or address == "0.0.0.0" or not 0 < network.prefixlen < 31:
+            continue
+        if (address, netmask) not in found:
+            found.append((address, netmask))
+    return found
+
+
+class _Ifaddrs(ctypes.Structure):
+    pass
+
+
+# The same layout on macOS and Linux; the sockaddrs it points at are not (BSD's start with a length).
+_Ifaddrs._fields_ = [
+    ("ifa_next", ctypes.POINTER(_Ifaddrs)),
+    ("ifa_name", ctypes.c_char_p),
+    ("ifa_flags", ctypes.c_uint),
+    ("ifa_addr", ctypes.c_void_p),
+    ("ifa_netmask", ctypes.c_void_p),
+    ("ifa_dstaddr", ctypes.c_void_p),
+    ("ifa_data", ctypes.c_void_p),
+]
+_IFF_UP, _IFF_BROADCAST, _IFF_LOOPBACK, _IFF_POINTOPOINT = 0x1, 0x2, 0x8, 0x10
+
+
+def _sockaddr_ipv4(pointer):
+    """(family, the four address bytes) of a sockaddr from getifaddrs. A BSD netmask may be cut
+    short by its length byte, and may say no family: the bytes it leaves out are zeros."""
+    if sys.platform == "darwin":
+        length = ctypes.string_at(pointer, 1)[0]
+        raw = ctypes.string_at(pointer, min(max(length, 2), 8))
+        family = raw[1]
+    else:
+        raw = ctypes.string_at(pointer, 8)
+        family = int.from_bytes(raw[:2], sys.byteorder)
+    return family, raw[4:8].ljust(4, b"\0")
+
+
+def _posix_interfaces() -> list:
+    libc = ctypes.CDLL(ctypes.util.find_library("c"), use_errno=True)
+    libc.getifaddrs.argtypes = [ctypes.POINTER(ctypes.POINTER(_Ifaddrs))]
+    libc.freeifaddrs.argtypes = [ctypes.POINTER(_Ifaddrs)]
+    head = ctypes.POINTER(_Ifaddrs)()
+    if libc.getifaddrs(ctypes.byref(head)) != 0:
+        raise OSError(ctypes.get_errno(), "getifaddrs failed")
+    found = []
+    try:
+        node = head
+        while node:
+            item = node.contents
+            node = item.ifa_next
+            wanted = _IFF_UP | _IFF_BROADCAST
+            if item.ifa_flags & (wanted | _IFF_LOOPBACK | _IFF_POINTOPOINT) != wanted or not item.ifa_addr or not item.ifa_netmask:
+                continue
+            family, address = _sockaddr_ipv4(item.ifa_addr)
+            if family != socket.AF_INET:
+                continue
+            found.append((socket.inet_ntoa(address), socket.inet_ntoa(_sockaddr_ipv4(item.ifa_netmask)[1])))
+    finally:
+        libc.freeifaddrs(head)
+    return found
+
+
+class _IpAddrRow(ctypes.Structure):
+    _fields_ = [
+        ("dwAddr", ctypes.c_uint32),
+        ("dwIndex", ctypes.c_uint32),
+        ("dwMask", ctypes.c_uint32),
+        ("dwBCastAddr", ctypes.c_uint32),
+        ("dwReasmSize", ctypes.c_uint32),
+        ("unused1", ctypes.c_ushort),
+        ("wType", ctypes.c_ushort),
+    ]
+
+
+def _windows_interfaces() -> list:
+    """GetIpAddrTable: every IPv4 address with its mask, each stored in network order. Windows
+    gives no point-to-point flag here; a VPN adapter's /32 is what leaves it out."""
+    iphlpapi = ctypes.WinDLL("iphlpapi")
+    iphlpapi.GetIpAddrTable.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_ulong), ctypes.c_int]
+    size = ctypes.c_ulong(0)
+    iphlpapi.GetIpAddrTable(None, ctypes.byref(size), 0)
+    for _attempt in range(3):
+        table = ctypes.create_string_buffer(size.value)
+        result = iphlpapi.GetIpAddrTable(table, ctypes.byref(size), 0)
+        if result != 122:  # ERROR_INSUFFICIENT_BUFFER: an address came up in between
+            break
+    if result != 0:
+        raise OSError(result, "GetIpAddrTable failed")
+    count = ctypes.c_uint32.from_buffer(table).value
+    rows = (_IpAddrRow * count).from_buffer(table, ctypes.sizeof(ctypes.c_uint32))
+    gone = 0x0008 | 0x0040  # MIB_IPADDR_DISCONNECTED, MIB_IPADDR_DELETED
+    return [(socket.inet_ntoa(struct.pack("=I", row.dwAddr)), socket.inet_ntoa(struct.pack("=I", row.dwMask)))
+            for row in rows if not row.wType & gone]
+
+
+def _answer_source(host: str, interfaces=None, towards=None):
+    """The address to answer `host` from when the routing table would pick a different one: this
+    machine's address on the network `host` is on. None when `host` is on none of them, or the
+    routing table agrees. Seen on 01-10-2026: a VPN's route for the home network sent the laptop's
+    answer out from the VPN's address, and the requester never knew it for an answer."""
+    try:
+        requester = ipaddress.IPv4Address(host)
+    except ValueError:
+        return None
+    ours = [address for address, netmask in (_interfaces() if interfaces is None else interfaces)
+            if requester in ipaddress.IPv4Network(f"{address}/{netmask}", strict=False)]
+    if not ours:
+        return None
+    try:
+        routed = (towards or local_address_towards)(host)
+    except OSError:
+        routed = None
+    # Two addresses on one network: whichever the routing table picks is already right.
+    return None if routed in ours else ours[0]
+
+
+def _oversized(exc: OSError) -> bool:
+    """Windows' WSAEMSGSIZE: a datagram larger than the buffer, which Windows reports as an error
+    where other platforms cut it short. Anyone can send one, so it must cost only itself; it once
+    stopped a PC's pairing loop for good."""
+    return getattr(exc, "winerror", None) == 10040
+
+
+def _receive_on(sock, timeout: float):
+    """The next datagram on `sock` as (message, address), {} for one that is not a message, or None
+    once `timeout` passes."""
+    sock.settimeout(max(timeout, 0.001))
+    try:
+        data, address = sock.recvfrom(MAX_DATAGRAM_BYTES + 1)
+    except socket.timeout:
+        return None
+    except ConnectionResetError:
+        # Windows: the port-unreachable of an earlier datagram.
+        return {}, ("", 0)
+    except OSError as exc:
+        if _oversized(exc):
+            return {}, ("", 0)
+        raise PairingError("no_answer") from exc
+    message = decode(data)
+    return (message if isinstance(message, dict) else {}), address
 
 
 def machine_name() -> str:
@@ -1083,6 +1263,8 @@ class Announcer:
                     # fine; the peer that was not listening is the Mac's problem.
                     continue
                 except OSError as exc:
+                    if _oversized(exc):
+                        continue
                     if self._stop.is_set():
                         break
                     self.error = str(exc)
@@ -1269,18 +1451,65 @@ class Discovery:
                 self._replies.get_nowait()
             except queue.Empty:
                 break
-        self._awaiting = (target[0], client.pair_id)
-        answer = self._ask(sock, target, client.pair_id, client.start(), MSG_PAIR_ANSWER)
-        confirm = self._judge(client, answer, code, lambda abort: sock.sendto(encode(abort), target))
-        return client.finish(self._ask(sock, target, client.pair_id, confirm, MSG_PAIR_DONE))
+        self._awaiting = client.pair_id
+        source = _answer_source(target[0])
+        if source is not None:
+            # The routing table would send to `target` from another of this machine's addresses (a
+            # VPN's route for the home network, the laptop on 01-10), which the host may have no
+            # way back to. The attempt goes from the address on the target's network instead, on
+            # a socket of its own that hears the replies itself.
+            own = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            try:
+                own.bind((source, 0))
+            except OSError as exc:
+                own.close()
+                self.logger.warning("pairing not sent from %s, sent as routed: %s", source, exc)
+            else:
+                with own:
+                    return self._exchange_on(own, lambda timeout: _receive_on(own, timeout), target, client, code)
+        return self._exchange_on(sock, self._take_reply, target, client, code)
 
-    def _ask(self, sock, target, pair_id: str, message: dict, reply_type: str) -> dict:
-        """Sends one datagram until the first reply of `reply_type` from `target` comes back.
-        The first one decides: the caller judges it and never waits for a better one."""
+    def _exchange_on(self, sock, receive, target, client, code: str) -> str:
+        send = lambda datagram: sock.sendto(datagram, target)
+        answer = self._ask(send, receive, target, client.pair_id, client.start(), MSG_PAIR_ANSWER)
+        confirm = self._judge(client, answer, code, lambda abort: send(encode(abort)))
+        return client.finish(self._ask(send, receive, target, client.pair_id, confirm, MSG_PAIR_DONE, client.proves))
+
+    def _take_reply(self, timeout: float):
+        try:
+            return self._replies.get(timeout=timeout)
+        except queue.Empty:
+            return None
+
+    def _ask(self, send, receive, target, pair_id: str, message: dict, reply_type: str, proves=None) -> dict:
+        """Sends `message` to `target` until the reply of `reply_type` for `pair_id` comes back;
+        `receive(timeout)` gives the next (reply, address), or None once `timeout` passes.
+
+        A reply from `target` decides at once: the caller judges it and never waits for a better
+        one. A reply from any other address is held (the first ok one and the first refusal), and
+        decides only if a window ends with nothing from `target`, even among replies already
+        waiting, an ok one before a refusal: a host whose answer a VPN's route sent out from its
+        own address (01-10) is still heard, while a stranger who read the pairing id from a beacon
+        loses to a host's answer from the address asked. `proves`, for a receipt, says whether an
+        ok one carries the host's proof: from another address one that does decides at once and
+        one that does not is ignored, since checking it tests no guess."""
         datagram = encode(message)
+        # The first ok reply and the first refusal from elsewhere, and nothing more.
+        held = {}
+
+        def consider(reply, address):
+            if reply.get("pair") != pair_id or reply.get("type") != reply_type:
+                return None
+            if address[0] == target[0]:
+                return reply
+            if proves is not None and reply.get("ok") is True:
+                return reply if proves(reply) else None
+            held.setdefault(reply.get("ok") is True, reply)
+            return None
+
         for _attempt in range(PAIR_ATTEMPTS):
             try:
-                sock.sendto(datagram, target)
+                send(datagram)
             except OSError as exc:
                 raise PairingError("no_answer") from exc
             deadline = self.clock() + PAIR_REPLY_TIMEOUT_SECONDS
@@ -1288,13 +1517,22 @@ class Discovery:
                 remaining = deadline - self.clock()
                 if remaining <= 0:
                     break
-                try:
-                    reply, address = self._replies.get(timeout=remaining)
-                except queue.Empty:
+                received = receive(remaining)
+                if received is None:
                     break
-                if address[0] != target[0] or reply.get("pair") != pair_id or reply.get("type") != reply_type:
-                    continue
-                return reply
+                decided = consider(*received)
+                if decided is not None:
+                    return decided
+            if held:
+                # What has already come from the address asked still beats what was held.
+                for _waiting in range(MAX_HELD_SWEEP):
+                    received = receive(0)
+                    if received is None:
+                        break
+                    decided = consider(*received)
+                    if decided is not None:
+                        return decided
+                return held.get(True) or held[False]
         raise PairingError("no_answer")
 
     def _run(self) -> None:
@@ -1316,6 +1554,8 @@ class Discovery:
                 except ConnectionResetError:
                     continue
                 except OSError as exc:
+                    if _oversized(exc):
+                        continue
                     if self._stop.is_set():
                         break
                     self.error = str(exc)
@@ -1330,7 +1570,7 @@ class Discovery:
                         self._note_beacon(message, address)
                     except Exception:
                         self.logger.exception("beacon dropped")
-                elif kind in (MSG_PAIR_ANSWER, MSG_PAIR_DONE) and self._awaiting == (address[0], message.get("pair")):
+                elif kind in (MSG_PAIR_ANSWER, MSG_PAIR_DONE) and self._awaits(message):
                     # Only what the attempt under way is waiting for is kept, and only so much
                     # of it, so nothing a stranger sends piles up in memory.
                     try:
@@ -1343,6 +1583,10 @@ class Discovery:
         finally:
             self._sock = None
             sock.close()
+
+    def _awaits(self, message: dict) -> bool:
+        awaiting = self._awaiting
+        return awaiting is not None and message.get("pair") == awaiting
 
     def _send_find(self, sock) -> None:
         with self._lock:
@@ -1790,6 +2034,8 @@ class PairingService(Discovery):
                 except ConnectionResetError:
                     continue
                 except OSError as exc:
+                    if _oversized(exc):
+                        continue
                     if self._stop.is_set():
                         break
                     self.error = str(exc)
@@ -1821,7 +2067,7 @@ class PairingService(Discovery):
             # At most one answer per address per interval: a beacon is larger than the `find` that
             # draws it, so the rate is what keeps the port from being a useful amplifier.
             if _due(answered, address[0], arrived):
-                sock.sendto(self._beacon(), address)
+                self._answer(sock, self._beacon(), address)
         elif kind in (MSG_PAIR_START, MSG_PAIR_CONFIRM, MSG_PAIR_REQUEST):
             reply, paired, fresh = self._host_handle(message, address[0], "udp")
             # A refusal is larger than the smallest datagram that draws one, so it is rationed.
@@ -1829,15 +2075,39 @@ class PairingService(Discovery):
                 if fresh:
                     self._stop.wait(max(0.0, arrived + PAIR_ANSWER_SECONDS - time.monotonic()))
                 try:
-                    sock.sendto(encode(reply), address)
+                    self._answer(sock, encode(reply), address)
                 except OSError as exc:
                     self.logger.warning("pairing reply not sent: %s", exc)
             self._paired(paired, address[0])
-        elif kind in (MSG_PAIR_ANSWER, MSG_PAIR_DONE) and self._awaiting == (address[0], message.get("pair")):
+        elif kind in (MSG_PAIR_ANSWER, MSG_PAIR_DONE) and self._awaits(message):
             try:
                 self._replies.put_nowait((message, address))
             except queue.Full:
                 pass
+
+    def _answer(self, sock, data: bytes, address) -> None:
+        """Sends a reply to a pairing request or a `find` from this machine's address on the
+        requester's own network, where the routing table would pick another (_answer_source): a
+        requester sorts answers by the address it asked, though never by port.
+
+        ⚠ The socket that does it takes a port of its own. Bound to the pairing port beside the
+        main socket, it would take any datagram for that address arriving while it lived (a
+        pair_confirm, another machine's request), and Windows does not say which of two such
+        sockets gets one. A requester takes beacons from strangers on its pairing port, so an
+        answer from another port reaches it as well."""
+        source = _answer_source(address[0])
+        if source is not None:
+            try:
+                out = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+                try:
+                    out.bind((source, 0))
+                    out.sendto(data, address)
+                    return
+                finally:
+                    out.close()
+            except OSError as exc:
+                self.logger.warning("pairing reply not sent from %s, sent as routed: %s", source, exc)
+        sock.sendto(data, address)
 
     def _beacon_entry(self, message: dict, address):
         entry = super()._beacon_entry(message, address)
@@ -1943,7 +2213,7 @@ class PairingService(Discovery):
             known, replaced = _find_known(peers, self.identity, client.host_identity, client.host_name, client.host_platform, self.wall())
             if known is not None:
                 raise AlreadyPaired(None if known is True else known)
-            replaced = replaced or _migrated_for(peers, address)
+            replaced = replaced or _migrated_for(peers, address, client.host_name, client.host_platform)
             if _clashes(peers, entry["token"], replaced):
                 raise PairingError(ERROR_REFUSED)
             if replaced is None and len(peers) >= MAX_PEERS:

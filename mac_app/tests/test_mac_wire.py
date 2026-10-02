@@ -44,6 +44,10 @@ class Wire(unittest.TestCase):
         cfg = self.store.load()
         raw = {**config_to_raw(cfg), "host": "127.0.0.1", "port": self.machine.port, "auth_token": PAIRED_TOKEN, "pc_name": "Far PC"}
         cfg = self.store.save(raw)
+        # A pairing made on 1.5.0, as a flat save with a token is the 1.4.x migration, which never links.
+        settings = self.store.current()
+        settings["peers"][0].update(id=protocol.id_text(self.machine.own), from_1_4=False)
+        self.store.save_settings(settings)
         self.settings_machine_id = self.store.current()["machine_id"]
         # The far machine knows this Mac by the id the Mac made for itself.
         self.machine.settings.peer(PAIRED_TOKEN)["id"] = self.settings_machine_id
@@ -158,8 +162,7 @@ class DrivenMacTests(unittest.TestCase):
             port = probe.getsockname()[1]
         cfg = self.store.save({**config_to_raw(cfg), "host": "127.0.0.1", "port": port, "auth_token": PAIRED_TOKEN, "pc_name": "Initiator"})
         settings = self.store.current()
-        settings["peers"][0]["id"] = protocol.id_text(PEER)
-        settings["peers"][0]["send"] = False
+        settings["peers"][0].update(id=protocol.id_text(PEER), send=False, from_1_4=False)
         self.store.save_settings(settings)
         self.controller = KVMController(
             cfg, logger=quiet_logger(), quartz=FakeQuartz, clipboard=FakeClipboard(),

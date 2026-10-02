@@ -85,16 +85,16 @@ class LearnedTests(Folder):
         self.assertEqual(learned["mac_host"], "192.168.77.9")
         self.assertEqual(learned["mac_hardware_address"], "aa:bb:cc:dd:ee:ff")
         self.assertEqual(learned["paired_with"], "Studio")
-        self.assertEqual((learned["mac_return_edge"], learned["arrangement_set_at"]), ("left", 100))
+        # A side is no longer the flat view's: no save writes one back (set_ways and apply_arrangement do).
+        self.assertNotIn("mac_return_edge", learned)
 
-    def test_the_token_and_the_ways_come_back_too_so_a_fold_cannot_be_undone_by_a_save(self):
+    def test_the_token_comes_back_too_so_a_fold_cannot_be_undone_by_a_save(self):
         settings = self.saved()
         settings["peers"] = settings["peers"][1:]
         app_config.write_settings(self.path, settings)
         learned = app_config.learned_fields(self.path)
         self.assertEqual(learned["auth_token"], harness.entry(C, "Other")["token"])
-        self.assertEqual(learned["mac_return_edge"], "top")
-        self.assertIn("edge", learned["crossing_methods"])
+        self.assertEqual(learned["paired_with"], "Other")
 
     def test_the_stamps_author_for_same_on_all_machines_is_kept(self):
         config = app_config.load_config(self.path)

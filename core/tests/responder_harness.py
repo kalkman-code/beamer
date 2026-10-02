@@ -166,6 +166,15 @@ class FakeClipboard:
 CAPS = ["clipboard", "clipboard_image", "gestures", "media_keys", "text", "settings"]
 
 
+def free_port():
+    """A port nothing listens on now. A test's own settings use it, never Beamer's 24820, which the
+    installed app on the same machine holds whenever it runs: a suite run while it was closed
+    once took that port from it (01-10-2026)."""
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        return probe.getsockname()[1]
+
+
 def wait_for(predicate, timeout=3.0):
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
@@ -188,7 +197,6 @@ class Machine:
         self.clipboard = FakeClipboard(events=self.events)
         self.away = away
         self.statuses = []
-        self.notices = []
         self.owners = []
         self.arrivals = []
         self.pressures = []
@@ -215,7 +223,6 @@ class Machine:
             arrangement_callback=lambda peer, read: self.arrangements.append((peer, read)),
             settings_callback=lambda peer, data: self.settings_seen.append((peer, data)),
             paired_callback=lambda peer, ids: self.paired.append((peer, ids)),
-            notice_callback=self.notices.append,
             link_callback=lambda peer, up: self.links.append((peer, up)),
             announce=lambda peer: list(self.announcements.get(peer, [])),
         )

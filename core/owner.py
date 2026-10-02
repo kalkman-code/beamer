@@ -21,7 +21,9 @@ order:
 The actions: `Send` a message on the link this machine opened to a peer; `SendClipboard` (this
 machine's clipboard, to that peer); `SetClipboard` (here); `Moved` (the input is now on a peer, or
 home, and why, which is what the app captures, lands and says by); `Unreachable` (a hand-over
-that did not happen, to say so); and `LOCAL` (let this input event through on this machine).
+that did not happen, to say so); `Drop` (close the link this machine opened to a peer and let it
+reconnect: a hand-over to it was given up before it answered, and its `accept` may still be on the
+way); and `LOCAL` (let this input event through on this machine).
 An input event that returns nothing is swallowed or held: the app suppresses it.
 
 `away` is what the responder's `busy` refusal asks: true from the moment a take is sent until it
@@ -71,6 +73,15 @@ class Moved:
 class Unreachable:
     peer: str
     why: str                    # a refusal's `why`, "refused", "no_answer", "link_lost", "unreachable"
+
+
+@dataclass(frozen=True)
+class Drop:
+    peer: str
+
+
+# What the dropped link says of itself until it reconnects.
+DROPPED = "A hand-over to this machine was called off before it answered"
 
 
 @dataclass(frozen=True)
@@ -184,17 +195,18 @@ class Owner:
         if peer == self.on:
             if self._wait is not None and self._wait.chain:
                 # The machine being left disarmed its zones for the hand-over: re-arm it.
-                self._wait = None
-                return self._stay() + self._replay_held()
+                return self._abandon() + self._stay() + self._replay_held()
             return []
         if peer not in self._links & self._accepting:
             return [Unreachable(peer, "unreachable")]
         if self.held_back(peer):
             return []
         left = self.on
-        self._wait = None
+        # A hand-over waiting on `peer` itself is not given up: this take follows it on that link.
+        actions = self._abandon(unless=peer)
         self.route += 1
-        actions = self._let_go_of(left, peer) if left is not None else []
+        if left is not None:
+            actions += self._let_go_of(left, peer)
         actions += self._take(peer, edge, offset, chain=False)
         self._arrive(peer, self._wait.reach)
         actions += self._clipboard_to(peer)
@@ -220,7 +232,8 @@ class Owner:
     def accept(self, peer, data):
         route = data.get("route")
         took = self._takes.get(route)
-        if took is None or took[0] != peer:
+        # Not from a link this machine dropped: closing it already ended what this accept began.
+        if took is None or took[0] != peer or peer not in self._links:
             return []
         wait = self._wait
         if wait is not None and wait.peer == peer and wait.route == route:
@@ -258,7 +271,7 @@ class Owner:
         wait = self._wait
         if wait is not None and now >= wait.due:
             if wait.chain:
-                actions += self._not_taken(wait.peer, "no_answer")
+                actions += self._abandon() + self._not_taken(wait.peer, "no_answer")
             else:
                 actions += self._come_home("no_answer")
         expired = [peer for peer, until in self._left_out.items() if until <= now]
@@ -378,17 +391,29 @@ class Owner:
         if self._wait is not None and not self._wait.chain:
             # Never taken: a clipboard sent after the take was dropped there.
             self._clipboard_at.discard(left)
-        self._wait = None
+        actions = self._abandon()
         self.route += 1
         if left in self._links:
-            actions = self._let_go_of(left, self.own_id)
+            actions += self._let_go_of(left, self.own_id)
         else:
             self._forget_pressed(left)
-            actions = []
         self.on = None
         self.reach_sent = []
         actions.append(Moved(None, left, why, edge, offset))
         return actions + self._replay_held()
+
+    def _abandon(self, unless=None):
+        """Ends the wait. A hand-over given up before its answer closes the next machine's link,
+        first, so a late `accept` cannot leave that machine owned while nobody drives it: the
+        responder ends an ownership when its link ends (section 5). That machine is out of `reach`
+        until its link is up again."""
+        wait, self._wait = self._wait, None
+        if wait is None or not wait.chain or wait.peer == unless:
+            return []
+        self._links.discard(wait.peer)
+        self._accepting.discard(wait.peer)
+        self._clipboard_at.discard(wait.peer)
+        return [Drop(wait.peer)]
 
     def _not_taken(self, peer, why):
         """A hand-over from the machine the input is on did not happen: re-arm it without `peer`."""

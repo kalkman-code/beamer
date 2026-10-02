@@ -36,6 +36,16 @@ def labels(peers: list) -> dict:
     return result
 
 
+def sharing_a_name(machines: list) -> list:
+    """For each machine heard, in order, whether another in the list has its name (as `labels()`
+    compares them): one machine heard on two interfaces is two rows, told apart by address."""
+    counts = {}
+    for machine in machines:
+        key = _name(machine).casefold()
+        counts[key] = counts.get(key, 0) + 1
+    return [counts[_name(machine).casefold()] > 1 for machine in machines]
+
+
 def label_for(peers: list, *, token: Optional[str] = None, peer_id: Optional[str] = None, host: Optional[str] = None) -> str:
     """`labels()` for one machine, found by its token, its id (`b64`) or its address, in that order of
     preference; "" when none matches. What a status or a notice calls a machine, so two of one name
@@ -53,15 +63,28 @@ def add_peer(settings: dict, entry: dict, replaced: Optional[dict] = None) -> No
     """Puts a newly paired `entry` in `settings` (WIRE.md section 6, item 5). `replaced`, an entry
     as `peers()` gave it, is dropped by its token and the new one takes its place: the first entry
     is the one the flat settings read, so the new machine must not slip behind. Zones that name
-    an id no entry has any more go with it, as the entry migrated from 1.4.x's do (`id` empty); a
-    machine paired again under its own id keeps its zones."""
+    an id no entry has any more go with it; a machine paired again under its own id keeps its zones.
+    The entry migrated from 1.4.x (`id` empty) gives its side and zones to a pairing with the machine
+    at its saved host on its platform (section 6, item 4): that is the machine the user meant to pair
+    again, and a match by name alone takes nothing, a name being anyone's to claim."""
     peers = settings["peers"]
     at = next((index for index, held in enumerate(peers) if replaced is not None and held.get("token") == replaced.get("token")), None)
     if at is None:
         peers.append(entry)
     else:
         peers[at] = entry
+    if (replaced is not None and replaced.get("from_1_4") is True and replaced.get("id") == "" and entry.get("id")
+            and replaced.get("host") and replaced.get("host") == entry.get("host")
+            and replaced.get("platform") == entry.get("platform")):
+        entry.update({field: replaced.get(field, default) for field, default in
+                      (("side", ""), ("side_set_at", 0), ("side_by", ""))})
+        for zone in settings["zones"]:
+            if zone.get("peer") == "":
+                zone["peer"] = entry["id"]
     _drop_orphan_zones(settings)
+    # Imported here: ways names machines by this module's labels.
+    from core import ways
+    ways.ensure_zones(settings)
 
 
 def remove_peer(settings: dict, token: str) -> Optional[dict]:

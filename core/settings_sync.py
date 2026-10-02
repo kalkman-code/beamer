@@ -240,7 +240,7 @@ def scope(page, who, on, own):
 
 
 def switch_note(who, on, peer_too_old):
-    """The note under Overview's Same on both machines switch."""
+    """The note under Overview's Same on all machines switch; `who` names the machines it keeps in step with."""
     if peer_too_old:
         return f"{who}'s Beamer is too old to keep settings in step. Update it to turn this on."
     if on:

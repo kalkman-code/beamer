@@ -21,13 +21,13 @@ CAPS = ("clipboard", "clipboard_image", "gestures", "media_keys", "text", "setti
 
 
 class FakeLink:
-    def __init__(self, token, book, identity, *, state=None, up=None, message=None, notice=None, socket_factory=None,
+    def __init__(self, token, book, identity, *, state=None, up=None, message=None, socket_factory=None,
                  tunnel=None, clock=None, reconnect_seconds=2.0, hardware=None, large=None):
         self.token = token
         self.hardware = hardware
         self.large = large
         self.book = book
-        self.callbacks = {"state": state, "up": up, "message": message, "notice": notice}
+        self.callbacks = {"state": state, "up": up, "message": message}
         self.tunnel = tunnel
         self.started = False
         self.stopped = False

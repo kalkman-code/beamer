@@ -11,8 +11,7 @@ the app through `message`.
 Callbacks, each on the link's own thread, never with a lock of the link's held:
 `state(link, up, text)` for every change of how the link is doing, `text` being the sentence to
 show; `up(link, fields)` once the handshake is done and before anything else is sent, `fields`
-being the `welcome` as protocol.read_welcome gives it (`id` as 16 bytes); `message(link, message)`;
-`notice(text)` for the one-time notice a migrated pairing gives."""
+being the `welcome` as protocol.read_welcome gives it (`id` as 16 bytes); `message(link, message)`."""
 
 import collections
 import errno
@@ -81,7 +80,6 @@ class OutboundLink:
         state=None,
         up=None,
         message=None,
-        notice=None,
         socket_factory=socket.create_connection,
         tunnel=None,
         clock=time.monotonic,
@@ -100,7 +98,7 @@ class OutboundLink:
         # arriving at `began`, may be read: only the clipboard of a let-go (owner.expects_clipboard).
         # Any other such frame is opened, so its counter is spent, and dropped without being parsed.
         self._large = large
-        self._callbacks = (state, up, message, notice)
+        self._callbacks = (state, up, message)
         self._muted = False
         self._factory = socket_factory
         self._tunnel = tunnel
@@ -142,6 +140,7 @@ class OutboundLink:
         self._blocked_for = None
         self._try_host = None
         self._followed_at = None
+        self._followed_to = None
         self._answered = False
         self._checked_at = 0.0
         self.status = ""
@@ -223,8 +222,10 @@ class OutboundLink:
 
     @staticmethod
     def _target(entry):
+        """Where to dial the entry, or None when it is not dialled: send off, no address, or not
+        made by pairing (a typed token, or any token migrated from 1.4.x)."""
         host, port = entry.get("host"), entry.get("port")
-        if entry.get("send") is not True or not host or isinstance(port, bool) or not isinstance(port, int) or not 1 <= port <= 65535:
+        if not protocol.linkable(entry) or entry.get("send") is not True or not host or isinstance(port, bool) or not isinstance(port, int) or not 1 <= port <= 65535:
             return None
         return host, port
 
@@ -254,7 +255,7 @@ class OutboundLink:
                 if entry is None:
                     self._report(False, "This pairing was removed", "removed")
                     return
-                target = self._target(entry) if self.key_id is not None else None
+                target = self._target(entry)
                 shape = (entry.get("host"), entry.get("port"), entry.get("id"))
                 if self._blocked_for is not None and self._blocked_for != shape:
                     self._blocked_for = None
@@ -301,15 +302,6 @@ class OutboundLink:
                 state(self, up, text)
             except Exception:
                 LOGGER.exception("state callback failed")
-
-    def _notify(self, text):
-        callback = self._callbacks[3]
-        if callback is None or self._muted:
-            return
-        try:
-            callback(text)
-        except Exception:
-            LOGGER.exception("notice callback failed")
 
     def _call(self, index, *args):
         callback = self._callbacks[index]
@@ -435,7 +427,7 @@ class OutboundLink:
         if direct and host != entry.get("host"):
             changes["host"] = host
         try:
-            outcome, saved = self._book.admit(self.key_id, own_id, welcome["id"], changes)
+            outcome, _ = self._book.admit(self.key_id, own_id, welcome["id"], changes)
         except Exception:
             LOGGER.exception("Could not save what the link to %s taught", name)
             raise LinkEnded(f"Could not save what {name} told this machine", "failed") from None
@@ -443,13 +435,6 @@ class OutboundLink:
             raise LinkEnded("This pairing was removed", "removed")
         if outcome == receiver.WRONG_ID:
             raise LinkEnded(f"A different Beamer answered at {host}", "different")
-        if outcome == receiver.FOLDED:
-            shown = saved.get("name") or host
-            old = saved["folded"].get("name") or "unnamed"
-            self._notify(f"{shown} linked from {host} under its Beamer 1.4 pairing, {old}, which is now part of {shown}.")
-            raise LinkEnded(f"{shown} is paired again; the earlier pairing was folded into it", "removed")
-        if outcome == receiver.FIRST_LINK:
-            self._notify(f"Linked with {welcome['name']} at {host} for the first time on Beamer 1.5.0.")
         sock.settimeout(READ_SECONDS)
         welcome["session"] = session
         return welcome
@@ -545,6 +530,8 @@ class OutboundLink:
                     raise protocol.ProtocolError(f"invalid message length: {length}")
                 if len(buffer) < protocol.HEADER_SIZE + length:
                     break
+                if now - began > protocol.FRAME_COMPLETE_SECONDS:
+                    raise LinkEnded(f"{name} took too long to send one message", "stopped")
                 body = bytes(buffer[protocol.HEADER_SIZE:protocol.HEADER_SIZE + length])
                 del buffer[:protocol.HEADER_SIZE + length]
                 plain = session.open_raw(body)
@@ -553,6 +540,8 @@ class OutboundLink:
                 else:
                     self._deal(protocol.parse_message(plain), began or now)
                 began = now if buffer else None
+            if buffer and now - began > protocol.FRAME_COMPLETE_SECONDS:
+                raise LinkEnded(f"{name} took too long to send one message", "stopped")
             self._tick(now)
 
     def _large_due(self, began):
@@ -741,9 +730,13 @@ class OutboundLink:
     # Following a peer to a new address (section 6)
 
     def follow(self, machines):
-        """`machines`: what discovery hears, dicts with `name` and `address`. A link down for ten
-        seconds is tried once at the address of a beacon with this entry's exact name, at its saved
-        port, at most every thirty seconds. The address is saved only once the link authenticates."""
+        """`machines`: what discovery hears, dicts with `name`, `address` and, while that machine shows
+        a code, `id`. A link down for ten seconds is tried once at the address of a beacon with this
+        entry's exact name, at its saved port, at most every thirty seconds. The address is saved only
+        once the link authenticates. Two machines may share a name, so a beacon whose `id` is another
+        machine's is passed over, one at another paired machine's saved address is tried after the
+        rest (the two may have swapped addresses), and several are tried in turn rather than the
+        first for ever."""
         if self._live or self.key_id is None:
             return
         now = self._clock()
@@ -752,12 +745,19 @@ class OutboundLink:
         if self._followed_at is not None and now - self._followed_at < FOLLOW_EVERY_SECONDS:
             return
         entry = self.entry()
-        if entry is None or entry.get("send") is not True or not entry.get("name"):
+        if entry is None or self._target(entry) is None or not entry.get("name"):
             return
-        address = next((m["address"] for m in machines if m.get("name") == entry["name"] and m.get("address") and m["address"] != entry.get("host")), None)
-        if address is None:
+        others = {peer.get("host") for peer in self._book.peers() if peer.get("token") != self.token}
+        own_id = entry.get("id")
+        found = [m["address"] for m in machines
+                 if m.get("name") == entry["name"] and m.get("address") and m["address"] != entry.get("host")
+                 and not (own_id and m.get("id") and m["id"] != own_id)]
+        found = [address for address in found if address not in others] + [address for address in found if address in others]
+        if not found:
             return
+        address = found[(found.index(self._followed_to) + 1) % len(found)] if self._followed_to in found else found[0]
         self._followed_at = now
+        self._followed_to = address
         with self._lock:
             self._try_host = address
         self._wake.set()

@@ -1,6 +1,8 @@
 """This PC's input going to its peers (WIRE.md sections 3 to 5): the zones, the owner's decisions
 carried out, the key names, the clipboard and the way home, against links that only record."""
 
+import queue
+import threading
 import time
 import unittest
 
@@ -8,8 +10,10 @@ from links_rig import B, C, CAPS, HERE, Rig, edge_zone, make_config
 
 import capture_win
 import sender
+from core import owner as owner_module
 from core import protocol
 from core.return_edge import Rect
+from core.tests import pngs
 from core.tests import responder_harness as harness
 
 
@@ -150,6 +154,16 @@ class TakingTests(unittest.TestCase):
         kinds = [message["type"] for message in self.rig.sent(B)]
         self.assertEqual(kinds, ["focus", "clipboard", "keydown"])
         self.assertEqual(self.rig.sent(B, "clipboard")[0]["data"]["text"], "here")
+
+    def test_an_image_too_large_to_decode_is_not_sent_but_the_text_is(self):
+        for image, sent in ((pngs.png(), True), (pngs.png(16384, 16384), False)):
+            with self.subTest(sent=sent):
+                rig = Rig()
+                rig.clipboard.image = image
+                rig.sender.set_redirecting(True)
+                data = rig.sent(B, "clipboard")[0]["data"]
+                self.assertEqual(data["text"], "here")
+                self.assertEqual("image" in data, sent)
 
     def test_a_peer_without_the_clipboard_capability_is_sent_none(self):
         self.rig.links.caps_of[B] = frozenset()
@@ -324,6 +338,24 @@ class OnwardTests(unittest.TestCase):
             self.switch(HERE, edge="left", offset=0.5)
         self.assertTrue(self.rig.desktop.placed)
 
+    def test_a_hand_over_given_up_before_its_answer_closes_that_peers_link(self):
+        # Its accept may still be on the way: the close is what ends that ownership (WIRE.md
+        # section 5). Abandoned by the shortcut home here; the owner's tests cover every way.
+        self.switch(C)
+        self.assertEqual(self.rig.links.closed, [])
+        self.sender.set_redirecting(False)
+        self.rig.flush()
+        self.assertEqual(self.rig.links.closed, [C])
+        self.assertFalse(self.sender.redirecting)
+
+    def test_a_hand_over_given_up_when_the_outbound_queue_is_full_still_closes_that_peers_link(self):
+        # The close cannot wait in a queue that has no room: C would stay owned by nobody driving.
+        self.switch(C)
+        self.sender._outbound = queue.Queue(maxsize=1)
+        self.sender._outbound.put_nowait(owner_module.Send(B, protocol.ping_msg()))
+        self.sender.set_redirecting(False)
+        self.assertIn(C, self.rig.links.closed)
+
     def test_a_peer_that_cannot_be_reached_leaves_the_input_where_it_is(self):
         self.switch(C)
         self.rig.inbound(C, protocol.refuse_msg(self.sender._owner.route, "owned"))
@@ -452,6 +484,36 @@ class ReviewTests(unittest.TestCase):
         rig.sender.on_message(B, protocol.switch_v6(rig.sender._owner.route, C))
         self.assertTrue(self.wait(lambda: [m for t, m in rig.links.sent if t == C and m["type"] == "focus"], 0.4),
                         "the take of the next peer waited for the clipboard read")
+
+    def test_a_read_asked_for_again_waits_its_turn_behind_a_write_decided_before_it(self):
+        rig = self.two()
+        rig.clipboard.block_get = True
+        rig.clipboard.block_set = True
+        rig.sender._deliver(owner_module.SendClipboard(B))
+        self.assertTrue(rig.clipboard.get_started.wait(1), "the first clipboard read never started")
+
+        write = threading.Thread(
+            target=rig.sender._deliver,
+            args=(owner_module.SetClipboard(protocol.clipboard_msg("from there")),),
+            daemon=True,
+        )
+        write.start()
+        time.sleep(0.1)
+
+        key = {"type": protocol.MSG_KEYDOWN, "data": {"key": "v"}}
+        rig.sender._deliver(owner_module.SendClipboard(B))
+        rig.sender._deliver(owner_module.Send(B, key))
+        rig.clipboard.release_get.set()
+        self.assertTrue(rig.clipboard.set_started.wait(1), "the clipboard write never started")
+        rig.clipboard.release_set.set()
+        write.join(1)
+        self.assertFalse(write.is_alive(), "the clipboard write did not finish")
+        self.assertTrue(self.wait(lambda: not rig.sender._clip_wait), "the peer's queued messages did not finish")
+
+        sent = [m for peer, m in rig.links.sent if peer == B]
+        clipboards = [m["data"]["text"] for m in sent if m["type"] == protocol.MSG_CLIPBOARD]
+        self.assertEqual(clipboards, ["here", "from there"])
+        self.assertEqual([m["type"] for m in sent[-3:]], [protocol.MSG_CLIPBOARD, protocol.MSG_CLIPBOARD, protocol.MSG_KEYDOWN])
 
     def test_what_follows_a_clipboard_read_for_that_peer_still_goes_after_it(self):
         rig = self.two()

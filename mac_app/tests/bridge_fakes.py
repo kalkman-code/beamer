@@ -6,7 +6,7 @@ import logging
 import time
 
 import config
-from core import protocol
+from core.tests import pngs
 
 class FakeQuartz:
     kCGEventKeyDown = 10
@@ -155,7 +155,7 @@ def quiet_logger():
     return logger
 
 
-FAKE_PNG = protocol.PNG_SIGNATURE + b"\x00" * 64
+FAKE_PNG = pngs.png()
 
 
 class FakeClipboard:

@@ -29,6 +29,7 @@ from core import owner as owner_module
 from core import peerlist
 from core import protocol
 from core import receiver
+from core import ways
 from pointer_hide import PointerHider
 from key_codes import (
     KEY_NAME_TO_CODE,
@@ -627,7 +628,85 @@ class KVMController:
         self._home_notify = True
         self._home_presses = set()
         self._letting_go = False
+        # The machine this Mac's input was last on, which the shortcut goes back to.
+        self._last_peer = None
         self._sync_links()
+        self.crossing = self._crossing_engine()
+
+    # The machines, and which one a shortcut or a status means
+
+    def _crossing_engine(self):
+        """This Mac's zones for every machine it sends to (WIRE.md section 8). A controller made from a
+        Config alone has the flat crossing settings for its one machine instead."""
+        if self._memory is not None:
+            if not self.cfg.send_to_windows:
+                return crossing.CrossingEngine(resistance_px=self.cfg.crossing["resistance_px"],
+                                               block_while_dragging=self.cfg.crossing["block_while_dragging"], ways=[])
+            return crossing.CrossingEngine.from_config(self.cfg.crossing)
+        peers = [entry for entry in self.book.peers() if entry.get("send") is True]
+        return crossing.CrossingEngine.from_zones(self.cfg.crossing, self.book.zones(), peers)
+
+    def zones_changed(self):
+        """A machine's side or zones changed in the settings: the engine is built again from them."""
+        self.crossing = self._crossing_engine()
+
+    def _ready(self, peer):
+        """Whether `peer` can take this Mac's input now: its link is up and it accepts input."""
+        link = self._peers_up.get(peer) if peer else None
+        return link is not None and link.live() and self._accepts.get(peer, False)
+
+    def _crossing_ready(self, peer):
+        """Whether a zone to `peer` has a wall now: its link is up, this Mac sends to it, and it is not
+        held back after a refusal, as Windows' zones are, since a push that cannot take it must not pin
+        the pointer and glow as if it would. One that does not accept input keeps its wall, so the push
+        says why it cannot cross. The one machine of a Config-built controller is its primary link's."""
+        if peer is None:
+            link = self._primary_link
+            peer = link.peer_id if link is not None else None
+        link = self._peers_up.get(peer) if peer else None
+        if link is None or not link.live() or not self._may_send(peer):
+            return False
+        with self._owner_lock:
+            return not self.owner.held_back(peer)
+
+    def _may_send(self, peer):
+        """Whether this Mac's direction switch for `peer` is on, as the settings have it this moment:
+        its link goes only at the next sync."""
+        if self._memory is not None:
+            return bool(self.cfg.send_to_windows)
+        return any(entry.get("id") == peer and entry.get("send") is True for entry in self.book.peers())
+
+    def _zone_peer(self, step):
+        """The machine a push through a zone goes to; a Config-built controller's one machine has no id in its zones."""
+        if step.peer is not None:
+            return step.peer
+        link = self._primary_link
+        return link.peer_id if link is not None else None
+
+    def _shortcut_peer(self):
+        """The machine the shortcut, the Send button and the menu's own item send input to (core/ways.py)."""
+        if self._memory is not None:
+            link = self._primary_link
+            return link.peer_id if link is not None and link.peer_id else None
+        return ways.shortcut_peer(self.book.peers(), self._last_peer, self._ready)
+
+    def _link_of(self, peer):
+        """The link to `peer`, up or not; None when this Mac has none to it."""
+        link = self._peers_up.get(peer) if peer else None
+        if link is not None:
+            return link
+        for candidate in list(self.links.values()):
+            if candidate.peer_id == peer or (candidate.entry() or {}).get("id") == peer:
+                return candidate
+        return None
+
+    def _in_question(self):
+        """The machine the window's status speaks of: where input is, else where the shortcut would send it."""
+        return self.owner.on or self._shortcut_peer()
+
+    def _status_link(self):
+        link = self._link_of(self._in_question())
+        return link if link is not None else self._primary_link
 
     # The machine, as its links say it
 
@@ -648,9 +727,15 @@ class KVMController:
 
     @property
     def peer_label(self):
-        """The first machine as the window shows it (its name, with the end of its id where two
-        share one); None when nothing is paired."""
-        return self._label(lambda peer: peer.get("token") == self._primary_token)
+        """The machine the window's status speaks of (where input is, else where the shortcut would
+        send it), as the window shows it: its name, with the end of its id where two share one; the
+        first machine when neither is known, None when nothing is paired."""
+        peer = self._in_question()
+        if peer:
+            label = self._label(lambda entry: entry.get("id") == peer)
+            if label:
+                return label
+        return self._label(lambda entry: entry.get("token") == self._primary_token)
 
     @property
     def on_label(self):
@@ -671,9 +756,11 @@ class KVMController:
 
     @property
     def connection_status(self):
-        link = self._primary_link
+        link = self._status_link()
         if link is not None and link.peer_locked:
             return f"Unlocking {self.peer_label or 'the other machine'}…"
+        if link is not None and link is not self._primary_link and link.status:
+            return link.status
         return self._connection_status
 
     @connection_status.setter
@@ -682,27 +769,28 @@ class KVMController:
 
     @property
     def status_kind(self):
-        """What the primary link last did, as core.link.OutboundLink.kind says it."""
-        link = self._primary_link
+        """What the link to the machine in question last did, as core.link.OutboundLink.kind says it."""
+        link = self._status_link()
         return link.kind if link is not None else "none"
 
     @property
     def via_tunnel(self):
-        link = self._primary_link
+        link = self._status_link()
         return bool(link is not None and link.via_tunnel and link.live())
 
     @property
     def windows_locked(self):
-        link = self._primary_link
+        link = self._status_link()
         return bool(link is not None and link.peer_locked)
 
     @property
     def peer_settings(self):
-        """Whether the primary peer keeps Same on all machines, None while there is no link."""
-        link = self._primary_link
-        if link is None or not link.live():
+        """Whether every machine with a link up keeps Same on all machines, None while no link is up:
+        one that does not is left out of it, and the window says so."""
+        live = [link for link in list(self._peers_up.values()) if link.live()]
+        if not live:
             return None
-        return "settings" in link.caps
+        return all("settings" in link.caps for link in live)
 
     @property
     def full_screen_app(self):
@@ -718,7 +806,7 @@ class KVMController:
 
     @property
     def connected(self):
-        link = self._primary_link
+        link = self._status_link()
         return link is not None and link.live()
 
     @property
@@ -732,10 +820,8 @@ class KVMController:
         few seconds. The upper median of the last few trips, so an even count rounds towards the
         slower one. The responder holds each `ack` for however long it waited to batch it and says
         so (`held_us`), which the link has already taken off."""
-        if not self.redirecting or not self.connected:
-            return None
-        link = self._peers_up.get(self.owner.on) or self._primary_link
-        if link is None:
+        link = self._peers_up.get(self.owner.on) if self.redirecting else None
+        if link is None or not link.live():
             return None
         trips = sorted(link.round_trips(ROUND_TRIP_MAX_AGE_SECONDS)[-ROUND_TRIP_SAMPLES:])
         if not trips:
@@ -828,10 +914,10 @@ class KVMController:
         self.translator.printable_down.clear()
         self.translator.reset_mouse_accumulators()
         self.ignore_gate.configure(cfg.ignored_inputs)
-        self.crossing = crossing.CrossingEngine.from_config(cfg.crossing)
-        self._crossing_failed = False
         if self._memory is not None:
             self._memory.follow(cfg)
+        self.crossing = self._crossing_engine()
+        self._crossing_failed = False
         self._drain_outbound()
         self._sync_links()
         # A link made to an address that is no longer the saved one goes, and comes back to the new.
@@ -848,25 +934,23 @@ class KVMController:
         touching the link: the trigger, key map, crossing and how it looks and feels. The settings
         window calls this as each control changes; update_config is for a new address or token,
         which has to reconnect."""
-        was = self.cfg.crossing.get("edge") if self.cfg is not None else None
         with self._cfg_lock:
             self.cfg = cfg
-        edge = cfg.crossing.get("edge")
-        if edge != was and edge in crossing.EDGES:
-            # The arrangement is one value both machines hold. Changing it
-            # here is a change for the other machine too, so it travels the moment it
-            # changes rather than waiting for the next reconnect.
-            self.send_arrangement(edge, cfg.crossing.get("arrangement_set_at", 0))
+        # No machine's side goes from here: the flat settings only mirror the first machine's, and a
+        # new first machine's would be the default. Sides go from the window, one machine at a time
+        # (`send_arrangement`), and with every link that comes up.
         self.trigger_code = KEY_NAME_TO_CODE[cfg.trigger_key]
         self.ignore_gate.configure(cfg.ignored_inputs)
-        self.crossing = crossing.CrossingEngine.from_config(cfg.crossing)
-        self._crossing_failed = False
         if self._memory is not None:
             self._memory.follow(cfg)
+        self.crossing = self._crossing_engine()
+        self._crossing_failed = False
 
-    def set_redirecting(self, value, edge=None, offset=None, came_home=True):
+    def set_redirecting(self, value, edge=None, offset=None, came_home=True, peer=None):
         """`edge` and `offset` are the edge of the other machine and fraction along it a
         crossing arrives at; absent for the shortcut, when it leaves its pointer where it is.
+        `peer` is the machine to send input to: a zone's, or one a menu names; without it, the
+        machine the shortcut picks (core/ways.py).
 
         Input coming home this way is a switch, the shortcut or the menu, and says so through
         on_crossing as "home" with where the pointer is, for the arrival that shows it.
@@ -875,10 +959,13 @@ class KVMController:
         value = bool(value)
         if not value:
             self._go_generation += 1
-        if value == self.redirecting:
+        onward = value and self.redirecting and peer is not None and peer != self.owner.on
+        if value == self.redirecting and not onward:
             return False
         if value:
-            return self._redirect(edge, offset)
+            # A menu naming another machine while input is away moves it straight there (WIRE.md
+            # section 5, "Moving input"): the owner lets go of the one it leaves in the same route.
+            return self._redirect(edge, offset, peer)
         self._return_local()
         self.logger.info("input returned to this Mac")
         if came_home:
@@ -887,29 +974,39 @@ class KVMController:
                 self._notify_crossing("home", crossing.Step(pin=(pin[0], pin[1])))
         return True
 
-    def _redirect(self, edge, offset):
-        link = self._primary_link
-        if not self.connected or not link.peer_id:
-            self.logger.warning("cannot redirect: the other machine is not connected")
-            self._alert("Beamer", f"Cannot switch — {self.connection_status}")
+    def _cannot_reach(self, peer):
+        """Why a switch to `peer` cannot start, in the words its link last used."""
+        link = self._link_of(peer)
+        if link is None or link is self._primary_link:
+            status = self.connection_status
+        else:
+            status = link.status or "Waiting to connect"
+        name = self._name_of(peer) if peer else None
+        return status if not name or name in status else f"{name}: {status}"
+
+    def _redirect(self, edge, offset, peer=None):
+        peer = peer or self._shortcut_peer()
+        link = self._peers_up.get(peer) if peer else None
+        if link is None or not link.live():
+            self.logger.warning("cannot redirect: %s is not connected", self._name_of(peer) if peer else "the other machine")
+            self._alert("Beamer", f"Cannot switch — {self._cannot_reach(peer)}")
             return False
         if self.receiving:
             # Driven, so this Mac sends its owner home first and drives once the owner has let go
             # (the responder ends it by force after a second): a machine never does both.
             send_home = self.send_peer_home
             if send_home is not None and send_home():
-                self._go_after_let_go(edge, offset)
+                self._go_after_let_go(edge, offset, peer=peer)
                 return True
             self.logger.warning("cannot redirect: another machine is driving this Mac and cannot be reached")
             return False
-        if not self.cfg.send_to_windows:
-            self.logger.info("cannot redirect: sending this Mac's input to the other machine is switched off")
+        if not self._may_send(peer):
+            self.logger.info("cannot redirect: sending this Mac's input to %s is switched off", self._name_of(peer))
             return False
         self.redirect_started_at = self.clock()
         self._note_clipboard()
-        peer = link.peer_id
         self._step(lambda owner: owner.go(peer, edge, offset))
-        if not self.redirecting:
+        if not self.redirecting or self.owner.on != peer:
             return False
         responder = self.responder
         if responder is not None and responder.driven:
@@ -920,7 +1017,7 @@ class KVMController:
             return False
         return True
 
-    def _go_after_let_go(self, edge, offset, step=None):
+    def _go_after_let_go(self, edge, offset, step=None, peer=None):
         if self._letting_go:
             return
         self._letting_go = True
@@ -936,7 +1033,7 @@ class KVMController:
                 if self.receiving or self.stop_event.is_set():
                     self.logger.warning("the machine driving this Mac did not let go; the move is dropped")
                     return
-                if self.set_redirecting(True, edge, offset) and step is not None:
+                if self.set_redirecting(True, edge, offset, peer=peer) and step is not None:
                     self._notify_crossing("cross", step)
             finally:
                 self._letting_go = False
@@ -1328,19 +1425,12 @@ class KVMController:
         self._crossing_failed = False
         if not self.crossing.armed:
             return event
-        if self.crossing_paused or self.full_screen_app is not None or not self.cfg.send_to_windows:
+        if self.crossing_paused or self.full_screen_app is not None:
             return event
         if event_type not in self.translator.movement_event_types:
             self.crossing.reset()
             return event
-        if not self.connected:
-            return event
-        peer = self._primary_link.peer_id
-        with self._owner_lock:
-            # Held back after a refusal, as Windows' zones are: a push that cannot take it must not
-            # pin the pointer and glow as if it would.
-            held_back = bool(peer) and self.owner.held_back(peer)
-        if held_back:
+        if not any(self._crossing_ready(peer) for peer in self.crossing.peers):
             self.crossing.reset()
             return event
         try:
@@ -1361,6 +1451,7 @@ class KVMController:
                 # Each display's own edges count where nothing lies beyond them, and Part of the
                 # edge measures its thirds along the pointer's display.
                 displays=self._current_displays(),
+                ready=self._crossing_ready,
             )
         except Exception:
             self._crossing_failed = True
@@ -1377,9 +1468,9 @@ class KVMController:
                 if send_home is None or not send_home():
                     self.logger.warning("cannot cross: another machine is driving this Mac and cannot be reached")
                     return event
-                self._go_after_let_go(step.edge, step.offset, step)
+                self._go_after_let_go(step.edge, step.offset, step, peer=self._zone_peer(step))
                 return event
-            if self.set_redirecting(True, edge=step.edge, offset=step.offset):
+            if self.set_redirecting(True, edge=step.edge, offset=step.offset, peer=self._zone_peer(step)):
                 self._notify_crossing("cross", step)
                 return None
             return event
@@ -1618,7 +1709,7 @@ class KVMController:
                 for token in wanted - set(self.links):
                     link = self.link_factory(
                         token, self.book, self.identity,
-                        state=self._link_state, up=self._link_up, message=self._link_message, notice=self._notify_user,
+                        state=self._link_state, up=self._link_up, message=self._link_message,
                         socket_factory=self.socket_factory,
                         tunnel=self._connect_via_ssh_fallback if token == first else None,
                         clock=self.clock, reconnect_seconds=self.cfg.reconnect_interval_s, **hardware,
@@ -1639,6 +1730,7 @@ class KVMController:
         """The peers changed under the links (a pairing made or removed): bring the links in step,
         and tell every peer we can send to who else this machine has (`paired`)."""
         self._sync_links()
+        self.zones_changed()
         for link in list(self.links.values()):
             link.refresh()
             if link.live():
@@ -1688,10 +1780,6 @@ class KVMController:
                 "Open /Applications/Beamer Tunnel.command",
             ) from exc
 
-    def _notify_user(self, text):
-        self.logger.info("%s", text)
-        self._alert("Beamer", text)
-
     def _name_of(self, peer):
         return self._label(lambda entry: entry.get("id") == peer) or self._up_names.get(peer) or "the other machine"
 
@@ -1726,9 +1814,15 @@ class KVMController:
             self._step(lambda owner: owner.link_down(peer))
             return
         self.logger.info("connected to %s", fields["name"])
+        # The handshake may have just given a migrated machine its id, and its zones with it.
+        self.zones_changed()
         self._announce_to(link, fields)
+        self._peer_up(link, fields)
         if link.token == self._primary_token:
             self._primary_up(link, fields)
+
+    def _peer_up(self, link, fields):
+        """Any machine's link is up: a hook for WakingController, which learns its hardware address."""
 
     def _primary_up(self, link, fields):
         """The primary peer's link is up: its saved address is the one now in use. A hook for
@@ -1753,7 +1847,8 @@ class KVMController:
         own = bytes(self.identity()["id"])
         if entry.get("side") in crossing.EDGES:
             by = protocol.read_id(entry.get("side_by")) or own
-            link.post(protocol.arrangement_v6(entry["side"], entry.get("side_set_at", 0), by))
+            link.post(protocol.arrangement_v6(entry["side"], entry.get("side_set_at", 0), by,
+                                              way_back=self.way_back(link.peer_id)))
         if "settings" in link.caps:
             try:
                 announcements = list(self.announce())
@@ -1832,25 +1927,30 @@ class KVMController:
             self.logger.exception("handling a %r from the other machine failed", kind)
 
     def _handle_arrangement(self, message, peer):
-        """The peer changed which edge of its screen faces this one. Handed to the app, which owns
-        the settings file, as the edge of THIS Mac that leads to the peer; nothing is applied here.
-        The app's flat settings hold the first peer's side only, so another's is not applied."""
+        """A machine changed which edge of its screen faces this one. Handed to the app, which owns
+        the settings file, as (that machine's id, its edge, the stamp, who made it); nothing is
+        applied here."""
         read = protocol.read_arrangement_v6(message, time.time())
-        if read is None or self.on_arrangement is None:
+        if read is None or self.on_arrangement is None or not peer:
             return
-        peers = self.book.peers()
-        if not peers or peers[0].get("id") != peer:
-            self.logger.info("an arrangement from a peer other than the first is not applied yet")
-            return
-        self.on_arrangement(crossing.OPPOSITE[read["edge"]], read["set_at"], protocol.id_text(read["by"]))
+        self.on_arrangement(peer, read["edge"], read["set_at"], protocol.id_text(read["by"]), read.get("way_back"))
 
-    def send_arrangement(self, mac_edge, set_at):
-        """Tell the primary peer which edge of this Mac faces it, when the change was made here.
-        Sent straight out: it is not input, and it goes whether or not input is redirected."""
-        link = self._primary_link
+    def way_back(self, peer):
+        """Whether one of this Mac's zones in use leads to `peer` and can fire: what every `arrangement`
+        to it says as `way_back` (WIRE.md section 8)."""
+        with self.book.lock:
+            return ways.has_way({"peers": self.book.peers(), "zones": self.book.zones()}, peer)
+
+    def send_arrangement(self, peer, mac_edge, set_at, by=None):
+        """Tell `peer` which edge of this Mac faces it, stamped `set_at` by `by` (a b64 id, this Mac when
+        None), with whether a way leads there, over this Mac's own link to it. Sent straight out: it is
+        not input, and it goes whether or not input is redirected. False when that link is not up; the
+        app then tries the link the peer opened."""
+        link = self._peers_up.get(peer) if peer else None
         if link is None or not link.live():
             return False
-        return link.post(protocol.arrangement_v6(mac_edge, int(set_at), bytes(self.identity()["id"])))
+        author = protocol.read_id(by) or bytes(self.identity()["id"])
+        return link.post(protocol.arrangement_v6(mac_edge, int(set_at), author, way_back=self.way_back(peer)))
 
     def send_settings(self, data, source=None):
         """Tell every peer that keeps Same on all machines this Mac's state, but `source` (the peer
@@ -1879,11 +1979,13 @@ class KVMController:
         """Under `_owner_lock`: send what the owner says to send, and return the rest."""
         effects = []
         for action in actions:
-            if not isinstance(action, (owner_module.Send, owner_module.SendClipboard, owner_module.SetClipboard)):
+            if not isinstance(action, (owner_module.Send, owner_module.SendClipboard, owner_module.SetClipboard, owner_module.Drop)):
                 effects.append(action)
                 continue
             try:
-                if isinstance(action, (owner_module.Send, owner_module.SendClipboard)):
+                if isinstance(action, owner_module.Drop):
+                    self._drop(action.peer)
+                elif isinstance(action, (owner_module.Send, owner_module.SendClipboard)):
                     self._deliver(action)
                 else:
                     self._on_pasteboard(lambda message=action.message: self._set_clipboard(message))
@@ -1973,6 +2075,14 @@ class KVMController:
             except Exception:
                 self.logger.exception("a message held behind the clipboard could not be sent")
 
+    def _drop(self, peer):
+        """A hand-over given up before its answer: that machine's link is closed, which ends any
+        ownership a late accept began there, and it reconnects (WIRE.md section 5)."""
+        self._forget_held(peer)
+        link = self._peers_up.get(peer)
+        if link is not None:
+            link.drop(owner_module.DROPPED)
+
     def _forget_held(self, peer):
         """`peer`'s link is lost: what waited for its clipboard is for a link that is gone."""
         with self._clip_lock:
@@ -2024,6 +2134,7 @@ class KVMController:
                 self.cursor_pin_point = self._capture_cursor_pin_point()
                 self._set_cursor_follows_mouse(False)
                 self.pointer.hide()
+            self._last_peer = moved.to
             self.logger.info("redirecting input to %s", self._name_of(moved.to))
             return
         self._local_cleanup()
@@ -2084,7 +2195,7 @@ class KVMController:
 
     def _send_clipboard(self, peer, waiting):
         """Read this Mac's clipboard and send it as a clipboard message. Text over CLIPBOARD_MAX_BYTES
-        and an image over CLIPBOARD_IMAGE_MAX_BYTES are each dropped on their own, so an oversized
+        and an image protocol.png_fits refuses are each dropped on their own, so an oversized
         screenshot still lets its text through; with nothing left nothing is sent. Nothing is sent
         either when `waiting` was dropped with its link while the pasteboard was read."""
         if self._peers_up.get(peer) is None:
@@ -2099,12 +2210,8 @@ class KVMController:
         if text and len(text.encode("utf-8")) > protocol.CLIPBOARD_MAX_BYTES:
             self.logger.warning("local clipboard text is too large; skipping the text")
             text = None
-        if image is not None and len(image) > protocol.CLIPBOARD_IMAGE_MAX_BYTES:
-            self.logger.warning(
-                "local clipboard image is %d bytes, over the %d cap; skipping the image",
-                len(image),
-                protocol.CLIPBOARD_IMAGE_MAX_BYTES,
-            )
+        if image is not None and not protocol.png_fits(image):
+            self.logger.warning("local clipboard image (%d bytes) is past what a clipboard may carry; skipping the image", len(image))
             image = None
         if not text and image is None:
             self.logger.debug("local clipboard is empty; not sending it")

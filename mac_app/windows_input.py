@@ -38,7 +38,7 @@ class WindowsInput:
         self._logger = logger or LOGGER
         # A peer can change the arrangement too, and it reaches this Mac over whichever of the two
         # links is up: this one, or the Mac's own, which bridge.py handles. Both end at the same
-        # handler in the app, called with (mac_edge, set_at, by).
+        # handler in the app, called with (peer, edge, set_at, by, way_back).
         self._arrangement_callback = arrangement_callback
         self._lock = threading.RLock()
         self._running_for = None
@@ -68,7 +68,6 @@ class WindowsInput:
             arrangement_callback=self._on_arrangement,
             settings_callback=self._on_settings,
             paired_callback=self._on_paired,
-            notice_callback=controller._notify_user,
             announce=self._announce,
         )
         controller.responder = self.server
@@ -136,16 +135,16 @@ class WindowsInput:
         link = self._controller._peers_up.get(protocol.id_text(peer_id))
         return link is not None and link.live()
 
-    def send_arrangement(self, mac_edge: str, set_at: int) -> bool:
-        """Tell the primary peer which edge of this Mac faces it, over the link it opened to this
-        Mac, when this Mac has none open to it (WIRE.md section 3, "Which link"). False when
-        nobody is connected, which is not a failure worth reporting."""
-        peers = self._controller.book.peers()
-        ident = protocol.read_id(peers[0].get("id")) if peers else None
+    def send_arrangement(self, peer: str, mac_edge: str, set_at: int, by=None) -> bool:
+        """Tell `peer` (a b64 id) which edge of this Mac faces it, as the controller's send_arrangement
+        does, over the link it opened to this Mac, when this Mac has none open to it (WIRE.md section 3,
+        "Which link"). False when it has no link here either, which is not a failure worth reporting."""
+        ident = protocol.read_id(peer)
         if ident is None or self._outbound_up(ident):
             return False
-        own = bytes(self._controller.identity()["id"])
-        return self.server.send(ident, protocol.arrangement_v6(mac_edge, int(set_at), own))
+        author = protocol.read_id(by) or bytes(self._controller.identity()["id"])
+        return self.server.send(ident, protocol.arrangement_v6(mac_edge, int(set_at), author,
+                                                               way_back=self._controller.way_back(peer)))
 
     def send_settings(self, data, source=None) -> bool:
         """This Mac's settings state to every machine linked to it that keeps it and that this Mac
@@ -171,7 +170,8 @@ class WindowsInput:
         messages = []
         if entry.get("side") in crossing.EDGES:
             by = protocol.read_id(entry.get("side_by")) or bytes(self._controller.identity()["id"])
-            messages.append(protocol.arrangement_v6(entry["side"], entry.get("side_set_at", 0), by))
+            messages.append(protocol.arrangement_v6(entry["side"], entry.get("side_set_at", 0), by,
+                                                    way_back=self._controller.way_back(text)))
         caps = self.server.caps_of(peer) or frozenset()
         if "settings" in caps:
             messages += [m for m in self._controller.announce() if m.get("type") == protocol.MSG_SETTINGS]
@@ -183,7 +183,8 @@ class WindowsInput:
     def _on_arrangement(self, peer, read) -> None:
         if self._arrangement_callback is None:
             return
-        self._arrangement_callback(crossing.OPPOSITE[read["edge"]], read["set_at"], protocol.id_text(read["by"]))
+        self._arrangement_callback(protocol.id_text(peer), read["edge"], read["set_at"], protocol.id_text(read["by"]),
+                                   read.get("way_back"))
 
     def _on_settings(self, peer, data) -> None:
         if self.settings_callback is not None:

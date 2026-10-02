@@ -15,6 +15,7 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(
 
 import clipboard_win
 from core import protocol
+from core.tests import pngs
 from clipboard_win import BI_BITFIELDS, BI_RGB, CF_DIB, CF_UNICODETEXT, bgra_to_dib, dib_to_bgra
 
 
@@ -25,7 +26,7 @@ def header(width, height, bpp, compression=BI_RGB, size=40):
 
 # 2x2 image, top-down, BGRA: blue, green / red, half-transparent white.
 BGRA = bytes([255, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255, 255, 255, 255, 128])
-PNG = protocol.PNG_SIGNATURE + b"\x00" * 64
+PNG = pngs.png()
 
 
 class DibCodecTests(unittest.TestCase):

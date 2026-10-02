@@ -27,6 +27,7 @@ import socket
 import struct
 import threading
 import time
+import zlib
 
 from nacl.bindings import (
     crypto_aead_chacha20poly1305_ietf_ABYTES,
@@ -67,11 +68,21 @@ CLIPBOARD_MAX_BYTES = 256 * 1024
 # 0.1s on wired gigabit and half a second on decent Wi-Fi. Beyond it the text still goes.
 CLIPBOARD_IMAGE_MAX_BYTES = 8 * 1024 * 1024
 CLIPBOARD_IMAGE_PNG = "png"
+# What a PNG may decode to, checked from its bytes first (png_fits): 2^25 pixels holds an 8K screen
+# (7680x4320 is 33,177,600) and is 128 MiB as 8-bit RGBA, 256 MiB at 16 bits a channel, where a
+# few compressed megabytes could otherwise claim gigabytes. Metadata a decoder inflates (colour profiles, compressed text) is held
+# to 4 MiB in all; a real colour profile is a few kilobytes.
+PNG_MAX_SIDE = 16384
+PNG_MAX_PIXELS = 2**25
+PNG_METADATA_MAX_BYTES = 4 * 1024 * 1024
 # The largest sealed frame either end accepts. It must hold the biggest clipboard message -- an
 # 8MB image is ~10.7MB as base64, beside up to 256KB of text -- because the clipboard also travels
 # back on the reply stream. A 1MB cap there dropped the link on every return with a screenshot on
 # the clipboard.
 MAX_FRAME_BYTES = 16 * 1024 * 1024
+# A frame arrives whole within this of its first length byte, or the link ends (WIRE.md section 2,
+# frames): liveness alone lets a peer that sends a byte a second hold a 16 MiB read open for days.
+FRAME_COMPLETE_SECONDS = 30.0
 # A message that is not a clipboard fits in far less. The largest is `text`: 4096 bytes of UTF-8,
 # which as JSON escapes is at most 6 bytes a character, about 24 KiB; hello, welcome, settings,
 # focus and paired are each a few KiB at most. A frame over this from a peer that may not send a
@@ -163,11 +174,12 @@ def legacy_frame(msg: dict) -> bytes:
     return struct.pack(">I", len(body)) + body
 
 
-def _recv_exact(sock: socket.socket, n: int, deadline: float = None) -> bytes:
+def _recv_exact(sock: socket.socket, n: int, deadline: float = None, idle: float = None) -> bytes:
     """`deadline` is a time.monotonic() moment the whole read must finish by.
     A socket timeout alone bounds each recv, not the read: a peer sending one
     byte every few seconds would hold a handshake open for as long as it
-    liked. Past the deadline this raises socket.timeout like a quiet peer."""
+    liked. Past the deadline this raises socket.timeout like a quiet peer.
+    `idle`, when given, still bounds each recv."""
     chunks = []
     remaining = n
     while remaining > 0:
@@ -175,7 +187,7 @@ def _recv_exact(sock: socket.socket, n: int, deadline: float = None) -> bytes:
             left = deadline - time.monotonic()
             if left <= 0:
                 raise socket.timeout("deadline passed while reading")
-            sock.settimeout(left)
+            sock.settimeout(left if idle is None else min(left, idle))
         chunk = sock.recv(remaining)
         if not chunk:
             raise ConnectionClosed("socket closed while reading")
@@ -194,12 +206,30 @@ def recv_msg(sock: socket.socket, session, limit: int = MAX_FRAME_BYTES, deadlin
 
 
 def recv_frame(sock: socket.socket, limit: int = MAX_FRAME_BYTES, deadline: float = None) -> bytes:
-    """One frame as it came, after its length (held to `limit`) and before it is opened."""
-    header = _recv_exact(sock, HEADER_SIZE, deadline)
-    (length,) = struct.unpack(">I", header)
-    if length < 1 or length > limit:
-        raise ProtocolError(f"invalid message length: {length}")
-    return _recv_exact(sock, length, deadline)
+    """One frame as it came, after its length (held to `limit`) and before it is opened. Without a
+    `deadline` the wait for the frame's first byte is the socket's own timeout (the link's
+    liveness), and the frame then has FRAME_COMPLETE_SECONDS from that byte to arrive whole
+    (WIRE.md section 2, frames), each read still bounded by that timeout."""
+    if deadline is not None:
+        header = _recv_exact(sock, HEADER_SIZE, deadline)
+        (length,) = struct.unpack(">I", header)
+        if length < 1 or length > limit:
+            raise ProtocolError(f"invalid message length: {length}")
+        return _recv_exact(sock, length, deadline)
+    idle = sock.gettimeout()
+    first = _recv_exact(sock, 1)
+    deadline = time.monotonic() + FRAME_COMPLETE_SECONDS
+    try:
+        header = first + _recv_exact(sock, HEADER_SIZE - 1, deadline, idle)
+        (length,) = struct.unpack(">I", header)
+        if length < 1 or length > limit:
+            raise ProtocolError(f"invalid message length: {length}")
+        return _recv_exact(sock, length, deadline, idle)
+    finally:
+        try:
+            sock.settimeout(idle)
+        except OSError:
+            pass  # closed meanwhile by another thread: what the read raised is the news
 
 
 def ping_msg() -> dict:
@@ -244,13 +274,80 @@ def clipboard_image(data) -> bytes:
         image = base64.b64decode(encoded, validate=True)
     except (binascii.Error, ValueError):
         return None
-    if len(image) > CLIPBOARD_IMAGE_MAX_BYTES or not image.startswith(PNG_SIGNATURE):
+    return image if png_fits(image) else None
+
+
+def png_fits(image) -> bool:
+    """Whether a clipboard image may be sent, or set where something will decode it (WIRE.md
+    section 3), judged from its bytes alone: at most CLIPBOARD_IMAGE_MAX_BYTES; the PNG signature,
+    then IHDR, whole, with each side 1 to PNG_MAX_SIDE pixels and PNG_MAX_PIXELS in all; every
+    chunk inside the file, up to IEND; and the metadata a decoder inflates (iCCP, zTXt, a
+    compressed iTXt) at most PNG_METADATA_MAX_BYTES in all. Nothing here touches the pixels: a PNG of a few
+    megabytes can decode to gigabytes, and these bounds are what keeps that from happening."""
+    if not isinstance(image, (bytes, bytearray)) or len(image) > CLIPBOARD_IMAGE_MAX_BYTES or not image.startswith(PNG_SIGNATURE):
+        return False
+    at, budget = len(PNG_SIGNATURE), PNG_METADATA_MAX_BYTES
+    while at + 12 <= len(image):
+        length, kind = struct.unpack_from(">I4s", image, at)
+        data_at = at + 8
+        if data_at + length + 4 > len(image):
+            return False
+        data = bytes(image[data_at:data_at + length])
+        if at == len(PNG_SIGNATURE):
+            if kind != b"IHDR" or length != 13:
+                return False
+            width, height = struct.unpack_from(">II", data)
+            if not (1 <= width <= PNG_MAX_SIDE and 1 <= height <= PNG_MAX_SIDE) or width * height > PNG_MAX_PIXELS:
+                return False
+        elif kind in (b"IHDR", b"acTL", b"fcTL", b"fdAT"):
+            # A clipboard image is a still with one header: these would claim sizes unchecked.
+            return False
+        elif kind in (b"iCCP", b"zTXt", b"iTXt"):
+            budget = _inflated_within(_png_compressed(kind, data), budget)
+            if budget is None:
+                return False
+        elif kind == b"IEND":
+            return True
+        at = data_at + length + 4
+    return False
+
+
+def _png_compressed(kind: bytes, data: bytes):
+    """The zlib stream inside an iCCP, zTXt or compressed iTXt, False for an uncompressed iTXt,
+    or None when the chunk is not shaped as the PNG specification says."""
+    name_end = data.find(b"\x00")
+    if name_end < 0:
         return None
-    return image
+    if kind != b"iTXt":
+        return data[name_end + 2:]
+    flag = data[name_end + 1:name_end + 2]
+    if flag == b"\x00":
+        return False
+    language_end = data.find(b"\x00", name_end + 3)
+    translated_end = data.find(b"\x00", language_end + 1) if language_end >= 0 else -1
+    return data[translated_end + 1:] if flag == b"\x01" and translated_end >= 0 else None
+
+
+def _inflated_within(stream, budget):
+    """What is left of `budget` once `stream` is inflated, or None when it would pass the budget
+    or is not one whole zlib stream ending where the chunk does (not zlib, cut short, or with
+    bytes after its end). Inflates at most one byte past the budget."""
+    if stream is None:
+        return None
+    if stream is False:
+        return budget
+    inflater = zlib.decompressobj()
+    try:
+        inflated = inflater.decompress(stream, budget + 1)
+    except zlib.error:
+        return None
+    if len(inflated) > budget or not inflater.eof or inflater.unused_data:
+        return None
+    return budget - len(inflated)
 
 
 def settings_msg(data: dict) -> dict:
-    """Same on both machines: whether it is on, its stamp and, while on, the shared values, as
+    """Same on all machines: whether it is on, its stamp and, while on, the shared values, as
     settings_sync.message_data builds them. Sent on every change while on and announced on every
     new connection; an older Beamer ignores the type."""
     return {"type": MSG_SETTINGS, "data": dict(data)}
@@ -370,9 +467,18 @@ def read_id(text):
 
 
 def is_paired_token(token) -> bool:
-    """Whether `token` is one pairing made: the `b64` of 32 bytes, in its one spelling. Anything
-    else is a typed token, which never links (WIRE.md section 1)."""
+    """Whether `token` has the shape pairing gives: the `b64` of 32 bytes, in its one spelling.
+    Anything else is a typed token. The shape proves nothing about where a token came from (a
+    user could type 43 "A"s); `linkable` is what decides whether an entry links."""
     return _from_b64(token, TOKEN_SIZE) is not None
+
+
+def linkable(entry) -> bool:
+    """Whether a peer entry may link, and so have a key id: its token was made by 1.5.0's pairing.
+    An entry migrated from 1.4.x never links, whatever its token looks like, because 1.4.x kept
+    no record of whether its token was paired or typed, and a key id is an offline test of its
+    token (WIRE.md sections 1 and 2)."""
+    return isinstance(entry, dict) and entry.get("from_1_4") is not True and is_paired_token(entry.get("token"))
 
 
 def key_id(token: str) -> bytes:
@@ -1040,13 +1146,18 @@ def read_clipboard(message):
     return {"text": text, "image": clipboard_image(data)}
 
 
-def arrangement_v6(edge: str, set_at: int, by: bytes) -> dict:
-    return {"type": MSG_ARRANGEMENT, "data": {"edge": edge, "set_at": int(set_at), "by": id_text(by)}}
+def arrangement_v6(edge: str, set_at: int, by: bytes, way_back=None) -> dict:
+    """`way_back`, when a boolean, says whether one of the sender's zones leads to the receiver (WIRE.md section 8)."""
+    data = {"edge": edge, "set_at": int(set_at), "by": id_text(by)}
+    if isinstance(way_back, bool):
+        data["way_back"] = way_back
+    return {"type": MSG_ARRANGEMENT, "data": data}
 
 
 def read_arrangement_v6(message, now: float):
-    """{edge, set_at, by} from an `arrangement`, or None: malformed, or stamped more than a day
-    ahead of `now` or above 2^53 - 2, which the receiver ignores."""
+    """{edge, set_at, by} from an `arrangement`, with `way_back` when it carried a boolean one, or
+    None: malformed, or stamped more than a day ahead of `now` or above 2^53 - 2, which the
+    receiver ignores. A `way_back` that is not a boolean is left out, and the side still stands."""
     parsed = read_message(message)
     if parsed is None or parsed[0] != MSG_ARRANGEMENT:
         return None
@@ -1055,7 +1166,10 @@ def read_arrangement_v6(message, now: float):
     set_at = data.get("set_at")
     if not _one_of(data.get("edge"), EDGES) or by is None or not _int(set_at, 0, SET_AT_MAX) or set_at > now + SET_AT_AHEAD:
         return None
-    return {"edge": data["edge"], "set_at": set_at, "by": by}
+    read = {"edge": data["edge"], "set_at": set_at, "by": by}
+    if isinstance(data.get("way_back"), bool):
+        read["way_back"] = data["way_back"]
+    return read
 
 
 def paired_msg(ids) -> dict:

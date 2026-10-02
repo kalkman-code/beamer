@@ -393,6 +393,29 @@ class GestureThroughAHandOverTests(Base):
         self.assertEqual(self.link.sent, [])
 
 
+class AbandonedHandOverTests(Base):
+    """A hand-over given up before its answer closes the link to the machine asked, whose accept may
+    still be on the way (WIRE.md section 5); the owner's tests cover every way it is given up."""
+
+    def test_the_shortcut_home_while_the_next_machine_is_asked_closes_its_link(self):
+        self.up()
+        with self.controller.book.lock:
+            peers = self.controller.book.data["peers"]
+            peers.append({**peers[0], "id": protocol.id_text(OTHER_ID), "token": "second", "send": True})
+        self.controller._sync_links()
+        mac = self.controller.links["second"]
+        mac.up(self.controller, ident=OTHER_ID, name="Laptop", platform="macos")
+        self.controller.set_redirecting(True)
+        self.link.arrives(self.controller, protocol.accept_msg(1))
+        self.link.arrives(self.controller, protocol.switch_v6(1, OTHER_ID))
+        self.assertEqual(mac.dropped, [])
+        self.controller.set_redirecting(False)
+        settle(self.controller)
+        self.assertEqual(len(mac.dropped), 1)
+        self.assertEqual(self.link.dropped, [])
+        self.assertFalse(self.controller.redirecting)
+
+
 class ChordCutShortTests(Base):
     def test_a_link_whose_queue_fills_mid_chord_is_dropped_rather_than_left_holding_a_modifier(self):
         self.up(platform="macos")
@@ -581,7 +604,7 @@ class AnnouncementTests(Base):
             self.controller.book.data["peers"][0]["id"] = self.peer
         self.up()
         self.link.arrives(self.controller, protocol.arrangement_v6("right", int(time.time()) - 5, PEER_ID))
-        self.assertEqual(seen, [("left", seen[0][1], self.peer)])
+        self.assertEqual(seen, [(self.peer, "right", seen[0][2], self.peer, None)])
 
     def test_a_peers_settings_reach_the_app_with_who_sent_them(self):
         seen = []
@@ -597,9 +620,10 @@ class AnnouncementTests(Base):
         self.controller.send_settings({"on": True, "set_at": 9})
         self.assertIn(protocol.MSG_SETTINGS, self.link.types())
 
-    def test_an_arrangement_made_here_goes_to_the_primary_peer(self):
+    def test_an_arrangement_made_here_goes_to_the_machine_it_is_for(self):
         self.up()
-        self.controller.send_arrangement("top", 12)
+        self.assertTrue(self.controller.send_arrangement(self.peer, "top", 12))
+        self.assertFalse(self.controller.send_arrangement(protocol.id_text(OTHER_ID), "top", 13))
         sent = [m for m in self.link.posted if m["type"] == protocol.MSG_ARRANGEMENT][-1]["data"]
         self.assertEqual((sent["edge"], sent["set_at"], sent["by"]), ("top", 12, self.own))
 

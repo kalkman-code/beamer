@@ -32,6 +32,7 @@ from bridge import KVMController
 import bridge_fakes
 from bridge_fakes import PAIRED_TOKEN, FakeClock, FakeQuartz, crossing_config, quiet_logger
 from core import protocol
+from core.return_edge import OPPOSITE
 from core.return_edge import Rect
 from core.tests.responder_harness import HERE, FakeDesktop, FakeInjector, Initiator, Machine, entry
 from settings_store import SettingsStore
@@ -102,7 +103,7 @@ class Duo:
         settings["peers"] = [entry(HERE, "PC", platform="windows", token=PAIRED_TOKEN, host="127.0.0.1",
                                    port=self.pc_responder.port, side=self.side, side_set_at=side_stamp, side_by=side_by,
                                    allow_drive=allow_drive)]
-        settings["zones"] = self._named(mac_zones if mac_zones is not None else [{"peer": "pc", "kind": "edge"}])
+        settings["zones"] = self._named(mac_zones if mac_zones is not None else self._zones_from(cfg.crossing))
         self.store.save_settings(settings)
 
         # The one pasteboard the controller and the Mac's responder share, as on a real Mac.
@@ -113,7 +114,7 @@ class Duo:
         )
         self.mac.on_crossing = lambda kind, step: self.feedback.append((kind, step))
         self.mac.on_user_alert = lambda title, message: self.alerts.append(message)
-        self.mac.on_arrangement = lambda edge, set_at, by: self.mac_arrangements.append((edge, set_at, by))
+        self.mac.on_arrangement = lambda peer, edge, set_at, by, way_back=None: self.mac_arrangements.append((OPPOSITE[edge], set_at, by))
         self.mac.notch_range = notch
 
         left, top, right, bottom = mac_bounds
@@ -124,7 +125,7 @@ class Duo:
         ):
             self.mac_input = windows_input.WindowsInput(
                 self.mac, logger=quiet_logger(),
-                arrangement_callback=lambda edge, set_at, by: self.mac_arrangements.append((edge, set_at, by)),
+                arrangement_callback=lambda peer, edge, set_at, by, way_back=None: self.mac_arrangements.append((OPPOSITE[edge], set_at, by)),
                 arrival_callback=lambda edge, x, y: self.mac_arrivals.append((edge, x, y)),
             )
         self.mac_responder = self.mac_input.server
@@ -132,6 +133,20 @@ class Duo:
         self.cfg = cfg
         self._started = False
         self._closed = False
+
+    @staticmethod
+    def _zones_from(crossing):
+        """The Mac's zones for the PC as its crossing methods make them, the one list both its own
+        pointer and a driven one cross by (WIRE.md section 8)."""
+        methods = crossing["methods"]
+        zones = [{"peer": "pc", "kind": "edge"}] if "edge" in methods else []
+        if "part" in methods and "edge" not in methods:
+            zones.append({"peer": "pc", "kind": "part", "parts": list(crossing["edge_parts"])})
+        if "corner" in methods:
+            zones.append({"peer": "pc", "kind": "corner", "corner": crossing["corner"], "edge": crossing["corner"].split("_")[1]})
+        if "notch" in methods:
+            zones.append({"peer": "pc", "kind": "notch"})
+        return zones
 
     def _named(self, zones):
         """Zones written with `"peer": "mac"` or `"pc"`, which are ids only once the store has made them."""

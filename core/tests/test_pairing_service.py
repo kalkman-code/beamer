@@ -199,8 +199,15 @@ class BeaconTests(unittest.TestCase):
         with self.assertRaises(PairingError) as caught:
             mac.service.pair(seen, "123456")
         self.assertEqual(str(caught.exception), pairing.ERROR_VERSION)
-        with self.assertRaises(socket.timeout):
-            old.recvfrom(2048)
+        while True:
+            try:
+                old.recvfrom(2048)
+            except socket.timeout:
+                break
+            except ConnectionResetError:
+                # Windows: the port-unreachable of a beacon sent before the service had bound.
+                continue
+            self.fail("the older machine was sent something")
 
 
 class TcpTests(unittest.TestCase):

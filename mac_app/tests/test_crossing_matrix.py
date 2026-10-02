@@ -11,7 +11,7 @@ import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
-from bridge_fakes import FakeQuartz, crossing_config
+from bridge_fakes import PAIRED_TOKEN, FakeQuartz, crossing_config
 from core import protocol
 from core.tests.responder_harness import HERE
 from crossing import CORNERS, EDGES, OPPOSITE, CrossingEngine
@@ -161,41 +161,56 @@ class ArrangementFromEitherSideTests(unittest.TestCase):
         self.store = SettingsStore(os.path.join(self.dir.name, "settings.json"))
         self.logged = []
 
+    BY = protocol.id_text(b"\xff" * 16)
+    SMALL = protocol.id_text(bytes(15) + b"\x01")
+
     def window(self, edge="right", stamp=0):
         cfg = crossing_config(edge=edge, arrangement_set_at=stamp)
         self.store.save(config_to_raw(cfg))
         cfg = self.store.load()
+        self.rebuilt = 0
+        self.told = []
+
+        def zones_changed():
+            self.rebuilt += 1
+
         return types.SimpleNamespace(
-            controller=types.SimpleNamespace(cfg=cfg, crossing=None),
+            controller=types.SimpleNamespace(cfg=cfg, crossing=None, zones_changed=zones_changed, _alert=lambda *a: None),
             settings_store=self.store,
             logger=types.SimpleNamespace(info=lambda *a: self.logged.append(a), exception=lambda *a: None),
             refresh=lambda: None,
+            _load=lambda raw: None,
+            _flush=lambda: None,
+            _tell=lambda peer: self.told.append(peer),
         )
 
     def test_a_newer_arrangement_from_the_pc_is_applied_with_its_stamp_and_arms_the_new_edge(self):
         window = self.window("right", stamp=100)
-        self.apply(window, "left", 200)
+        self.apply(window, "", "right", 200, self.BY)
         self.assertEqual(window.controller.cfg.crossing["edge"], "left")
         self.assertEqual(window.controller.cfg.crossing["arrangement_set_at"], 200)
-        self.assertEqual(window.controller.crossing.edge, "left")
+        self.assertEqual(self.rebuilt, 1)
+        # Answered with this Mac's own, so the PC learns whether a way leads back (WIRE.md section 8).
+        self.assertEqual(len(self.told), 1)
 
     def test_an_older_one_is_ignored(self):
         window = self.window("right", stamp=200)
-        self.apply(window, "left", 100)
+        self.apply(window, "", "right", 100, self.BY)
         self.assertEqual(window.controller.cfg.crossing["edge"], "right")
+        self.assertEqual(self.rebuilt, 0)
 
-    def test_the_same_one_over_the_second_link_changes_nothing_and_logs_nothing(self):
+    def test_the_same_one_over_the_second_link_changes_nothing_the_second_time(self):
         window = self.window("left", stamp=300)
-        self.apply(window, "left", 300)
-        self.assertEqual(self.logged, [])
+        self.apply(window, "", "left", 400, self.BY)
+        self.apply(window, "", "left", 400, self.BY)
+        self.assertEqual(self.rebuilt, 1)
 
-    def test_two_different_arrangements_stamped_in_the_same_second_each_keep_their_own(self):
-        # Pinned known gap, not a rule: a tie-break would flip this.
-        # Nothing breaks the tie, so the machines stay apart until one is changed again; two
-        # people changing the same setting on two machines in one second is the only way in.
+    def test_two_different_arrangements_stamped_in_the_same_second_settle_on_the_larger_id(self):
         window = self.window("right", stamp=300)
-        self.apply(window, "left", 300)
+        self.apply(window, "", "right", 300, self.SMALL)
         self.assertEqual(window.controller.cfg.crossing["edge"], "right")
+        self.apply(window, "", "right", 300, self.BY)
+        self.assertEqual(window.controller.cfg.crossing["edge"], "left")
 
 
 class ArrangementOverTheLinksTests(unittest.TestCase):
@@ -215,7 +230,7 @@ class ArrangementOverTheLinksTests(unittest.TestCase):
     def test_a_change_made_here_goes_over_this_macs_own_link(self):
         duo = self.duo()
         duo.link_mac_to_pc()
-        self.assertTrue(duo.mac.send_arrangement("left", 500))
+        self.assertTrue(duo.mac.send_arrangement(protocol.id_text(HERE), "left", 500))
         self.assertTrue(wait_for(lambda: self.heard(duo, 500)), "the PC never heard the arrangement")
         peer, read = self.heard(duo, 500)[0]
         self.assertEqual((peer, read["edge"], read["by"]), (duo.mac_id, "left", duo.mac_id))
@@ -223,7 +238,7 @@ class ArrangementOverTheLinksTests(unittest.TestCase):
     def test_with_no_link_of_its_own_open_it_goes_over_the_link_the_pc_opened(self):
         duo = self.duo()
         duo.link_pc_to_mac()
-        self.assertTrue(duo.mac_input.send_arrangement("left", 500))
+        self.assertTrue(duo.mac_input.send_arrangement(protocol.id_text(HERE), "left", 500))
         message = duo.pc.expect(protocol.MSG_ARRANGEMENT, where=lambda data: data["set_at"] == 500)
         self.assertEqual((message["edge"], message["by"]), ("left", duo.mac_text))
 
@@ -231,8 +246,8 @@ class ArrangementOverTheLinksTests(unittest.TestCase):
         duo = self.duo()
         duo.link_mac_to_pc()
         duo.link_pc_to_mac()
-        self.assertFalse(duo.mac_input.send_arrangement("left", 500))
-        self.assertTrue(duo.mac.send_arrangement("left", 500))
+        self.assertFalse(duo.mac_input.send_arrangement(protocol.id_text(HERE), "left", 500))
+        self.assertTrue(duo.mac.send_arrangement(protocol.id_text(HERE), "left", 500))
         self.assertTrue(wait_for(lambda: self.heard(duo, 500)))
         self.assertIsNone(duo.pc.expect(protocol.MSG_ARRANGEMENT, 0.3))
 
@@ -257,7 +272,7 @@ class ArrangementOverTheLinksTests(unittest.TestCase):
         duo = self.duo(side="")
         duo.link_mac_to_pc()
         # What a link announces goes before anything sent after it, so this one is the fence.
-        self.assertTrue(duo.mac.send_arrangement("left", 9))
+        self.assertTrue(duo.mac.send_arrangement(protocol.id_text(HERE), "left", 9))
         self.assertTrue(wait_for(lambda: self.heard(duo, 9)))
         self.assertEqual([read["set_at"] for _, read in duo.pc_responder.arrangements], [9])
 
@@ -268,7 +283,7 @@ class WhatIsSharedTests(unittest.TestCase):
 
         line = pages.SCOPE["crossing"]
         self.assertNotIn("Two are shared", line)
-        self.assertIn("Only which side the other machine is on is shared", line)
+        self.assertIn("Only which side each machine is on is shared", line)
 
 
 def pc_at_edge(duo, edge):
@@ -385,7 +400,8 @@ class MacToPcTests(unittest.TestCase):
     def test_this_macs_direction_switch_off_stops_every_way_out(self):
         duo = self.duo(crossing={"edge": "right"})
         duo.link_mac_to_pc()
-        duo.mac.cfg.send_to_windows = False
+        # As the switch does: written to the settings, before the link it no longer wants has gone.
+        duo.store.set_peer(PAIRED_TOKEN, send=False)
         x, y = side_point("right", "middle")
         self.assertFalse(duo.mac_push(x, y, 30))
         self.assertFalse(duo.mac.set_redirecting(True))
@@ -459,7 +475,10 @@ class MacDrivenTests(unittest.TestCase):
     def test_home_through_this_macs_zone_whatever_this_macs_own_ways_and_arrangement_are(self):
         for methods in (["notch"], ["corner"], ["part"], ["shortcut"]):
             with self.subTest(macs_ways=methods):
-                duo = self.duo(crossing={"methods": methods, "edge": "top"}, side="left")
+                # The edge zone named apart from the methods: its side, not the flat crossing edge,
+                # is where the PC's pointer comes home.
+                duo = self.duo(crossing={"methods": methods, "edge": "top"}, side="left",
+                               mac_zones=[{"peer": "pc", "kind": "edge"}])
                 self.drive(duo, "left")
                 duo.pc_leans(MAC_EDGE_POINT["left"], -30, times=3)
                 self.assertIsNotNone(duo.pc_switch(), "this Mac's left edge never led home")

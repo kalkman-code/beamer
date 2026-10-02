@@ -38,21 +38,30 @@ first design, what has been decided, and the questions still open.
   clear on a link: the preamble carries the pair's key id instead (section 2). Pairing sends
   both machines' ids in the clear, once (section 6).
 - **Tokens.** A token made by pairing is the `b64` of 32 bytes: 43 characters that decode and
-  encode again to themselves. Any other token (one a user typed into 1.4.x) is a **typed token**,
-  and never links (section 2).
+  encode again to themselves. That spelling proves nothing about where a token came from: 43 `A`s
+  spell 32 zero bytes, and a user could have typed them. So what links is an entry made by
+  pairing on 1.5.0 or later (`from_1_4` false) whose token has that spelling. A token migrated
+  from 1.4.x never links, whatever its spelling, and neither does one of any other shape, a
+  **typed token** (sections 1 and 2).
 - **Messages** are UTF-8 JSON objects of the shape `{"type": <string>, "data": <object>}`, with
   no byte order mark. Unknown types are ignored, and so are unknown keys inside `data`.
-- **Malformed messages.** A message is malformed when it is not an object, has no string `type`
-  or no object `data`, holds `NaN` or an infinity, or has a known field whose value is outside
-  what this document allows. A field that does not belong to a message, or to that kind of the
-  message, is ignored like an unknown one. A sender never repeats a key; a receiver may refuse a
-  message that does, or keep the last value (Swift's decoders keep the last, Android's `org.json`
-  refuses), and neither may matter to what a correct sender sends. A malformed message is ignored as a whole, with three
+- **Not a message.** A frame's plaintext that is not UTF-8, not JSON, or JSON whose top level is
+  not an object (`[]`, `"x"`, `1`) is not a message at all. It ends the link once the handshake
+  is done (section 2, frames); as the first frame it is answered `invalid_hello` (section 2,
+  step 7). Nothing below applies to it.
+- **Malformed messages.** A message is malformed when it has no string `type` or no object
+  `data`, holds `NaN` or an infinity, or has a known field whose value is outside what this
+  document allows; section 10's shared values are the one exception, each left out on its own.
+  A field that does not belong to a message, or to that kind of the message, is ignored like an
+  unknown one. A sender never repeats a key; a receiver may refuse a message that does, or keep
+  the last value (Swift's decoders keep the last, Android's `org.json` refuses), and neither may
+  matter to what a correct sender sends. A malformed message is ignored as a whole, with three
   exceptions: a malformed first frame and a malformed `ack` end the link, and a malformed `focus`
-  naming the receiver is answered with `refuse` (section 5). A receiver whose JSON parser refuses
-outright a text that breaks one of the rules above the parser cannot see past (a byte order mark,
-`NaN`, a lone surrogate) may end the link instead of ignoring the message; a correct sender never
-sends one, and the vectors record what the desktops do, which is to ignore it.
+  naming the receiver is answered with `refuse` (section 5). A receiver whose JSON parser
+  refuses outright a text that breaks one of the rules above the parser cannot see past (a byte
+  order mark, `NaN`, a lone surrogate) may end the link instead of ignoring the message; a
+  correct sender never sends one, and the vectors record what the desktops do, which is to
+  ignore it.
 - **Numbers.** "Integer" means a JSON number with no fraction or exponent (`1`, never `1.0` or
   `1e0`), and never `true` or `false`. A parser that turns JSON into a platform number type must
   check the text, not the value: Swift's `JSONSerialization` gives `true` and `1.0` as numbers
@@ -94,7 +103,7 @@ A peer entry:
 
 | Field | Type | Meaning |
 |---|---|---|
-| `id` | `b64` or `""` | the peer's machine id; `""` only for the entry migrated from 1.4.x until its first link |
+| `id` | `b64` or `""` | the peer's machine id; `""` only for the entry migrated from 1.4.x |
 | `name` | string | the peer's name, from pairing, then from every `hello` or `welcome` |
 | `platform` | string | the peer's platform, from pairing, then from every `hello` or `welcome` |
 | `token` | string | the shared token from pairing, never reused for another peer |
@@ -109,7 +118,8 @@ A peer entry:
 | `paired_with` | list of `b64` | the ids the peer last said it is paired with (the `paired` message) |
 | `paired_at` | integer | unix seconds of the pairing, 0 for a migrated entry |
 | `linked` | boolean | a version 6 link with this peer has authenticated at least once |
-| `from_1_4` | boolean | this entry was migrated from a 1.4.x pairing |
+| `from_1_4` | boolean | this entry was migrated from a 1.4.x pairing, and never links |
+| `way_back` | boolean, optional | what the peer last said in `arrangement`'s `way_back` (section 8): whether one of its zones leads here; absent until it says |
 
 Rules:
 
@@ -118,11 +128,12 @@ Rules:
 - **Two entries never share a key id** (section 2: 16 bytes computed from the token, never
   stored). Pairing refuses a token whose key id is already an entry's (section 6), and the
   re-migration below skips one. With tokens from pairing a clash means the same token twice.
-- **At most one entry has `id: ""`**, and it is the one with `from_1_4: true`. The link finds
-  it by its key id like any other entry, and its first link fills the id in (section 2). Zones
-  for it name it by `""`, and the save that learns its id rewrites them.
-- **An entry with a typed token** is kept and shown, but never linked: it is not dialled, the
-  responder never matches its key id, and Overview asks the user to pair that machine again.
+- **At most one entry has `id: ""`**, and it is the one with `from_1_4: true`. Zones for it
+  name it by `""`.
+- **An entry migrated from 1.4.x, or with a typed token,** is kept and shown, but never linked:
+  it is not dialled, the responder never computes or matches its key id, and Overview asks the
+  user to pair that machine again: "*name* was paired on Beamer 1.4. Pair the two again to link
+  them on 1.5.0." A new pairing with that machine replaces it (section 6).
 - **Removing a peer** deletes its entry, token included, closes its links at once, and ends its
   ownership if it holds it (section 4). The peer is told nothing; its next link's key id is
   unknown here, so it is closed with nothing sent, and the peer says this machine closed the
@@ -208,12 +219,16 @@ migration made them, and is not added at all when the list already holds 32), wi
 that named the replaced entry name `""`; and `migrated_token_sha256` is updated. A token that
 has not changed is never migrated twice, so a peer the user removed stays removed. A token whose
 key id is another entry's already is not migrated, and `migrated_token_sha256` is still updated.
-A typed token has no key id (section 2), so it is never refused by that check; it is migrated,
-and never links.
+A typed token is never refused by that check. Either way the migrated entry never links.
 
-**The peer's id** is unknown after the migration, because 1.4.x never had one. The first
-version 6 link between the two fills it in, from the `hello` or `welcome` the existing token
-authenticated (section 2, the handshake).
+**Why a migrated pairing never links.** 1.4.x kept one `auth_token` and nothing about where it
+came from: pairing wrote it, and so did the token field on the Mac's Connection page and the
+PC's settings, and the name pairing saved beside it stayed when a user typed a new token. A
+typed token can be weak, and its key id (section 2), seen on any link, lets someone test guesses
+against it offline. The spelling cannot tell the two apart, so the migration keeps the entry to
+show the user which machine it was, and the user pairs the two again. The entry keeps `id: ""`,
+since 1.4.x never had ids. 1.5.0's first two betas let a migrated token of pairing's spelling
+link and learn its peer's id; such an entry keeps that id and does not link either.
 
 ## 2. The link
 
@@ -253,9 +268,10 @@ key_id = HKDF-SHA-256(ikm = the token as saved, as text, salt = b"beamer-link-v6
 ```
 
 That is the first 16 bytes of HKDF's first block. Every entry's key id is computed from its token
-when it is needed and never stored. The key id is only ever computed for a token made by
-pairing: a key id is an offline test of its token, harmless for 256 random bits and fatal for a
-typed word, so a typed token is never used for a link at all (section 1).
+when it is needed and never stored. A key id is an offline test of its token, harmless for 256
+random bits and fatal for a typed word, and a token's spelling cannot tell the two apart, so a
+key id is only ever sent or matched for an entry this machine made by pairing on 1.5.0 or later
+(section 1). Every other entry is never used for a link at all.
 
 The ephemeral share is `X25519(secret, 9)` (RFC 7748's base point), from 32 bytes of fresh
 randomness the side draws for this link alone and forgets once the link's keys are made.
@@ -268,7 +284,11 @@ The responder:
    (the source IPv4 address, whatever the port). A new connection from an address that already
    has one replaces it; a new one from another address when four are held replaces the oldest.
    An authenticated link never counts against the four. The preamble must arrive within **1 second**
-   and the whole handshake within **5 seconds** of the connection being accepted.
+   and the whole handshake within **5 seconds** of the connection being accepted. Beside the
+   four slots, at most **32** connections are being dealt with before they authenticate,
+   counting those in a slot, those being answered and drained (step 2) and those whose slot
+   was taken by a newer one but are not yet closed; a connection past the 32 is closed at
+   once, with nothing read or sent.
 2. Reads 6 bytes.
    - Not `BEAMY`: a Beamer from before version 4, which opened with a cleartext frame. It
      answers with the version 5 legacy frame, a 4-byte big-endian length then the JSON
@@ -281,8 +301,10 @@ The responder:
 
    Wherever it answers and closes, it frees the connection's handshake slot, shuts its sending
    side, then reads and discards what the peer sends for up to one second, so the answer is
-   not lost to a reset.
-3. Reads the other 56 bytes, and looks up the entry whose token (a token made by pairing) has
+   not lost to a reset. At most **8** connections drain at once; past that one is closed as
+   soon as its answer is sent, without draining. A draining connection still counts against
+   the 32 of step 1.
+3. Reads the other 56 bytes, and looks up the entry made by pairing (section 1) whose token has
    this key id. None: it closes, sending nothing. There is never a second try with another
    token, and no entry is looked up by anything else.
 4. Draws its own ephemeral secret and share, and computes the shared secret from the
@@ -298,27 +320,10 @@ The responder:
    malformed field) is answered with `welcome` carrying only `version` 6 and
    `error: "invalid_hello"`, and the link is closed. This is the one place a plaintext that is
    not a JSON object is answered rather than ending the link at once.
-8. Checks the `id` in `hello`. When it is this machine's own, or when the entry has an id and
-   this is not it, it answers `welcome` carrying only `version` 6 and `error: "wrong_id"`, and
-   closes. Only a holder of the token can read that answer, so it tells nobody else anything.
-   When the entry has `id: ""` (the one migrated from 1.4.x), it checks again in one step under a
-   lock that the entry still has `id: ""` (if it has an id by then, it goes on as for an entry
-   that has one), and then:
-   - When another entry has this id, is a desktop (`port` not 0) and has the `platform` the
-     migration gave the migrated entry, that machine was paired again after the upgrade somewhere
-     its saved `host` did not match (section 6), and still dials under the 1.4.x token, which
-     only it holds. The migrated entry is **folded** into that one: it is removed; that entry
-     takes its `side`, `side_set_at` and `side_by` when it has never had a side (`side_set_at`
-     0); each of its zones moves to that entry unless that entry has a zone of the same kind,
-     which wins; one pass over the zones in use, other peers' first, then that entry's own, then
-     the moved ones, turns `off` any that would cover a stretch already covered (section 8); and
-     the settings are saved. It sends `welcome`, so the other side folds its own migrated entry
-     in its step 7, and closes: the pairing the link came under is gone. It tells the user:
-     "*name* linked from *address* under its Beamer 1.4 pairing, *old name*, which is now part of
-     *name*." When another entry has this id but is a phone or of another platform, it answers
-     `wrong_id`.
-   - Otherwise it writes the id, sets `linked`, and saves. It tells the user once: "Linked with
-     *name* at *address* for the first time on Beamer 1.5.0."
+8. Checks the `id` in `hello`. When it is this machine's own, or is not the entry's, it answers
+   `welcome` carrying only `version` 6 and `error: "wrong_id"`, and closes. Only a holder of the
+   token can read that answer, so it tells nobody else anything. Otherwise it sets `linked`, and
+   saves what changed.
 9. Sends `welcome`, then its announcements (section 3).
 10. Closes any earlier link it accepted from the same peer id; a link this machine opened to that
     peer is a separate link and stays. If the closed link's peer was the owner, the ownership
@@ -327,7 +332,7 @@ The responder:
 The initiator:
 
 1. Connects, with a one-second timeout. From the moment the connection is up, the whole
-   handshake must finish within **5 seconds**. It never dials an entry with a typed token.
+   handshake must finish within **5 seconds**. It dials only an entry made by pairing (section 1).
 2. Draws its ephemeral secret and share and sends its preamble, with the entry's key id.
 3. Reads 6 bytes.
    - Not `BEAMY`: says the peer did not answer as a Beamer, and closes.
@@ -356,13 +361,9 @@ The initiator:
    its settings change or the app starts again, and says "*name* has this pairing under another
    machine: remove it on both and pair again." Any other `error` is a `welcome` that is not
    valid.
-7. Checks the `id` in `welcome`: not this machine's own; when the entry has an id, that id. On a
-   failure it closes, sending nothing more, and says a different Beamer answered at that address.
-   If the entry had `id: ""`, it does what the responder does in its step 8, under the lock: when
-   another entry has that id and the fold's conditions hold, it folds the migrated entry into it,
-   closes sending nothing more, and tells the user the same; when another entry has it and they
-   do not, it closes and says a different Beamer answered; otherwise it writes the id and sets
-   `linked`. If the entry had an id, it sets `linked`.
+7. Checks the `id` in `welcome`: not this machine's own, and the entry's. On a failure it
+   closes, sending nothing more, and says a different Beamer answered at that address. Otherwise
+   it sets `linked`.
 8. Sends its announcements.
 
 The initiator sends `hello`, and its own id in it, before it has seen the responder's id. Both
@@ -416,13 +417,16 @@ AEAD   = ChaCha20-Poly1305 (RFC 8439), no associated data
   than the last it accepted. The last frame a side may send carries 2^32 - 1; a sender that needs
   another closes the link and reconnects.
 - The plaintext is one message. A frame may claim at most 16 MiB, except the first each way.
+- **A frame begins** when its first length byte arrives, by a monotonic clock, and must arrive
+  whole within **30 seconds** of that byte, whatever its size; one still arriving after that
+  ends the link. Between its bytes the link's liveness still holds (section 3).
 - Only a `clipboard` is ever larger than 64 KiB of plaintext, and a receiver parses such a frame
   only where it would take that clipboard: a responder from its owner, an initiator from a peer
-  it let go in the last 10 seconds (allowing 30 more for a large one still arriving). Any other
-  plaintext over 64 KiB is authenticated, so its counter is spent, and dropped unparsed; the
-  link stays up.
-- Anything that fails (the tag, the counter, a length out of range, a plaintext that is not a
-  JSON object) ends the link.
+  it let go of no more than 10 seconds before the frame began (section 5, the clipboard). Any
+  other plaintext over 64 KiB is authenticated, so its counter is spent, and dropped unparsed;
+  the link stays up.
+- Anything that fails (the tag, the counter, a length out of range, a frame past its 30 seconds,
+  a plaintext that is not a message: Encodings) ends the link.
 
 ### `hello` and `welcome`
 
@@ -486,15 +490,6 @@ anyway drops it, and still acknowledges it when it carries a `seq`.
 - **The address is not authenticated.** A peer's `host` comes from pairing, a beacon, a QR, or
   the source of an authenticated link. Something on the path can point a machine at the wrong
   address; it cannot read or forge a link, whose keys come from the token.
-- **The migrated entry trusts its token.** Whoever first authenticates with a 1.4.x token claims
-  the empty-id entry, with whatever id its `hello` or `welcome` names. That is no more than the
-  token already allowed under version 5, but a token made by 1.4.2's pairing, which could be
-  attacked offline, is only as safe as that pairing was. The notice in step 8 shows which
-  machine and address claimed it. A holder that names the id of another desktop entry of the
-  migrated entry's platform folds the migrated entry into that one instead (step 8): the 1.4.x
-  pairing is gone, as a claim would have taken it, and its zones lead to a machine already
-  paired, never to the holder. The fold's notice names the machine, the address and the pairing
-  folded.
 
 ## 3. Messages
 
@@ -549,8 +544,24 @@ Either way:
   on hardware. Any other sender, a phone included, sends what a Mac would for the same
   movement. A sender always sends all three; a receiver takes a
   missing `dx` as 0 and a missing `mode` as `"line"`, as version 5 did.
-- **Clipboard limits**: text at most 256 KiB as UTF-8; an image at most 8 MiB before base64.
-  Over either, that part is dropped and the rest of the message stands.
+- **Clipboard limits**: text at most 256 KiB as UTF-8. An image at most 8 MiB before base64,
+  and a PNG a receiver can decode without the file deciding how much memory that takes, checked
+  from its bytes before anything decodes it:
+  - the PNG signature, then an `IHDR` chunk of 13 bytes, whose width and height are each 1 to
+    16384 and whose product is at most 2^25 (33,554,432 pixels: an 8K screen is 33,177,600);
+  - every chunk (4-byte big-endian length, type, data, CRC) inside the file, up to `IEND`; bytes
+    after `IEND` are ignored, and CRCs are not checked;
+  - a still with one header: no second `IHDR`, and none of APNG's `acTL`, `fcTL` or `fdAT`;
+  - what a decoder inflates besides the pixels, the zlib streams of `iCCP`, `zTXt` and an `iTXt`
+    whose compression flag is 1, at most 4 MiB inflated in all. Each stream must be one whole
+    zlib stream ending where its chunk ends: one that is not zlib, is cut short or has bytes after
+    its end counts as over, and so does an `iTXt` whose compression flag is neither 0 nor 1, or
+    any of the three without the null bytes that end its keyword (and, in `iTXt`, its language
+    and translated keyword, when it is compressed).
+
+  A few megabytes of PNG can otherwise claim gigabytes once decoded. A sender never sends an
+  image outside these limits, and a receiver drops one, without decoding it. Over any limit,
+  that part is dropped and the rest of the message stands.
 - **Liveness.** An initiator sends `ping` when it has sent nothing for a second; a responder's
   `ack` heartbeat does the same the other way (section 9). A side that receives no byte at all for
   2.5 seconds (a responder) or 2 seconds (an initiator) ends the link. Any byte counts, so a large
@@ -651,7 +662,7 @@ and both stay at home, and the next try works.
 |---|---|
 | `route` | integer, 1 to 2^53 - 1 |
 | `target` | `b64`: where input is going. The responder's own id means here; any other id means the responder is being let go |
-| `edge`, `offset` | where to land the pointer: `left`, `right`, `top` or `bottom`, and a number from 0.0 to 1.0 (clamped) along that edge of the responder |
+| `edge`, `offset` | where to land the pointer: `left`, `right`, `top` or `bottom`, and how far along that edge of the responder, any number, which the receiver clamps to 0.0 to 1.0 (never malformed for its range) |
 | `resistance_px` | integer 0 to 1000: how far the owner's hand must push through a zone on the responder |
 | `reach` | list of `b64`, at most 32, no repeats: the peers the owner can send input to now, less the owner and the responder |
 | `stay` | `true`: re-arm in place; land nothing, play nothing |
@@ -673,8 +684,9 @@ anything but `true`, is malformed; on a re-arm `edge` and `offset` do not belong
 `accept`, responder to the initiator whose taking `focus` it accepted: `route`.
 
 `refuse`, responder to an initiator whose taking `focus` it did not accept: `route`, and `why`,
-one of `"owned"`, `"not_allowed"`, `"busy"`, `"sent_home"` and `"malformed"`. An initiator treats
-any other `why` as a refusal it cannot name.
+one of `"owned"`, `"not_allowed"`, `"busy"`, `"sent_home"` and `"malformed"`. A valid `route` is
+all a `refuse` needs: one whose `why` is missing, not a string, or another string is not
+malformed, and the initiator acts on it at once as a refusal it cannot name.
 
 `switch`, responder to its owner only:
 
@@ -682,7 +694,7 @@ any other `why` as a refusal it cannot name.
 |---|---|
 | `route` | the last `route` the responder accepted from this owner |
 | `next` | `b64`: where input should go. The owner's own id means home |
-| `edge`, `offset` | where to arrive on `next`, both or neither |
+| `edge`, `offset` | where to arrive on `next`, both or neither, as in `focus` (`offset` clamped, never malformed for its range) |
 
 ### The route
 
@@ -723,11 +735,13 @@ back", "Lost the link to *name*".
 
 ### Moving input
 
-**From the owner's own screen, or from home.** A desktop's pointer pushes through one of its
-zones (section 8) to peer P, or the shortcut or a menu picks P. The owner raises the route and
-sends P the taking `focus`, then its clipboard, then input, without waiting: a refusal sends the
-input home, and whatever reached P in the meantime was dropped there. No answer within 1 second
-also sends it home.
+**From the owner's own screen, from home, or by its own shortcut or menu.** A desktop's pointer
+pushes through one of its zones (section 8) to peer P, or the shortcut or a menu picks P, whether
+the input is at home or on another machine B. The owner raises the route. When the input is on
+B, it first lets go of B: B's releases, then `focus {route, target: P}` to B. Then it sends P the
+taking `focus`, then its clipboard, then input, without waiting: a refusal sends the input home,
+not back to B, and whatever reached P in the meantime was dropped there. No answer within 1
+second also sends it home. A phone picking a machine does the same.
 
 **Onward from the machine being driven.** While owned, a responder watches its own pointer, as
 version 5's return edge did. It arms each of its own zones whose peer is the owner or is in the
@@ -748,11 +762,21 @@ machine's own mouse, so a local push through a zone sends the owner onward too, 
   - On `refuse`, or no answer within 1 second, it raises the route again, sends B
     `focus {route, target: B, stay: true, resistance_px, reach}` with a fresh `reach` that leaves
     N out for the next 3 seconds, sends B the held input, and says N could not be reached.
-  - It ignores an `accept` whose route is not that of a take it sent. One that comes after its
-    wait ended is answered with a let-go `focus` carrying the owner's current route and naming
-    wherever its input is now (its own id when home).
-  - Anything else that moves the input while it waits (a send-home from B, a lost link, the
-    owner's own shortcut) ends the wait and cancels its timer.
+  - Anything else that moves the input while it waits (a send-home from B, a lost link to B, the
+    owner's own shortcut or menu) ends the wait and cancels its timer.
+  - **A take given up closes N's link.** When the wait ends with no answer from N, by its 1
+    second or by anything above, the owner closes the link it opened to N before it sends
+    anything else, then goes on as that event says. N may have accepted already with its
+    `accept` held up on the path; the close ends that ownership (section 4), so N is never left
+    owned by an owner that drives elsewhere. N is out of `reach` until its link is up again, and
+    the owner acts on nothing more that arrives on the closed link, an `accept` it had already
+    read included. The one exception is the owner's own shortcut or menu picking N itself: that
+    take follows the first on the same link, and its answer is the one awaited.
+  - It ignores an `accept` whose route is not that of a take it sent. An `accept` for a take
+    from home or by the shortcut that comes after its wait ended is answered with a let-go
+    `focus` carrying the owner's current route and naming wherever its input is now (its own id
+    when home); that take's own let-go has gone on the same link already, so this one changes
+    nothing.
 - `next` is anything else (outside that `reach`, or a link that has dropped since): the same as a
   refusal from N, without asking N.
 
@@ -786,9 +810,18 @@ which is what lets a phone drive a chain.
 A machine M can offer a zone to peer P when M is paired with P. It can check the rest from the
 `paired` lists it holds: for each machine that may hold input while M is driven (M itself, and
 every peer with `allow_drive` true), whether it is paired with P. The first design let M offer
-a zone only when every one of them is. That is open question 3: `reach` already stops a zone firing for
-an owner that could not follow it, so the zone could be offered and the page name the pairings
-that are missing. A zone never leads to a phone.
+a zone only when every one of them is. That is open question 3, built as its recommendation in
+1.5.0: `reach` already stops a zone firing for an owner that could not follow it, so the zone is
+offered, and the page names each machine that may drive M, has linked, and is not paired with P.
+A zone never leads to a phone.
+
+### Which machine the shortcut picks
+
+The shortcut, a Send button and a menu's own item with no machine named send input to the machine
+it was last on, while that one can take it (its link is up and it accepts input); else to the
+first in the list of peers that can; else to the first this machine sends to at all, so the
+refusal or the wake names it. Never to a phone, or to an entry with no id yet. A menu item that
+names a machine sends input there, from home or straight from the machine it is on.
 
 ### The clipboard follows the input
 
@@ -802,7 +835,8 @@ that are missing. A zone never leads to a phone.
   is never echoed back. It never sends one otherwise, so a paired device cannot
   collect a clipboard by taking and letting go of an idle machine.
 - An initiator takes a clipboard only from a machine it has let go of, once per let-go, when its
-  frame begins within 10 seconds of that let-go; any other is dropped. A later move (a refusal
+  frame begins (its first length byte arrives, section 2) within 10 seconds of that let-go; any
+  other is dropped. Like any frame it then has 30 seconds to arrive whole. A later move (a refusal
   from the next machine, say) does not cost the machine let go its one clipboard. It sets it on
   itself (a desktop) or keeps it (a phone), and sends it on to the machine its input is on now, if
   any. That is how something copied on B reaches C in a chain, through A, and it leaves it on A's
@@ -857,14 +891,18 @@ The exchange is PAIRING.md's, CPace with the code as the password, with these ch
      before, and has the same name and platform as the new pairing proves, is replaced by it
      rather than refused, so a pairing whose `pair_done` was lost can be done again at once.
      Any other match is `known`.
-   - The entry migrated from 1.4.x (`id: ""`, `from_1_4` true) is replaced by a pairing that
-     completes with the machine at its saved `host` (the address `pair_start` came from, for the
-     host; the address it reached, for the requester). Left beside the new entry, it would be
-     folded into it on the first link under its token (section 2, step 8). It is replaced, never counted, under the
-     rule in item 5, and its zones go with it rather than moving to the new id. Never by `name`:
-     a name is whatever the pairing machine chose, so anyone who saw the code could take the old
-     peer's and evict a 1.4.x pair that still links, and with its zones receive the input that
-     crosses them. Pairing proves the code, not which machine that entry was.
+   - The entry migrated from 1.4.x (`from_1_4` true), which never links (section 1), is replaced
+     by a pairing that proves its id, when an earlier beta linked it and so learnt one; and, when
+     it has `id: ""`, by a pairing that completes with the machine at its saved `host` (the
+     address `pair_start` came from, for the host; the address it reached, for the requester),
+     or that proves its `name` and `platform`. It is replaced, never counted, under the rule in
+     item 5. A pairing with the machine at its saved `host` that proves the entry's `platform`
+     takes over its `side`, `side_set_at`, `side_by` and zones: every 1.4.x upgrader pairs again,
+     since no 1.4.x token migrates, and is at the screen pairing that machine on purpose, so the
+     arrangement should not have to be set twice. A match by name alone takes nothing, and the
+     entry's zones go with it: pairing proves the code, not which machine that entry was, and
+     anyone who saw the code can claim a name, which is safe only because the entry never links
+     and nothing of it carries over.
    - To pair two linked machines afresh, the user removes each from the other's list first.
      Re-pairing never replaces a linked peer's token.
    - An id proves only that it arrived unaltered, not that the machine sending it owns it.
@@ -934,7 +972,9 @@ it hears. Any desktop can show a code (and be the host) or enter one (and be the
 **Finding a peer whose address changed.** When the link to a peer with `send` true has been down
 for 10 seconds, a desktop tries a link at the source address of a beacon carrying that peer's
 exact name, at the peer's saved `port`, and saves the address only once that link authenticates.
-It never tries a beacon with another name, tries at most one address per peer every 30 seconds,
+It never tries a beacon with another name, nor one whose `id` is not the peer's; one at another
+paired machine's saved address it tries after the rest, since two machines may have swapped
+addresses. With several such beacons it tries them in turn. It tries at most one address per peer every 30 seconds,
 and shows nothing when a try fails. A forged beacon can therefore cost one failed connection attempt every 30 seconds, never
 a saved address and never a message that prompts the user to pair again.
 
@@ -1080,7 +1120,7 @@ A zone is part of this machine's screen that leads to one peer:
 ```
 
 Any zone may also carry `"off": true`, which keeps it in the list and out of use. `peer` is `""`
-only for the entry migrated from 1.4.x until its id is learnt. A zone never names a phone.
+only for the entry migrated from 1.4.x, which never links. A zone never names a phone.
 
 - **Which edge a zone crosses.** An `edge` zone is the whole of its peer's `side`, and a `part`
   zone is some of its thirds (`start`, `middle` and `end`, top to bottom or left to right), so
@@ -1104,10 +1144,17 @@ only for the entry migrated from 1.4.x until its id is learnt. A zone never name
   cover the same stretch: the settings refuse a list where they would, and an `arrangement` that
   would make two overlap is applied and turns the clashing zones for the sender `off`, with a
   notice naming both machines. A zone's stretch is its peer's `side` for an `edge` zone, the
-  chosen thirds of it for a `part` zone, and the corner for a `corner` zone; the `notch` is not
-  counted, because it fires on a dwell and 1.4.x let it stand beside the edge. 1.4.x let the
+  chosen thirds of it for a `part` zone, and the corner for a `corner` zone; the `notch` is a
+  stretch of its own, which only another `notch` zone covers: it fires on a dwell and 1.4.x let
+  it stand beside the edge, but a Mac has one notch, so it leads to one machine. 1.4.x let the
   edge and the thirds both be on, where the edge covered the thirds, so the migration and a
-  save of those methods write the thirds `off`.
+  save of those methods write the thirds `off`. Two machines may share one side by thirds.
+- **Every machine starts with its whole edge.** Pairing gives the new machine an `edge` zone,
+  and so does an `arrangement` for a machine that has no zone yet, and so does reading a
+  settings file in which a paired desktop has none (pairing made no zones before 1.5.0-beta.5).
+  An `edge` zone whose side another zone in use already covers is written `off`, so the file
+  stays one the settings accept. A machine with a side and no way in, because another machine
+  holds that side, is named on the Crossing page with the machine that holds it.
 - **A peer with no zones** can still be reached by the shortcut and the menus.
 - **The same list, both ways.** A machine's zones are where its own pointer crosses when its own
   hardware drives, and where a driven pointer is sent onward or home (section 5).
@@ -1123,6 +1170,17 @@ bytes. It ignores one whose `set_at` is more than a day ahead of its own clock, 
 2^53 - 2. A change made here is stamped with the current time, and never lower than the stamp
 held plus one. A side is never cleared by message. A machine with three peers keeps three sides,
 each settled with that one peer.
+
+`arrangement` may also carry **`way_back`**, a boolean: whether the sender has a zone in use, and
+able to fire (an `edge` or `part` zone of a side that is set, a `corner` or a `notch`), that leads
+to the receiver. The sender includes it every time it sends an `arrangement`: when the link comes
+up, when it changes that machine's side or zones, and, once it has applied an `arrangement` from
+that machine, in answer, so the machine that set the side learns at once that it was taken but
+leads nowhere. The receiver keeps the last one it was told as `way_back` on the sender's entry,
+whether or not the side in the same message was newer, and its Crossing page names the sender as
+having no way back while it is `false`. An answer is sent only after an `arrangement` that changed
+something here, so two machines never answer each other in turn. A version 6 machine from before
+1.5.0-beta.5 ignores it, as it ignores any unknown key (Encodings).
 
 **From 1.4.x's settings.** The migration turns the one pair's ways across into zones for its one
 peer, one of each kind, with `off` set for each method that was not on: an `edge` zone; a `part`
@@ -1184,9 +1242,18 @@ every peer.
              "shortcut_arrival": true, "shortcut_arrival_style": "match"}}}
 ```
 
-- `on` is a boolean, `set_at` an integer of unix seconds, `by` the machine that made the change.
-  `crossing` and `design` are present only when `on` is true.
-- The values, each left out by a receiver that cannot hold it, the rest still applied:
+- `on` is a boolean, `set_at` an integer of unix seconds, `by` the `b64` id of the machine that
+  made the change, or `""`. A sender always sends all three. A receiver reads a missing `by` as
+  `""`, and also reads a `by` spelt in standard base64 with padding, as the desktops do; a
+  message missing `on` or `set_at`, or with any of the three of the wrong type or not an id, is
+  malformed and ignored whole. `crossing` and `design` are objects, present only when `on` is
+  true; one that is absent or is not an object brings no values, and the message stands.
+- **Each value stands alone.** Unlike every other message, a value in `crossing` or `design`
+  outside the table below, or one this receiver cannot hold (an effect it does not have), is
+  left out and the rest still applied, and the message is not malformed for it; an unknown key
+  is ignored. Whether a message is newer, and whether it is sent on, is decided by `set_at` and
+  `by` alone: one with values left out still wins, takes its stamp, and is sent on as it came.
+- The values:
 
   | Key | Allowed |
   |---|---|
@@ -1233,7 +1300,7 @@ one against the code and against the primitives written out by hand.
   take the X25519 result beside the token and bind the key id, both shares and a direction byte
   in place of the prefixes' order, which gives forward secrecy; the salt is `beamer-link-v6`.
 - `hello` and `welcome` carry each machine's id, checked there, and a `hello` naming the wrong id
-  is answered `wrong_id`; a typed token no longer links.
+  is answered `wrong_id`; a typed token, and any token migrated from 1.4.x, no longer links.
 - The handshake is bounded as a whole (5 seconds, the preamble in 1) on both sides, where version
   5's initiator bounded each read at 2 seconds; one pending handshake per address.
 - A responder keeps one link per peer and at most one owner, where version 5 kept one link and let
@@ -1274,17 +1341,19 @@ one against the code and against the primitives written out by hand.
 
 ## Decided
 
-Decided on 30-09-2026. The text above already follows these.
+Decided on 30-09-2026, and 6 amended on 01-10-2026. The text above already follows these.
 
 1. **A per-pair key id in the preamble, not the machine id.** The first 16 bytes of
    `HKDF-SHA-256(token, salt "beamer-link-v6", info "beamer-key-id")`; the machine ids travel in
-   `hello` and `welcome` and are checked there; the empty-id lookup is gone, since a migrated
-   token has a key id from the start; key ids are unique across entries; typed tokens must be
-   paired again (section 2).
+   `hello` and `welcome` and are checked there; there is no empty-id lookup; key ids are unique
+   across entries (section 2).
 2. **Forward secrecy in version 6.** An ephemeral X25519 share in each preamble, the result in
    `ikm` and both shares in `info`; a zero result ends the handshake (section 2).
-6. **No typed tokens.** Follows from 1: 1.5.0 has no token field, and a migrated typed token
-   never links; Overview asks the user to pair that machine again (sections 1 and 2).
+6. **No typed tokens, and no migrated ones.** Follows from 1: 1.5.0 has no token field, and a
+   key id is an offline test of its token. The first decision let a migrated token of pairing's
+   spelling link; since a typed token can have that spelling and 1.4.x kept no record of which
+   it was, no migrated token links, and Overview asks the user to pair that machine again
+   (sections 1 and 2).
 7. **The QR's extra secret.** 16 random bytes per code in the QR as `k`; `qr: 1` in
    `pair_start` makes the password the code followed by those bytes (section 6).
 

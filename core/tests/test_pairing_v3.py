@@ -434,14 +434,29 @@ class MigratedEntryTests(unittest.TestCase):
         self.assertEqual([e["id"] for e in rig.host_book.entries], [b64(REQUESTER_ID)])
         self.assertEqual(rig.host_book.stored[-1][1]["from_1_4"], True)
 
-    def test_a_machine_elsewhere_leaves_it_alone_whatever_its_name(self):
-        # A name is the pairing machine's own claim: anyone who saw the code could take the old
-        # peer's and evict a 1.4.x pair that still links.
-        rig = Rig(host_book=Book([migrated(host="192.168.77.99", name="Requester Mac")]))
+    def test_a_machine_elsewhere_replaces_it_only_by_the_name_and_platform_it_proves(self):
+        # The machine's address changed since 1.4.x. A migrated entry never links, so taking it by a
+        # name anyone could claim costs nothing that works; left, it would ask to be paired again
+        # beside the pairing just made.
+        for name, platform, replaced in (("Requester Mac", "macos", True), ("Other Mac", "macos", False),
+                                         ("Requester Mac", "windows", False)):
+            with self.subTest(name=name, platform=platform):
+                old = dict(migrated(host="192.168.77.99", name=name), platform=platform)
+                rig = Rig(host_book=Book([old]))
+                rig.begin()
+                rig.exchange(address="192.168.77.5")
+                ids = sorted(e["id"] for e in rig.host_book.entries)
+                self.assertEqual(ids, [b64(REQUESTER_ID)] if replaced else ["", b64(REQUESTER_ID)])
+
+    def test_one_an_earlier_beta_linked_is_replaced_by_its_own_id_wherever_it_now_is(self):
+        # Betas 1 and 2 let a migrated token link and learn its peer's id. It never links now, so
+        # pairing that machine again replaces it rather than refusing it as known.
+        linked = dict(migrated(host="192.168.77.99"), id=b64(REQUESTER_ID), linked=True)
+        rig = Rig(host_book=Book([linked]))
         rig.begin()
         rig.exchange(address="192.168.77.5")
-        self.assertEqual(sorted(e["id"] for e in rig.host_book.entries), ["", b64(REQUESTER_ID)])
-        self.assertIsNone(rig.host_book.stored[-1][1])
+        self.assertEqual([(e["id"], e["from_1_4"]) for e in rig.host_book.entries], [(b64(REQUESTER_ID), False)])
+        self.assertEqual(rig.host_book.stored[-1][1]["from_1_4"], True)
 
     def test_replacing_it_is_not_refused_by_a_count_reached_during_the_exchange(self):
         book = Book([entry(bytes([n]) * 16) for n in range(1, 31)] + [migrated(host="192.168.77.5")])

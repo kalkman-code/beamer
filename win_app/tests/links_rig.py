@@ -4,6 +4,7 @@ what one event did and in what order."""
 
 import os
 import sys
+import threading
 import time
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
@@ -17,6 +18,29 @@ import sender
 HERE, B, C = harness.HERE, harness.B, harness.C
 MONITORS = [Rect(0, 0, 1920, 1080)]
 CAPS = frozenset({"clipboard", "clipboard_image", "settings", "media_keys"})
+
+
+class FakeClipboard(harness.FakeClipboard):
+    def __init__(self, text="here"):
+        super().__init__(text)
+        self.get_started = threading.Event()
+        self.release_get = threading.Event()
+        self.set_started = threading.Event()
+        self.release_set = threading.Event()
+        self.block_get = False
+        self.block_set = False
+
+    def get_contents(self):
+        self.get_started.set()
+        if self.block_get:
+            self.release_get.wait(3)
+        return super().get_contents()
+
+    def set_contents(self, text, image):
+        self.set_started.set()
+        if self.block_set:
+            self.release_set.wait(3)
+        return super().set_contents(text, image)
 
 
 def make_config(**overrides):
@@ -83,7 +107,7 @@ class FakeLinks:
         self.sent.append((peer, message))
         return True
 
-    def close(self, peer):
+    def close(self, peer, reason=None):
         self.closed.append(peer)
         self.up_set.discard(peer)
 
@@ -97,7 +121,7 @@ class FakeLinks:
 class Rig:
     def __init__(self, cursor=(0, 500), monitors=MONITORS, entries=None, zones=None, up=(B,), **config):
         self.desktop = harness.FakeDesktop(monitors, cursor)
-        self.clipboard = harness.FakeClipboard("here")
+        self.clipboard = FakeClipboard("here")
         self.settings = harness.Settings(
             entries if entries is not None else [harness.entry(B, "Mac", side="left")],
             zones if zones is not None else [edge_zone(B)],
@@ -143,7 +167,7 @@ class Rig:
         while time.monotonic() < deadline:
             while not self.sender._outbound.empty():
                 self.sender._deliver(self.sender._outbound.get_nowait())
-            if not self.sender._clip_wait:
+            if not self.sender._clip_wait and not self.sender._clip_busy:
                 return
             time.sleep(0.002)
 

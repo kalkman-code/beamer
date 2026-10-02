@@ -57,7 +57,11 @@ class MacPairingTests(unittest.TestCase):
         self.assertEqual([peer["token"] for peer in peers], [saved["token"]])
         self.assertEqual((peers[0]["name"], peers[0]["platform"]), ("Desk PC", "windows"))
         self.assertEqual(self.store.load().auth_token, saved["token"])
-        self.assertEqual(self.store.current()["zones"], [])
+        # The machine at the 1.4.x entry's address on its platform takes over its side and zones.
+        zones = self.store.current()["zones"]
+        self.assertTrue(zones)
+        self.assertEqual({zone["peer"] for zone in zones}, {peers[0]["id"]})
+        self.assertEqual((peers[0]["side"], peers[0]["side_set_at"]), (before["side"], before["side_set_at"]))
         self.assertTrue(wait_until(lambda: self.pc.paired))
 
     def test_a_pairing_this_mac_hosts_is_stored_after_the_machines_it_has(self):

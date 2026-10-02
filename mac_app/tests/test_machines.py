@@ -46,10 +46,15 @@ class StateTests(unittest.TestCase):
         self.assertEqual(row(kind="none").state.detail, "Looking for STUDIO-PC. It connects on its own once Beamer is open there.")
         self.assertEqual(row(has_link=False, entry=entry(send=False)).state.detail, "Waiting for STUDIO-PC to connect.")
 
-    def test_a_typed_1_4_token_is_asked_to_be_paired_again(self):
-        state = row(entry=entry(token="typed-in-1.4", id="", from_1_4=True), kind="failed").state
-        self.assertEqual((state.key, state.tone, state.word), ("pair_again", "amber", "Pair again"))
-        self.assertEqual(state.detail, "STUDIO-PC was paired in 1.4.x with a typed token, which 1.5.0 does not use. Remove it and pair it again.")
+    def test_any_1_4_pairing_is_asked_to_be_paired_again(self):
+        # 1.4.x kept no record of whether its token was paired or typed, so a token of pairing's
+        # shape is asked again too, and so is one an earlier beta linked.
+        for migrated in (entry(token="typed-in-1.4", id="", from_1_4=True), entry(id="", linked=False, from_1_4=True),
+                         entry(from_1_4=True)):
+            with self.subTest(entry=migrated):
+                state = row(entry=migrated, kind="failed").state
+                self.assertEqual((state.key, state.tone, state.word), ("pair_again", "amber", "Pair again"))
+                self.assertEqual(state.detail, "STUDIO-PC was paired on Beamer 1.4. Pair the two again to link them on 1.5.0.")
 
     def test_a_machine_linked_in_but_not_dialled_is_linked_too(self):
         state = row(has_link=False, inbound=True, entry=entry(send=False)).state

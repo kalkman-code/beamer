@@ -21,7 +21,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspa
 
 import config as config_module
 import settings_store
-from core import protocol
+from core import protocol, receiver, ways
 from settings_store import SettingsError, SettingsStore, config_to_raw
 
 FIXTURES = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fixtures")
@@ -481,74 +481,168 @@ class SavingTests(Base):
         self.assertEqual(after["peers"][1], added)
         first = after["peers"][0]
         self.assertEqual((first["host"], first["name"], first["send"]), ("192.0.2.99", "Renamed", False))
-        self.assertEqual((first["side"], first["side_set_at"], first["side_by"]), ("bottom", 1790000500, after["machine_id"]))
-        self.assertEqual((cfg.host, cfg.crossing["edge"]), ("192.0.2.99", "bottom"))
+        # The side is written by set_ways and arrangement only: a flat view read before another
+        # machine's arrangement landed must not put the old side back.
+        self.assertEqual((first["side"], first["side_set_at"]), ("left", 1790000000))
+        self.assertEqual((cfg.host, cfg.crossing["edge"]), ("192.0.2.99", "left"))
+
+    def test_a_flat_save_keeps_a_name_and_hardware_address_learnt_since_the_window_read(self):
+        settings = self.settings()
+        settings["peers"][0].update(name="Learnt PC", hw="aa:bb:cc:dd:ee:01")
+        self.store.save_settings(settings)
+        self.store.save(config_to_raw(replace(self.cfg, pointer_speed=2.0)))
+        first = self.settings()["peers"][0]
+        self.assertEqual((first["name"], first["hw"]), ("Learnt PC", "aa:bb:cc:dd:ee:01"))
+        self.assertEqual(self.settings()["pointer_speed"], 2.0)
+
+    def test_a_new_address_clears_what_was_learnt_at_the_old_one(self):
+        settings = self.settings()
+        settings["peers"][0].update(name="Learnt PC", hw="aa:bb:cc:dd:ee:01")
+        self.store.save_settings(settings)
+        self.store.save(config_to_raw(replace(self.cfg, host="192.0.2.99", pc_name="", mac_address="")))
+        first = self.settings()["peers"][0]
+        self.assertEqual((first["host"], first["name"], first["hw"]), ("192.0.2.99", "", ""))
+
+    def with_id(self):
+        settings = self.settings()
+        settings["peers"][0]["id"] = PEER_ID
+        for zone in settings["zones"]:
+            zone["peer"] = PEER_ID
+        self.write_settings(settings)
+        self.store = SettingsStore(self.path)
+        return settings
 
     def test_the_side_stamp_keeps_its_author_until_it_changes(self):
-        settings = self.settings()
+        settings = self.with_id()
         settings["peers"][0].update(side_by=SECOND_ID)
         self.write_settings(settings)
+        self.store = SettingsStore(self.path)
         self.store.save(config_to_raw(self.cfg))
         self.assertEqual(self.settings()["peers"][0]["side_by"], SECOND_ID)
-        raw = config_to_raw(self.cfg)
-        raw["crossing"]["arrangement_set_at"] += 1
-        self.store.save(raw)
-        self.assertEqual(self.settings()["peers"][0]["side_by"], self.settings()["machine_id"])
+        self.assertFalse(self.store.set_ways(PEER_ID, side="left", methods=["edge"], parts=["middle"], corner="top_right"))
+        self.assertEqual(self.settings()["peers"][0]["side_by"], SECOND_ID)
+        self.assertTrue(self.store.set_ways(PEER_ID, side="top", methods=["edge"], parts=["middle"], corner="top_right"))
+        first = self.settings()["peers"][0]
+        self.assertEqual((first["side"], first["side_by"]), ("top", self.settings()["machine_id"]))
+        self.assertGreater(first["side_set_at"], 1790000000)
 
     def test_an_arrangement_from_the_peer_is_stamped_with_the_peers_id_not_this_machines(self):
-        raw = config_to_raw(self.cfg)
-        raw["crossing"]["edge"] = "bottom"
-        raw["crossing"]["arrangement_set_at"] = 1790000500
-        self.store.save(raw, side_by=SECOND_ID)
+        self.with_id()
+        self.assertEqual(self.store.arrangement(PEER_ID, "top", 1790000500, SECOND_ID), (True, []))
         first = self.settings()["peers"][0]
         self.assertEqual((first["side"], first["side_set_at"], first["side_by"]), ("bottom", 1790000500, SECOND_ID))
 
     def test_a_tie_won_on_the_larger_by_stores_the_winners_by(self):
-        settings = self.settings()
+        settings = self.with_id()
         stamp = settings["peers"][0]["side_set_at"]
         settings["peers"][0].update(side_by=OTHER_ID_FOR_TIE)
         self.write_settings(settings)
-        raw = config_to_raw(self.cfg)
-        self.store.save(raw, side_by=SECOND_ID)
-        self.assertEqual(self.settings()["peers"][0]["side_by"], SECOND_ID)
+        self.store = SettingsStore(self.path)
+        self.assertEqual(self.store.arrangement(PEER_ID, "left", stamp, SECOND_ID), (False, []))
+        self.assertEqual(self.store.arrangement(PEER_ID, "left", stamp, OTHER_ID_FOR_TIE), (False, []))
+        larger = base64.urlsafe_b64encode(bytes(range(200, 216))).decode("ascii").rstrip("=")
+        self.assertEqual(self.store.arrangement(PEER_ID, "left", stamp, larger), (True, []))
+        self.assertEqual(self.settings()["peers"][0]["side_by"], larger)
         self.assertEqual(self.settings()["peers"][0]["side_set_at"], stamp)
+
+    def test_an_arrangement_for_one_machine_leaves_the_others_side_alone(self):
+        settings = self.with_id()
+        second = {**copy.deepcopy(settings["peers"][0]), "id": SECOND_ID, "side": "right", "name": "Second"}
+        second["token"] = second["token"][::-1]
+        settings["peers"].append(second)
+        self.write_settings(settings)
+        self.store = SettingsStore(self.path)
+        self.store.arrangement(SECOND_ID, "right", 1790000900, SECOND_ID)
+        after = self.settings()["peers"]
+        self.assertEqual((after[0]["side"], after[1]["side"]), ("left", "left"))
 
     def test_the_store_serves_the_settings_it_holds_to_a_peer_book_and_keeps_them_after_a_save(self):
         book = self.store.book()
         self.assertEqual(book.peers()[0]["token"], TOKEN)
         raw = config_to_raw(self.cfg)
-        raw["pc_name"] = "Renamed"
+        raw["host"] = "192.0.2.98"
         self.store.save(raw)
-        self.assertEqual(book.peers()[0]["name"], "Renamed")
-        outcome, entry = book.admit(protocol.key_id(TOKEN), protocol.read_id(self.settings()["machine_id"]), protocol.read_id(PEER_ID), {"name": "Learnt"})
-        self.assertEqual(self.settings()["peers"][0]["id"], PEER_ID)
+        self.assertEqual(book.peers()[0]["host"], "192.0.2.98")
+        # The migrated entry never links; as a pairing made on 1.5.0 it does, and what it learns is kept.
+        own = protocol.read_id(self.settings()["machine_id"])
+        self.assertEqual(book.admit(protocol.key_id(TOKEN), own, protocol.read_id(PEER_ID), {"name": "Learnt"})[0], receiver.GONE)
+        settings = self.store.current()
+        settings["peers"][0].update(id=PEER_ID, from_1_4=False)
+        self.store.save_settings(settings)
+        self.assertEqual(book.admit(protocol.key_id(TOKEN), own, protocol.read_id(PEER_ID), {"name": "Learnt"})[0], receiver.ADMITTED)
+        self.assertEqual(self.settings()["peers"][0]["name"], "Learnt")
         self.assertEqual(self.store.current()["peers"][0]["name"], "Learnt")
 
     def test_changing_the_methods_turns_zones_on_and_off(self):
+        self.with_id()
         raw = config_to_raw(self.cfg)
-        raw["crossing"]["methods"] = ["part", "notch"]
-        raw["crossing"]["edge_parts"] = ["middle"]
-        cfg = self.store.save(raw)
-        settings = self.settings()
-        self.assertFalse(settings["shortcut"])
-        zones = {zone["kind"]: zone for zone in settings["zones"]}
+        raw["crossing"]["methods"] = ["edge", "corner"]
+        self.store.save(raw)
+        self.assertFalse(self.settings()["shortcut"])
+        self.store.set_ways(PEER_ID, side="left", methods=["part", "notch"], parts=["middle"], corner="top_right")
+        zones = {zone["kind"]: zone for zone in self.settings()["zones"]}
         self.assertTrue(zones["edge"]["off"])
         self.assertNotIn("off", zones["part"])
         self.assertEqual(zones["part"]["parts"], ["middle"])
         self.assertNotIn("off", zones["notch"])
-        self.assertEqual(cfg.crossing["methods"], ["part", "notch"])
+        self.assertEqual(self.store.load().crossing["methods"], ["part", "notch"])
 
     def test_the_corner_zones_edge_follows_the_corner_not_the_side(self):
-        raw = config_to_raw(self.cfg)
-        raw["crossing"]["edge"] = "top"
-        raw["crossing"]["arrangement_set_at"] += 1
-        self.store.save(raw)
+        self.with_id()
+        self.store.set_ways(PEER_ID, side="top", methods=["corner"], parts=["middle"], corner="top_right")
         corner = [z for z in self.settings()["zones"] if z["kind"] == "corner"][0]
         self.assertEqual((corner["corner"], corner["edge"]), ("top_right", "right"))
-        raw["crossing"]["corner"] = "bottom_left"
-        self.store.save(raw)
+        self.store.set_ways(PEER_ID, side="top", methods=["corner"], parts=["middle"], corner="bottom_left")
         corner = [z for z in self.settings()["zones"] if z["kind"] == "corner"][0]
         self.assertEqual((corner["corner"], corner["edge"]), ("bottom_left", "left"))
+
+    def test_ways_that_would_clash_with_another_machines_are_refused_with_both_named_and_nothing_written(self):
+        settings = self.with_id()
+        second = {**copy.deepcopy(settings["peers"][0]), "id": SECOND_ID, "side": "right", "name": "Second"}
+        second["token"] = second["token"][::-1]
+        settings["peers"].append(second)
+        settings["zones"].append({"peer": SECOND_ID, "kind": "edge"})
+        self.write_settings(settings)
+        self.store = SettingsStore(self.path)
+        # On the same side as Second, with no way in yet: turning its edge on would cover Second's.
+        self.store.set_ways(PEER_ID, side="right", methods=[], parts=["middle"], corner="top_right")
+        before = self.settings()
+        with self.assertRaises(SettingsError) as raised:
+            self.store.set_ways(PEER_ID, side="right", methods=["edge"], parts=["middle"], corner="top_right")
+        self.assertIn("Second", str(raised.exception))
+        self.assertIn("right edge of this Mac", str(raised.exception))
+        self.assertEqual(self.settings(), before)
+
+    def second_machine(self, side, zones=None):
+        settings = self.with_id()
+        second = {**copy.deepcopy(settings["peers"][0]), "id": SECOND_ID, "side": side, "name": "Second"}
+        second["token"] = second["token"][::-1]
+        settings["peers"].append(second)
+        if zones is not None:
+            settings["zones"] += zones
+        self.write_settings(settings)
+        self.store = SettingsStore(self.path)
+
+    def test_a_machine_paired_with_no_zone_gets_its_edge_when_the_settings_are_read(self):
+        # The rig's beta.3 file of 01-10-2026: a second machine's side set, and no zone to cross by.
+        self.second_machine("right")
+        self.assertIn({"peer": SECOND_ID, "kind": "edge"}, self.store.current()["zones"])
+
+    def test_one_whose_side_is_taken_gets_its_edge_off_and_the_settings_still_read(self):
+        self.second_machine("left")
+        self.assertIn({"peer": SECOND_ID, "kind": "edge", "off": True}, self.store.current()["zones"])
+        self.assertIn("Second has no way in", ways.blocked_sentence(self.store.current(), SECOND_ID, "this Mac"))
+
+    def test_moving_a_machine_onto_a_taken_side_keeps_the_side_and_turns_its_way_there_off(self):
+        self.second_machine("right", [{"peer": SECOND_ID, "kind": "edge"}])
+        self.assertTrue(self.store.set_ways(SECOND_ID, side="left", methods=["edge"], parts=["middle"], corner="top_right"))
+        second = next(entry for entry in self.settings()["peers"] if entry["id"] == SECOND_ID)
+        self.assertEqual(second["side"], "left")
+        self.assertIn({"peer": SECOND_ID, "kind": "edge", "off": True}, self.settings()["zones"])
+
+    def test_ways_for_a_machine_no_longer_paired_are_refused(self):
+        with self.assertRaises(SettingsError):
+            self.store.set_ways(SECOND_ID, side="right", methods=["edge"], parts=["middle"], corner="top_right")
 
     def test_the_first_machines_port_is_its_own_and_never_moves_this_macs(self):
         raw = config_to_raw(self.cfg)
@@ -625,7 +719,8 @@ class PairedAndRemovedTests(Base):
         self.store.add_peer(self.entry(PEER_ID, OTHER_TOKEN, name="Studio"), replaced)
         after = self.settings()
         self.assertEqual([peer["id"] for peer in after["peers"]], [PEER_ID])
-        self.assertEqual(after["zones"], [])
+        # Only the new machine's own edge, which every machine paired starts with.
+        self.assertEqual(after["zones"], [{"peer": PEER_ID, "kind": "edge"}])
         self.assertEqual(self.store.load().auth_token, OTHER_TOKEN)
 
     def test_a_pairing_that_cannot_be_written_raises_and_changes_nothing(self):
@@ -647,7 +742,7 @@ class PairedAndRemovedTests(Base):
         self.store.add_peer(self.entry(SECOND_ID, OTHER_TOKEN))
         self.store.remove_peer(TOKEN)
         self.assertEqual(self.store.load().auth_token, OTHER_TOKEN)
-        self.assertEqual(self.settings()["zones"], [])
+        self.assertEqual(self.settings()["zones"], [{"peer": SECOND_ID, "kind": "edge"}])
 
     def test_removing_the_only_machine_leaves_this_one_unpaired_and_it_stays_so(self):
         self.store.remove_peer(TOKEN)
@@ -919,7 +1014,7 @@ class ReimportRefusalsTests(Base):
         settings["peers"] = [added]
         settings["zones"] = []
         self.store.save_settings(settings)
-        self.assertEqual(self.settings()["zones"], [])
+        self.assertEqual(self.settings()["zones"], [{"peer": SECOND_ID, "kind": "edge"}])
 
 
 class OverlapTests(Base):
@@ -974,13 +1069,22 @@ class OverlapTests(Base):
         SettingsStore(self.path).load()
         self.refused(lambda s: s["zones"].append({"peer": "", "kind": "corner", "corner": "top_left", "edge": "left"}))
 
-    def test_a_save_with_the_edge_and_the_thirds_on_turns_the_thirds_off(self):
-        raw = config_to_raw(SettingsStore(self.path).load())
-        raw["crossing"]["methods"] = ["edge", "part"]
-        cfg = self.store.save(raw)
-        self.assertEqual(cfg.crossing["methods"], ["edge"])
+    def test_ways_with_the_edge_and_the_thirds_on_write_the_thirds_off(self):
+        self.store.set_ways("", side="left", methods=["edge", "part"], parts=["middle"], corner="top_right")
+        self.assertEqual(self.store.load().crossing["methods"], ["shortcut", "edge"])
         zones = {z["kind"]: z for z in self.settings()["zones"]}
         self.assertTrue(zones["part"]["off"])
+
+    def test_two_machines_on_one_notch_are_refused(self):
+        def two_notches(s):
+            s["peers"][0]["id"] = PEER_ID
+            s["zones"] = [{**z, "peer": PEER_ID} for z in s["zones"]]
+            s["zones"][3].pop("off", None)
+            second = {**copy.deepcopy(s["peers"][0]), "id": SECOND_ID, "side": "right"}
+            second["token"] = second["token"][::-1]
+            s["peers"].append(second)
+            s["zones"].append({"peer": SECOND_ID, "kind": "notch"})
+        self.refused(two_notches)
 
 
 if __name__ == "__main__":

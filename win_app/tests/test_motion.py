@@ -81,12 +81,16 @@ class MotionTest(unittest.TestCase):
     def test_the_diagram_lands_on_its_side_at_once_before_the_window_opens(self):
         import diagram
 
+        def mac(side):
+            return [{"key": "b", "label": "Mac", "side": side, "methods": ["edge"], "parts": [], "corner": "top_left",
+                     "chosen": True}]
+
         picture = diagram.ArrangementDiagram(self.window)
-        picture.set_state("left", ["edge"], [], "top_left", "Right Ctrl", "hold")
-        picture.set_state("top", ["edge", "shortcut"], [], "top_left", "Right Ctrl", "hold")
-        self.assertEqual(picture._angle, 90.0)
-        self.assertEqual(picture._marks[("edge", "top")], 1.0)
-        self.assertEqual(picture._marks[("edge", "left")], 0.0)
+        picture.set_machines(mac("left"), "Right Ctrl", "hold", False)
+        picture.set_machines(mac("top"), "Right Ctrl", "hold", True)
+        self.assertEqual(picture._places["b"][0], 90.0)
+        self.assertEqual(picture._marks[("edge", "b", "top")], 1.0)
+        self.assertEqual(picture._marks[("edge", "b", "left")], 0.0)
         self.assertEqual(picture._marks[("cap",)], 1.0)
         self.assertIn("hold Right Ctrl", picture.accessibleDescription())
 

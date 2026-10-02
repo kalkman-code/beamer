@@ -47,10 +47,10 @@ def row(entry: dict, label: str, live: bool, kind: str, status: str, here: bool,
 
 
 def _state(entry, label, live, kind, status, here, driving, inbound, has_link) -> LinkState:
-    if not protocol.is_paired_token(entry.get("token")):
+    if not protocol.linkable(entry):
         return LinkState(
             "pair_again", AMBER, "Pair again", "Pair again",
-            f"{label} was paired in 1.4.x with a typed token, which 1.5.0 does not use. Remove it and pair it again.", AMBER,
+            f"{label} was paired on Beamer 1.4. Pair the two again to link them on 1.5.0.", AMBER,
         )
     if driving:
         return LinkState(

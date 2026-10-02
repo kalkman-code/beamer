@@ -507,8 +507,8 @@ class MachinesPanel:
         for view in list(self.heard_list.arrangedSubviews()):
             self.heard_list.removeArrangedSubview_(view)
             view.removeFromSuperview()
-        for index, item in enumerate(heard):
-            self._heard_row(index, item, item["address"] == chosen)
+        for index, (item, shared) in enumerate(zip(heard, peerlist.sharing_a_name(heard))):
+            self._heard_row(index, item, item["address"] == chosen, shared)
         if service is not None and service.error:
             self.heard_empty.set(f"Beamer cannot look for machines: {service.error}", ink="fault")
         else:
@@ -521,7 +521,7 @@ class MachinesPanel:
             self.chosen = None
             self._heard_key = None
 
-    def _heard_row(self, index, item, picked):
+    def _heard_row(self, index, item, picked, shared_name):
         older = item.get("pairing") != pairing.PAIRING_V3
         showing = item["pair_id"] is not None and not older
         row = widgets.pressable(lambda index=index: self._choose(index), "well" if picked else "ground",
@@ -536,7 +536,9 @@ class MachinesPanel:
         line.addArrangedSubview_(led.view)
         name = widgets.Label(self._shown(item["name"]), theme.TYPE["note"], 600 if picked else 400)
         line.addArrangedSubview_(widgets.hug(widgets.squeeze(name.view), AppKit.NSLayoutPriorityDefaultLow))
-        detail = "Older Beamer" if older else " · ".join(part for part in (platform, self._shown(item["address"])) if part)
+        # A current machine's row always says where it is; an older one's only where its name is shared.
+        where = self._shown(item["address"]) if shared_name or not older else ""
+        detail = " · ".join(part for part in ("Older Beamer" if older else platform, where) if part)
         line.addArrangedSubview_(widgets.Label(detail, theme.TYPE["small"], mono=True, ink="amber" if older else "ink_3").view)
         row.addSubview_(line)
         widgets.pin(line, row, (7, 10, 7, 10))

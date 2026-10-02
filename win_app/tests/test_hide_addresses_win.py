@@ -11,6 +11,7 @@ try:
     from PySide6.QtWidgets import QApplication
 
     import kvm_bridge_win
+    from core.tests import responder_harness as harness
     import theme
 except ImportError:  # PySide6 is only in the Windows venv
     kvm_bridge_win = None
@@ -24,12 +25,13 @@ class HideAddressesWindowTest(unittest.TestCase):
         theme.init_fonts()
         folder = Path(tempfile.mkdtemp())
         self.config = folder / "settings.json"
-        self.raw = {"host": "192.0.2.20", "port": 24820, "auth_token": "synthetic", "paired_with": "MacBook Pro",
+        self.raw = {"host": "192.0.2.20", "port": harness.free_port(), "auth_token": "synthetic", "paired_with": "MacBook Pro",
                     "mac_host": "192.0.2.10", "mac_return_edge": "left"}
         (folder / "config.json").write_text(json.dumps(self.raw))
         self.window = kvm_bridge_win.WindowsApplication(self.config)
 
     def tearDown(self):
+        self.window.server.stop()
         self.window.deleteLater()
 
     def edit_settings(self, **changes):

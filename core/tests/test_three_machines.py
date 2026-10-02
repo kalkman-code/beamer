@@ -39,6 +39,7 @@ class ScriptedOwner:
         self.links = {}
         self.sent = []
         self.moved = []
+        self.dropped = []
         self.clipboard = "owner's"
         self.clipboards = []
         for machine in machines:
@@ -65,6 +66,9 @@ class ScriptedOwner:
                 self.clipboards.append(self.clipboard)
             elif isinstance(action, owner_module.Moved):
                 self.moved.append(action)
+            elif isinstance(action, owner_module.Drop):
+                self.links[action.peer].close()
+                self.dropped.append(action.peer)
 
     def pump(self):
         for peer, link in self.links.items():
@@ -225,6 +229,27 @@ class WhereTheRoutesMustAgree(Chain):
         self.assertTrue(wait_for(lambda: self.a.responder.owner == O))
         self.assertIsNone(self.b.responder.owner)
         # Still driving A: the stay was accepted on its own route.
+        self.a.desktop.cursor = (960, 540)
+        before = len(moves(self.a))
+        self.o.move(5, 0)
+        self.assertTrue(self.o.until(lambda: len(moves(self.a)) == before + 1))
+
+    def test_a_hand_over_given_up_before_its_accept_arrives_closes_that_link_and_its_ownership(self):
+        # B takes the input, but its `accept` is held up on the way (here: never read) until the
+        # owner's second has passed. Without closing B's link, B would stay owned by an owner that
+        # drives A, refusing everyone else for as long as the link lives.
+        self.push_right(self.a)
+        switch = self.o.links[text(A)].expect(protocol.MSG_SWITCH)
+        self.o.carry_out(self.o.owner.switch(text(A), switch))
+        self.assertTrue(wait_for(lambda: self.b.responder.owner == O))
+        time.sleep(owner_module.TAKE_WAIT + 0.05)
+        self.o.carry_out(self.o.owner.tick())
+        self.assertEqual(self.o.dropped, [text(B)])
+        self.assertTrue(wait_for(lambda: self.b.responder.owner is None))
+        self.assertEqual(self.o.on, text(A))
+        stay = [data for peer, data in self.o.sent if peer == text(A) and data.get("stay")][-1]
+        self.assertNotIn(text(B), stay["reach"])
+        self.assertTrue(wait_for(lambda: self.a.responder.owner == O))
         self.a.desktop.cursor = (960, 540)
         before = len(moves(self.a))
         self.o.move(5, 0)

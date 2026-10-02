@@ -48,9 +48,9 @@ def describe(entry: dict, label: str, *, up: bool, driving: bool, input_there: b
     if input_there:
         return PeerState("signal", "Input here",
                          f"This PC's keyboard and pointer are on {label}. Do the same again to bring them home.")
-    if not protocol.is_paired_token(entry.get("token")):
+    if not protocol.linkable(entry):
         return PeerState("amber", "Pair again",
-                         f"{label} was paired in 1.4.x with a typed token, which 1.5.0 does not use. Remove it and pair it again.")
+                         f"{label} was paired on Beamer 1.4. Pair the two again to link them on 1.5.0.")
     if up:
         return PeerState("signal", "Linked", f"Connected to {label}.")
     if waking:

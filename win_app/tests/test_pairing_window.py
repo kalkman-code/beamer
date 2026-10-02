@@ -13,6 +13,7 @@ from types import SimpleNamespace
 sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 from core import pairing, peerlist, protocol
+from core.tests import responder_harness as harness
 
 try:
     from PySide6.QtWidgets import QApplication
@@ -45,11 +46,13 @@ class MachinesWindowTest(unittest.TestCase):
 
     def tearDown(self):
         if self.window is not None:
+            self.window.server.stop()
             self.window.deleteLater()
 
     def open(self, *entries, **top):
         settings = app_config.load_settings(self.path)
         settings["peers"] = list(entries)
+        settings["port"] = harness.free_port()
         settings.update(top)
         app_config.write_settings(self.path, settings)
         self.window = kvm_bridge_win.WindowsApplication(self.path)
@@ -81,13 +84,21 @@ class MachinesWindowTest(unittest.TestCase):
         self.assertEqual(row.word.text(), "Waiting")
         self.assertIn("Studio Mac", row.detail.text())
 
-    def test_a_typed_token_from_1_4_x_asks_to_pair_again(self):
-        (self.folder / "config.json").write_text(json.dumps({
-            "host": "192.0.2.20", "port": 24820, "auth_token": "typed by hand", "paired_with": "MacBook Pro",
-            "mac_host": "192.0.2.10", "mac_return_edge": "left"}))
-        self.window = kvm_bridge_win.WindowsApplication(self.path)
-        row = next(iter(self.window.machines.rows.values()))
-        self.assertEqual(row.word.text(), "Pair again")
+    def test_any_token_from_1_4_x_asks_to_pair_again(self):
+        # "A" * 43 has pairing's shape: 1.4.x kept no record of whether a token was paired or typed.
+        for token in ("typed by hand", "A" * 43):
+            with self.subTest(token=token):
+                for name in ("config.json", "settings.json"):
+                    (self.folder / name).unlink(missing_ok=True)
+                (self.folder / "config.json").write_text(json.dumps({
+                    "host": "192.0.2.20", "port": harness.free_port(), "auth_token": token, "paired_with": "MacBook Pro",
+                    "mac_host": "192.0.2.10", "mac_return_edge": "left"}))
+                self.window = kvm_bridge_win.WindowsApplication(self.path)
+                row = next(iter(self.window.machines.rows.values()))
+                self.assertEqual(row.word.text(), "Pair again")
+                self.window.server.stop()
+                self.window.deleteLater()
+                self.window = None
 
     def test_with_nothing_paired_the_list_says_so(self):
         self.window = kvm_bridge_win.WindowsApplication(self.path)
@@ -163,7 +174,7 @@ class MachinesWindowTest(unittest.TestCase):
 
     def test_pairing_a_machine_starts_sending_when_nothing_could_send_before(self):
         (self.folder / "config.json").write_text(json.dumps({
-            "host": "192.0.2.20", "port": 24820, "auth_token": "typed by hand", "paired_with": "MacBook Pro",
+            "host": "192.0.2.20", "port": harness.free_port(), "auth_token": "typed by hand", "paired_with": "MacBook Pro",
             "mac_host": "192.0.2.10", "mac_return_edge": "left"}))
         self.window = kvm_bridge_win.WindowsApplication(self.path)
         self.stub(self.window)
@@ -293,6 +304,31 @@ class MachinesWindowTest(unittest.TestCase):
             window._store_peer(fresh, replaced)
         self.assertEqual([entry["token"] for entry in self.settings()["peers"]], [TOKEN_B])
 
+    def test_pairing_the_mac_at_the_1_4_entrys_address_again_keeps_its_side_and_zones(self):
+        # Every 1.4.x upgrader pairs again (no token migrates since 1.5.0), on purpose and at the
+        # screen: where that Mac sits is not theirs to set a second time.
+        migrated = {**peer(ID_A, "Studio Mac", TOKEN_A, "192.0.2.10"), "id": "", "from_1_4": True, "linked": False,
+                    "paired_at": 0, "side": "top", "side_set_at": 1_790_000_000}
+        window = self.open(migrated, zones=[{"peer": "", "kind": "edge"}, {"peer": "", "kind": "corner",
+                                                                           "corner": "top_left", "edge": "top", "off": True}])
+        fresh = peer(b"\x0c" * 16, "Studio Mac", protocol.id_text(bytes(range(2, 34))), "192.0.2.10")
+        window._store_peer(fresh, window.book.peers()[0])
+        after = self.settings()
+        new_id = protocol.id_text(b"\x0c" * 16)
+        self.assertEqual([zone["peer"] for zone in after["zones"]], [new_id, new_id])
+        self.assertEqual((after["peers"][0]["side"], after["peers"][0]["side_set_at"]), ("top", 1_790_000_000))
+
+    def test_pairing_another_platform_at_that_address_keeps_nothing_of_it(self):
+        migrated = {**peer(ID_A, "Studio Mac", TOKEN_A, "192.0.2.10"), "id": "", "from_1_4": True, "linked": False,
+                    "paired_at": 0, "side": "top", "side_set_at": 1_790_000_000}
+        window = self.open(migrated, zones=[{"peer": "", "kind": "edge"}])
+        fresh = peer(b"\x0c" * 16, "Studio PC", protocol.id_text(bytes(range(2, 34))), "192.0.2.10", platform="windows")
+        window._store_peer(fresh, window.book.peers()[0])
+        after = self.settings()
+        # Only its own whole edge, which every machine paired starts with.
+        self.assertEqual(after["zones"], [{"peer": protocol.id_text(b"\x0c" * 16), "kind": "edge"}])
+        self.assertEqual(after["peers"][0]["side"], "")
+
 
 @unittest.skipIf(kvm_bridge_win is None, "needs PySide6")
 class PairingSheetWindowTest(unittest.TestCase):
@@ -315,6 +351,7 @@ class PairingSheetWindowTest(unittest.TestCase):
 
     def tearDown(self):
         self.service.cancel_pairing()
+        self.window.server.stop()
         self.window.deleteLater()
 
     def show_code(self):
@@ -358,6 +395,30 @@ class PairingSheetWindowTest(unittest.TestCase):
         button.click()
         self.assertEqual(self.window.sheet.pair_note.text(),
                          peerlist.pairing_error_text(pairing.PairingError(pairing.ERROR_VERSION), "Old Mac"))
+
+    STUDIO = {"name": "Studio", "address": "192.168.50.22", "port": 24820, "reply_port": 24821,
+              "pair_id": "first", "pairing": 3, "platform": "windows"}
+
+    def test_one_machine_heard_on_two_interfaces_shows_each_row_s_address(self):
+        twice = [self.STUDIO, dict(self.STUDIO, address="169.254.3.7", pair_id="second")]
+        self.window.sheet.set_machines(twice, self.window._shown)
+        self.assertEqual([button.text() for button in self.window.sheet.group.buttons()], [
+            "Studio  ·  Windows  ·  192.168.50.22  ·  showing a code",
+            "Studio  ·  Windows  ·  169.254.3.7  ·  showing a code",
+        ])
+
+    def test_a_lone_machine_s_row_is_as_it_was(self):
+        self.window.sheet.set_machines([self.STUDIO], self.window._shown)
+        self.assertEqual(self.window.sheet.group.buttons()[0].text(), "Studio  ·  Windows  ·  showing a code")
+
+    def test_the_addresses_follow_hide_addresses(self):
+        twice = [self.STUDIO, dict(self.STUDIO, address="169.254.3.7", pair_id="second")]
+        self.window.sheet.set_machines(twice, self.window._shown)
+        self.window._config.hide_addresses = True
+        self.window.sheet.set_machines(twice, self.window._shown)
+        texts = [button.text() for button in self.window.sheet.group.buttons()]
+        self.assertEqual(len(texts), 2)
+        self.assertFalse([text for text in texts if "192.168.50.22" in text or "169.254.3.7" in text], texts)
 
     def test_only_a_machine_showing_a_code_is_listed(self):
         quiet = {"name": "Quiet", "address": "192.0.2.61", "port": 24820, "reply_port": 24821, "pair_id": None,

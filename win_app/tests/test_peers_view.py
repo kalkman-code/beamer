@@ -66,10 +66,14 @@ class DescribeTest(unittest.TestCase):
                       status="Update Beamer on Studio Mac to 1.5.0; if it is up to date, pair the two again")
         self.assertEqual(found.word, "Version")
 
-    def test_a_typed_token_is_asked_to_pair_again(self):
-        found = state(entry(token="typed by hand"))
-        self.assertEqual((found.word, found.tone), ("Pair again", "amber"))
-        self.assertIn("pair", found.detail)
+    def test_any_1_4_pairing_is_asked_to_pair_again(self):
+        # 1.4.x kept no record of whether its token was paired or typed, so a token of pairing's
+        # shape is asked again too, and so is one an earlier beta linked.
+        for peer in (entry(token="typed by hand"), entry(id="", linked=False, from_1_4=True), entry(from_1_4=True)):
+            with self.subTest(peer=peer):
+                found = state(peer, up=peer.get("from_1_4") is True)
+                self.assertEqual((found.word, found.tone), ("Pair again", "amber"))
+                self.assertEqual(found.detail, "Studio Mac was paired on Beamer 1.4. Pair the two again to link them on 1.5.0.")
 
     def test_sending_off_with_no_link_waits_for_the_other_end(self):
         found = state(entry(send=False))

@@ -185,7 +185,7 @@ class ChangesReachTheArmedZonesTests(unittest.TestCase):
 
     def set_crossing(self, methods, parts, corner="top_right"):
         settings = self.store.current()
-        settings["peers"][0].update(id=PEER_TEXT, side="right", send=False)
+        settings["peers"][0].update(id=PEER_TEXT, side="right", send=False, from_1_4=False)
         settings["zones"] = zones(methods, parts, corner)
         self.store.save_settings(settings)
 

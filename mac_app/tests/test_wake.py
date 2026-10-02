@@ -103,7 +103,7 @@ class WakingControllerTests(unittest.TestCase):
         self.controller.WAKE_POLL_SECONDS = 0.01
         self.alerts = []
         self.controller.on_user_alert = lambda title, message: self.alerts.append(message)
-        self.controller.on_mac_learned = self.learned.append
+        self.controller.on_mac_learned = lambda peer, mac: self.learned.append(mac)
 
     def _wait_for_wake_thread(self):
         for thread in threading.enumerate():
@@ -190,9 +190,12 @@ class WakingControllerTests(unittest.TestCase):
         newer.reconnect_interval_s = 7.0
         import bridge as bridge_module
 
+        racing = []
+
         def racing_replace(cfg, **changes):
             result = real(cfg, **changes)
             thread = threading.Thread(target=lambda: self.controller.apply_settings(newer))
+            racing.append(thread)
             thread.start()
             thread.join(0.3)
             return result
@@ -203,6 +206,8 @@ class WakingControllerTests(unittest.TestCase):
                 self.controller.book.data["peers"][0]["host"] = "192.0.2.88"
             bring_up(self.controller)
             self._wait_for_learning()
+            for thread in racing:
+                thread.join(5)
         self.assertIs(self.controller.cfg, newer)
 
     def _wait_for_learning(self):

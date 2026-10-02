@@ -1,4 +1,4 @@
-"""Same on both machines, without AppKit or Qt: the message, the merge and the window's words."""
+"""Same on all machines, without AppKit or Qt: the message, the merge and the window's words."""
 
 import base64
 import unittest

@@ -120,7 +120,7 @@ class LinkSetRaceTests(Base):
 
 
 class ArrangementOriginTests(Base):
-    def test_an_arrangement_from_a_peer_that_is_not_the_first_is_not_applied_to_the_first(self):
+    def test_an_arrangement_from_a_peer_that_is_not_the_first_reaches_the_app_with_its_own_id(self):
         seen = []
         self.controller.on_arrangement = lambda *args: seen.append(args)
         with self.controller.book.lock:
@@ -130,9 +130,8 @@ class ArrangementOriginTests(Base):
         bring_up(self.controller)
         message = protocol.arrangement_v6("right", int(time.time()) - 5, OTHER_ID)
         self.controller._handle_arrangement(message, protocol.id_text(OTHER_ID))
-        self.assertEqual(seen, [])
         self.controller._handle_arrangement(message, protocol.id_text(PEER_ID))
-        self.assertEqual(len(seen), 1)
+        self.assertEqual([args[0] for args in seen], [protocol.id_text(OTHER_ID), protocol.id_text(PEER_ID)])
 
 
 class LetGoWaitTests(Base):

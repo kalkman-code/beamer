@@ -8,7 +8,6 @@ import os
 import select
 import socket
 import struct
-import threading
 import time
 import unittest
 from unittest import mock
@@ -16,7 +15,7 @@ from unittest import mock
 from core import protocol, receiver
 from core.tests import v5_link
 from core.tests.responder_harness import (
-    B, C, D, HERE, TOKENS, Initiator, Machine, entry, ident, silent_close, token, wait_for,
+    B, C, D, HERE, TOKENS, Initiator, Machine, entry, silent_close, token, wait_for,
 )
 
 
@@ -163,155 +162,17 @@ class TheMigratedEntry(Case):
     def migrated(self):
         return self.machine.settings.peer(token(50))
 
-    def test_its_first_link_learns_the_id_and_rewrites_its_zones(self):
+    def test_its_token_is_never_matched_however_it_is_spelled(self):
         link = self.initiator(peer=B, key=token(50))
-        link.handshake(link.hello(name="Bee"))
-        self.assertEqual(self.migrated()["id"], protocol.id_text(B))
-        self.assertTrue(self.migrated()["linked"])
-        self.assertEqual([zone["peer"] for zone in self.machine.settings.data["zones"]], [protocol.id_text(B), protocol.id_text(C)])
-        self.assertEqual(self.machine.notices, ["Linked with Bee at 127.0.0.1 for the first time on Beamer 1.5.0."])
-
-    def test_a_later_link_naming_another_id_is_answered_wrong_id(self):
-        self.initiator(peer=B, key=token(50)).handshake()
-        with self.assertRaises(protocol.HelloRefused) as refused:
-            self.initiator(peer=D, key=token(50)).handshake()
-        self.assertEqual(refused.exception.error, protocol.ERROR_WRONG_ID)
-        self.assertEqual(self.migrated()["id"], protocol.id_text(B))
-
-    def fold(self, **hello):
-        link = self.initiator(peer=C, key=token(50))
-        welcome = link.handshake(link.hello(**hello))
-        self.assertTrue(link.closed.wait(2))
-        return welcome
-
-    def test_a_hello_naming_another_entrys_id_folds_the_migrated_entry_into_it(self):
-        # The machine was paired again since the upgrade, somewhere its saved host did not match,
-        # and still dials under the 1.4.x token: only it holds that token (the campaign's call,
-        # after step 4c's review). It gets the welcome, so its own step 7 folds its side too.
-        self.migrated().update(side="left", side_set_at=1790000000, side_by=protocol.id_text(B))
-        self.machine.settings.data["zones"] = [{"peer": "", "kind": "edge"}, {"peer": "", "kind": "corner", "corner": "top_left", "edge": "left"}]
-        welcome = self.fold(name="Sea")
-        self.assertEqual(welcome["id"], HERE)
-        self.assertIsNone(self.migrated())
-        self.assertEqual(self.machine.settings.data["zones"], [
-            {"peer": protocol.id_text(C), "kind": "edge"},
-            {"peer": protocol.id_text(C), "kind": "corner", "corner": "top_left", "edge": "left"},
-        ])
-        sea = self.machine.settings.peer(protocol.id_text(C))
-        self.assertEqual((sea["side"], sea["side_set_at"], sea["side_by"]), ("left", 1790000000, protocol.id_text(B)))
-        self.assertEqual(sea["token"], TOKENS[C])
-        self.assertEqual(self.machine.notices, ["Sea linked from 127.0.0.1 under its Beamer 1.4 pairing, Old PC, which is now part of Sea."])
-        self.assertEqual(self.machine.responder.links(), set())
-
-    def test_a_folded_zone_of_a_kind_the_entry_has_is_dropped(self):
-        self.machine.settings.data["zones"].append({"peer": "", "kind": "corner", "corner": "top_right", "edge": "right"})
-        self.fold()
-        self.assertEqual(self.machine.settings.data["zones"], [
-            {"peer": protocol.id_text(C), "kind": "edge"},
-            {"peer": protocol.id_text(C), "kind": "corner", "corner": "top_right", "edge": "right"},
-        ])
-
-    def test_a_side_taken_by_the_fold_turns_off_what_would_then_overlap(self):
-        # Case A: the entry's own edge and thirds, both on while it had no side.
-        self.migrated().update(side="left")
-        self.machine.settings.data["zones"] = [
-            {"peer": protocol.id_text(C), "kind": "edge"},
-            {"peer": protocol.id_text(C), "kind": "part", "parts": ["start"]},
-        ]
-        self.fold()
-        self.assertEqual(self.machine.settings.data["zones"], [
-            {"peer": protocol.id_text(C), "kind": "edge"},
-            {"peer": protocol.id_text(C), "kind": "part", "parts": ["start"], "off": True},
-        ])
-
-    def test_a_side_taken_by_the_fold_gives_way_to_another_peers_zone(self):
-        # Case B: another peer's edge already on that side.
-        self.machine.settings.data["peers"].append(entry(D, "Dee", side="right"))
-        self.migrated().update(side="right")
-        self.machine.settings.data["zones"] = [
-            {"peer": protocol.id_text(C), "kind": "edge"},
-            {"peer": protocol.id_text(D), "kind": "edge"},
-        ]
-        self.fold()
-        self.assertEqual(self.machine.settings.data["zones"], [
-            {"peer": protocol.id_text(C), "kind": "edge", "off": True},
-            {"peer": protocol.id_text(D), "kind": "edge"},
-        ])
-
-    def test_no_fold_into_a_phone_or_a_machine_of_another_platform(self):
-        for change in ({"port": 0, "host": ""}, {"platform": "windows"}):
-            with self.subTest(change=change):
-                self.machine.settings.data["peers"] = [
-                    entry("", "Old PC", token=token(50), from_1_4=True, linked=False, paired_at=0), entry(C, "Sea", **change)
-                ]
-                with self.assertRaises(protocol.HelloRefused) as refused:
-                    self.initiator(peer=C, key=token(50)).handshake()
-                self.assertEqual(refused.exception.error, protocol.ERROR_WRONG_ID)
-                self.assertEqual(self.migrated()["id"], "")
-
-    def test_this_machines_own_id_under_the_migrated_token_is_still_wrong_id(self):
-        with self.assertRaises(protocol.HelloRefused) as refused:
-            self.initiator(peer=HERE, key=token(50)).handshake()
-        self.assertEqual(refused.exception.error, protocol.ERROR_WRONG_ID)
+        self.assertTrue(silent_close(link.sock))
         self.assertEqual(self.migrated()["id"], "")
+        self.assertFalse(self.migrated()["linked"])
 
-    def test_two_links_racing_to_claim_it_one_wins(self):
-        one, two = ident(130), ident(160)
-        results = {}
-        # Two addresses in the handshake at once: loopback has one, so the slots are keyed by
-        # connection here, and the save is slow so the second reaches the claim while the first saves.
-        self.machine.responder._slots = SlotPerConnection()
-        save = self.machine.settings.save
-        self.machine.book._save = lambda data: (time.sleep(0.1), save(data))
-        first = self.initiator(peer=one, key=token(50))
-        second = self.initiator(peer=two, key=token(50))
-        barrier = threading.Barrier(2)
-
-        def run(name, link):
-            barrier.wait()
-            try:
-                link.handshake(link.hello(name=name))
-                results[name] = "welcome"
-            except protocol.HelloRefused as refused:
-                results[name] = refused.error
-
-        threads = [threading.Thread(target=run, args=("One", first)), threading.Thread(target=run, args=("Two", second))]
-        for thread in threads:
-            thread.start()
-        for thread in threads:
-            thread.join(5)
-        self.assertEqual(sorted(results.values()), ["welcome", protocol.ERROR_WRONG_ID])
-        winner = next(name for name, result in results.items() if result == "welcome")
-        self.assertEqual(self.migrated()["id"], protocol.id_text(one if winner == "One" else two))
-        self.assertEqual(self.machine.notices, [f"Linked with {winner} at 127.0.0.1 for the first time on Beamer 1.5.0."])
-
-
-    def test_the_claim_is_one_step_under_the_lock(self):
-        book = self.machine.book
-        save = self.machine.settings.save
-        book._save = lambda data: (time.sleep(0.1), save(data))
-        key_id = protocol.key_id(token(50))
-        outcomes = []
-        barrier = threading.Barrier(2)
-
-        def claim(peer):
-            barrier.wait()
-            outcomes.append(book.admit(key_id, HERE, peer, {})[0])
-
-        threads = [threading.Thread(target=claim, args=(peer,)) for peer in (ident(130), ident(160))]
-        for thread in threads:
-            thread.start()
-        for thread in threads:
-            thread.join(5)
-        self.assertEqual(sorted(outcomes), [receiver.FIRST_LINK, receiver.WRONG_ID])
-
-
-class SlotPerConnection(receiver.HandshakeSlots):
-    def take(self, host, connection):
-        return super().take((host, id(connection)), connection)
-
-    def free(self, host, connection):
-        super().free((host, id(connection)), connection)
+    def test_nor_once_an_earlier_beta_linked_it(self):
+        # Betas 1 and 2 let a migrated token link and learn its peer's id.
+        self.migrated().update(id=protocol.id_text(B), linked=True)
+        link = self.initiator(peer=B, key=token(50))
+        self.assertTrue(silent_close(link.sock))
 
 
 class TheIdsInHello(Case):

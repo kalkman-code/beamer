@@ -123,6 +123,14 @@ class Base(unittest.TestCase):
     def rows(self):
         return [view for view in self.panel.list.arrangedSubviews()]
 
+    def texts(self, view):
+        found = []
+        if isinstance(view, AppKit.NSTextField):
+            found.append(view.stringValue())
+        for sub in view.subviews():
+            found.extend(self.texts(sub))
+        return found
+
 
 class ListTests(Base):
     def test_the_migrated_machine_is_listed_by_its_name_and_where_it_is(self):
@@ -422,6 +430,28 @@ class EnteringACodeTests(Base):
         self.type_code()
         self.run_pair()
         self.assertEqual(self.service.paired, [])
+
+    def test_same_named_older_machines_show_their_addresses(self):
+        first = heard(name="Studio", address="192.168.50.22", pairing=2)
+        second = heard(name="Studio", address="169.254.3.7", pairing=2)
+        self.service.heard = [first, second]
+        self.panel._heard_key = None
+        self.panel.refresh()
+        rows = self.panel.heard_list.arrangedSubviews()
+        texts = [" ".join(self.texts(row)) for row in rows]
+        self.assertEqual(len(texts), 2)
+        self.assertNotEqual(*texts)
+        self.assertIn("192.168.50.22", texts[0])
+        self.assertIn("169.254.3.7", texts[1])
+
+    def test_shared_older_machine_addresses_follow_the_hide_addresses_setting(self):
+        self.controller.cfg.hide_addresses = True
+        self.service.heard = [heard(name="Studio", address="192.168.50.22", pairing=2),
+                              heard(name="Studio", address="169.254.3.7", pairing=2)]
+        self.panel._heard_key = None
+        self.panel.refresh()
+        texts = [" ".join(self.texts(row)) for row in self.panel.heard_list.arrangedSubviews()]
+        self.assertTrue(all("192.168.50.22" not in text and "169.254.3.7" not in text for text in texts))
 
     def test_the_chosen_machine_is_paired_with_the_code_and_the_list_updates(self):
         self.service.result = entry(FIRST, SECOND_TOKEN, "Laptop")

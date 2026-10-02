@@ -17,8 +17,12 @@ SCREEN = (120.0, 75.0)
 GAP = 14.0
 PAD = 8.0
 CAP_ROW = 34.0
+NOTE_ROW = 22.0
 LIT = 3.0
 CORNER = 16.0
+# The marks of the machines the page is not showing: there, but not the ones being edited.
+QUIET = "ink_3"
+QUIET_ALPHA = 0.55
 
 
 def _colour(name: str, alpha: float = 1.0) -> QColor:
@@ -27,41 +31,65 @@ def _colour(name: str, alpha: float = 1.0) -> QColor:
     return colour
 
 
-def _marks(edge, methods, parts, corner, shortcut) -> dict:
-    """Each mark the diagram can draw, keyed (kind, detail), at 1 when the settings light it."""
-    methods = set(methods)
-    marks = {}
-    for side in pages_win.SIDE_ANGLE:
-        marks[("edge", side)] = 1.0 if "edge" in methods and side == edge else 0.0
-        marks[("track", side)] = 1.0 if "part" in methods and side == edge else 0.0
-        for part in pages_win.PART_SPANS:
-            marks[("part", side, part)] = 1.0 if "part" in methods and side == edge and part in parts else 0.0
-    for name in pages_win.CORNER_NAMES:
-        marks[("corner", name)] = 1.0 if "corner" in methods and name == corner else 0.0
-    marks[("cap",)] = 1.0 if shortcut else 0.0
+def _lit(lead: float, level: float) -> QColor:
+    """A mark on this PC's screen: the signal colour for the machine shown, quieter for the rest."""
+    lead = max(0.0, min(1.0, lead))
+    return _blend(QUIET, "signal", lead, level * (QUIET_ALPHA + (1.0 - QUIET_ALPHA) * lead))
+
+
+def _blend(quiet: str, strong: str, level: float, alpha: float = 1.0) -> QColor:
+    """`quiet` at 0, `strong` at 1, so a machine chosen or left eases between the two."""
+    one, two = QColor(theme.colour(quiet)), QColor(theme.colour(strong))
+    level = max(0.0, min(1.0, level))
+    mixed = QColor.fromRgbF(*(a + (b - a) * level for a, b in zip(one.getRgbF()[:3], two.getRgbF()[:3])))
+    mixed.setAlphaF(max(0.0, min(1.0, alpha)))
+    return mixed
+
+
+def _drawn_side(machine: dict, alone: bool) -> str:
+    # One machine with no side is drawn on the right, as the one-machine page always drew it.
+    return machine.get("side") or ("right" if alone else "")
+
+
+def _marks(machines, shortcut) -> dict:
+    """Each mark the diagram can draw, keyed (kind, machine, detail), at 1 when the settings light it;
+    ("lead", machine) at 1 lights its marks in the signal colour, ("named", machine) its name in ink."""
+    alone = len(machines) == 1
+    marks = {("cap",): 1.0 if shortcut else 0.0}
+    for machine in machines:
+        key, methods, edge = machine["key"], set(machine["methods"]), _drawn_side(machine, alone)
+        for side in pages_win.SIDE_ANGLE:
+            marks[("edge", key, side)] = 1.0 if "edge" in methods and side == edge else 0.0
+            marks[("track", key, side)] = 1.0 if "part" in methods and side == edge else 0.0
+            for part in pages_win.PART_SPANS:
+                lit = "part" in methods and side == edge and part in machine["parts"]
+                marks[("part", key, side, part)] = 1.0 if lit else 0.0
+        for name in pages_win.CORNER_NAMES:
+            marks[("corner", key, name)] = 1.0 if "corner" in methods and name == machine["corner"] else 0.0
+        marks[("lead", key)] = 1.0 if machine["chosen"] or alone else 0.0
+        marks[("named", key)] = 1.0 if machine["chosen"] and not alone else 0.0
     return marks
 
 
 class ArrangementDiagram(QWidget):
-    """This PC's screen with the other machine's beside it on the chosen side, and on this PC's screen,
-    lit, whatever crosses; the shortcut as a key cap underneath."""
+    """This PC's screen in the middle and each paired machine's beside the side it is on, two on one
+    side sharing it; on this PC's screen, lit, whatever crosses to each, the chosen machine's in the
+    signal colour and the rest quieter; the machines with no side named underneath; the shortcut as a
+    key cap below that."""
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.setAccessibleName("Arrangement")
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self._state = None
-        self._angle = pages_win.SIDE_ANGLE["right"]
-        self._marks = _marks("right", (), (), "", False)
+        self._machines: list = []
+        # Where each machine's screen is drawn now, by key: [angle, start, end, shown], moving between states.
+        self._places: dict = {}
+        self._labels: dict = {}
+        self._marks = _marks([], False)
+        self._unplaced = ""
         self._cap_text = ""
-        self._other = OTHER
         self.setFixedHeight(self._height())
-
-    def set_other_name(self, name: str) -> None:
-        name = name or OTHER
-        if name != self._other:
-            self._other = name
-            self.update()
 
     def sizeHint(self) -> QSize:
         return QSize(2 * round(SCREEN[0]) + round(GAP) + 2 * round(PAD), self._height())
@@ -69,35 +97,77 @@ class ArrangementDiagram(QWidget):
     def minimumSizeHint(self) -> QSize:
         return QSize(2 * round(SCREEN[0]) + round(GAP), self._height())
 
-    def _height(self) -> int:
-        _pc, _mac, pair_h = pages_win.arrangement_rects(100.0, 0.0, self._angle, SCREEN, GAP)
-        return round(PAD + pair_h + PAD + CAP_ROW * self._marks[("cap",)])
+    def _drawing(self, width: float):
+        keys = [key for key, place in self._places.items() if place[3] > 0.001]
+        placed = [tuple(self._places[key][:3]) for key in keys]
+        pc, rects, height = pages_win.layout_rects(max(1.0, width - 2 * PAD), PAD, placed, SCREEN, GAP,
+                                                   centre_pc=len(self._machines) > 1)
+        return (pc[0] + PAD, pc[1], pc[2], pc[3]), {key: (rect[0] + PAD, *rect[1:]) for key, rect in zip(keys, rects)}, height
 
-    def set_state(self, edge, methods, parts, corner, key_name, style) -> None:
-        state = (edge, tuple(methods), tuple(parts), corner, key_name, style)
+    def _height(self) -> int:
+        _pc, _rects, height = self._drawing(float(self.width() or 2 * SCREEN[0] + GAP + 2 * PAD))
+        return round(PAD + height + PAD + (NOTE_ROW if self._unplaced else 0.0) + CAP_ROW * self._marks[("cap",)])
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        # A narrow page shrinks the drawing, and the widget's height follows it.
+        height = self._height()
+        if height != self.height():
+            self.setFixedHeight(height)
+
+    def set_machines(self, machines, key_name, style, shortcut) -> None:
+        """Each machine a dict: `key`, `label` ("" for the placeholder of an unpaired PC), `side` (""
+        when not placed), `methods`, `parts`, `corner` and `chosen`."""
+        machines = [dict(machine, methods=list(machine["methods"]), parts=list(machine["parts"])) for machine in machines]
+        state = (repr(machines), key_name, style, shortcut)
         if state == self._state:
             return
         first = self._state is None
         self._state = state
-        shortcut = "shortcut" in methods
+        self._machines = machines
+        alone = len(machines) == 1
+        self._labels = {machine["key"]: machine["label"] or OTHER for machine in machines}
         if shortcut:
             self._cap_text = pages_win.trigger_phrase(key_name, style)
-        self.setAccessibleDescription(pages_win.ways_summary(methods, edge, parts, corner, key_name, style))
-        targets = _marks(edge, methods, parts, corner, shortcut)
+        self._unplaced = "" if alone else pages_win.unplaced_line(
+            [machine["label"] for machine in machines if not machine.get("side")])
+        self.setAccessibleDescription(pages_win.diagram_description(
+            [dict(machine, label=self._labels[machine["key"]], side=_drawn_side(machine, alone)) for machine in machines],
+            key_name, style, shortcut))
+        targets = _marks(machines, shortcut)
+        slots = pages_win.side_slots([dict(machine, side=_drawn_side(machine, alone)) for machine in machines])
+        ends = {}
+        for machine, slot in zip(machines, slots):
+            held = self._places.get(machine["key"])
+            if slot is None:
+                ends[machine["key"]] = list(held[:3]) + [0.0] if held else [0.0, 0.0, 1.0, 0.0]
+                continue
+            side, start, end = slot
+            # A machine already drawn goes round to its new side; one just placed fades in there.
+            drawn = held is not None and held[3] > 0.0 and not first
+            angle = pages_win.turn_to(held[0], side) if drawn else pages_win.SIDE_ANGLE[side]
+            ends[machine["key"]] = [angle, start, end, 1.0]
+        for key, held in self._places.items():
+            # A machine removed or no longer placed fades where it was.
+            ends.setdefault(key, list(held[:3]) + [0.0])
+        starts = {}
+        for key, end in ends.items():
+            held = self._places.get(key)
+            starts[key] = list(held) if held is not None and held[3] > 0.0 else end[:3] + [0.0]
         start_marks = dict(self._marks)
-        start_angle = self._angle
-        end_angle = pages_win.turn_to(start_angle, edge)
-        if first:
-            end_angle = pages_win.SIDE_ANGLE[edge]
 
         def apply(t):
-            self._angle = start_angle + (end_angle - start_angle) * t
-            self._marks = {key: start_marks[key] + (targets[key] - start_marks[key]) * t for key in targets}
+            self._places = {key: [a + (b - a) * t for a, b in zip(starts[key], end)] for key, end in ends.items()}
+            self._marks = {key: start_marks.get(key, 0.0) + (targets.get(key, 0.0) - start_marks.get(key, 0.0)) * t
+                           for key in set(targets) | set(start_marks)}
             self.setFixedHeight(self._height())
             self.update()
 
         def settle():
-            self._angle = end_angle % 360.0
+            self._places = {key: [end[0] % 360.0, end[1], end[2], end[3]] for key, end in ends.items() if end[3] > 0.0
+                            or key in self._labels}
+            self._marks = {key: level for key, level in targets.items()}
+            self.setFixedHeight(self._height())
             self.update()
 
         if first:
@@ -109,39 +179,62 @@ class ArrangementDiagram(QWidget):
     def paintEvent(self, _event) -> None:
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        pc, mac, pair_h = pages_win.arrangement_rects(self.width(), PAD, self._angle, SCREEN, GAP)
+        pc, rects, height = self._drawing(float(self.width()))
         radius = tokens.RADIUS["field"]
-        self._screen(painter, QRectF(*mac), self._other, "panel", "edge", "ink_3", radius)
-        self._screen(painter, QRectF(*pc), "This PC", "well", "edge", "ink_2", radius)
-        for key, level in self._marks.items():
-            if level <= 0.001:
+        for key, rect in rects.items():
+            painter.setOpacity(self._places[key][3])
+            named = self._marks.get(("named", key), 0.0)
+            self._screen(painter, QRectF(*rect), self._labels.get(key, OTHER), "panel", _blend("edge", "ink_3", named),
+                         _blend("ink_3", "ink", named), radius)
+        painter.setOpacity(1.0)
+        self._screen(painter, QRectF(*pc), "This PC", "well", _colour("edge"), _colour("ink_2"), radius)
+        # The machines not shown first, so the chosen one's marks lie over theirs where they meet.
+        for key, level in sorted(self._marks.items(), key=lambda item: self._marks.get(("lead", item[0][1]), 0.0)
+                                 if len(item[0]) > 1 else 0.0):
+            if level <= 0.001 or key[0] in ("cap", "lead", "named"):
                 continue
-            kind = key[0]
+            kind, lead = key[0], self._marks.get(("lead", key[1]), 0.0)
             if kind == "edge":
-                self._segment(painter, pc, key[1], 0.0, 1.0, level, "signal", LIT)
+                self._segment(painter, pc, key[2], 0.0, 1.0, level, lead, LIT)
             elif kind == "track":
-                self._track(painter, pc, key[1], level)
+                self._track(painter, pc, key[2], level)
             elif kind == "part":
-                start, end = pages_win.PART_SPANS[key[2]]
-                self._segment(painter, pc, key[1], start, end, level, "signal", LIT, gap=2.0)
+                start, end = pages_win.PART_SPANS[key[3]]
+                self._segment(painter, pc, key[2], start, end, level, lead, LIT, gap=2.0)
             elif kind == "corner":
-                self._corner(painter, pc, key[1], level)
+                self._corner(painter, pc, key[2], level, lead)
+        top = PAD + height + PAD
+        if self._unplaced:
+            painter.setPen(_colour("ink_3"))
+            painter.setFont(theme.font(tokens.TYPE["note"]))
+            line = QRectF(PAD, top, self.width() - 2 * PAD, NOTE_ROW)
+            painter.drawText(line, Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignTop,
+                             painter.fontMetrics().elidedText(self._unplaced, Qt.TextElideMode.ElideRight, int(line.width())))
+            top += NOTE_ROW
         level = self._marks[("cap",)]
         if level > 0.001 and self._cap_text:
-            self._cap(painter, PAD + pair_h + PAD, level)
+            self._cap(painter, top, level)
         painter.end()
 
-    def _screen(self, painter, rect: QRectF, name, fill, line, ink, radius) -> None:
-        painter.setPen(QPen(_colour(line), 1.0))
+    def _screen(self, painter, rect: QRectF, name, fill, line: QColor, ink: QColor, radius) -> None:
+        painter.setPen(QPen(line, 1.0))
         painter.setBrush(_colour(fill))
         painter.drawRoundedRect(rect.adjusted(0.5, 0.5, -0.5, -0.5), radius, radius)
-        painter.setPen(_colour(ink))
+        painter.setPen(ink)
         painter.setFont(theme.font(tokens.TYPE["small"], 600))
-        name = painter.fontMetrics().elidedText(name, Qt.TextElideMode.ElideRight, int(rect.width()) - 8)
-        painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, name)
+        metrics = painter.fontMetrics()
+        room = rect.adjusted(4, 2, -4, -2)
+        wrapped = Qt.AlignmentFlag.AlignCenter | Qt.TextFlag.TextWordWrap
+        needed = metrics.boundingRect(room.toRect(), wrapped, name)
+        if metrics.horizontalAdvance(name) > room.width() and needed.width() <= room.width() and needed.height() <= room.height():
+            # A screen sharing its side is half as wide: a two-word name goes onto two lines there.
+            painter.drawText(room, wrapped, name)
+            return
+        painter.drawText(rect, Qt.AlignmentFlag.AlignCenter,
+                         metrics.elidedText(name, Qt.TextElideMode.ElideRight, int(rect.width()) - 8))
 
     @staticmethod
-    def _segment(painter, rect, side, start, end, level, colour, width, gap=0.0) -> None:
+    def _segment(painter, rect, side, start, end, level, lead, width, gap=0.0) -> None:
         # Grows from its middle as it comes in.
         middle = (start + end) / 2.0
         half = (end - start) / 2.0 * level
@@ -151,14 +244,18 @@ class ArrangementDiagram(QWidget):
                 y1, y2 = y1 + gap, y2 - gap
             else:
                 x1, x2 = x1 + gap, x2 - gap
-        pen = QPen(_colour(colour, level), width)
+        pen = QPen(_lit(lead, level), width)
         pen.setCapStyle(Qt.PenCapStyle.RoundCap)
         painter.setPen(pen)
         painter.drawLine(QPointF(x1, y1), QPointF(x2, y2))
 
     def _track(self, painter, rect, side, level) -> None:
         """Part of the edge: the whole side as a dim track, with a divider between the thirds."""
-        self._segment(painter, rect, side, 0.0, 1.0, level, "off", LIT)
+        pen = QPen(_colour("off", level), LIT)
+        pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+        painter.setPen(pen)
+        x1, y1, x2, y2 = pages_win.side_segment(rect, side, 0.5 - 0.5 * level, 0.5 + 0.5 * level, inset=LIT / 2.0 + 1.0)
+        painter.drawLine(QPointF(x1, y1), QPointF(x2, y2))
         pen = QPen(_colour("edge", level), 1.0)
         painter.setPen(pen)
         for fraction in (1.0 / 3.0, 2.0 / 3.0):
@@ -169,12 +266,12 @@ class ArrangementDiagram(QWidget):
                 painter.drawLine(QPointF(x1, y1 - 5), QPointF(x1, y1 + 5))
 
     @staticmethod
-    def _corner(painter, rect, corner, level) -> None:
+    def _corner(painter, rect, corner, level, lead) -> None:
         size = CORNER * (0.4 + 0.6 * level)
         x, y, w, h = pages_win.corner_box(rect, corner, size)
         box = QRectF(x, y, w, h).adjusted(2, 2, -2, -2)
-        painter.setPen(QPen(_colour("signal", level), 1.5))
-        painter.setBrush(_colour("signal", 0.35 * level))
+        painter.setPen(QPen(_lit(lead, level), 1.5))
+        painter.setBrush(_lit(lead, 0.35 * level))
         painter.drawRoundedRect(box, 2, 2)
 
     def _cap(self, painter, top, level) -> None:

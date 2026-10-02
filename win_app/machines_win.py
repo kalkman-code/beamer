@@ -21,7 +21,7 @@ from PySide6.QtWidgets import (
 import peers_view
 import theme
 import widgets
-from core import pairing
+from core import pairing, peerlist
 
 KEEP_NOTE = "It stays paired on that machine until you remove this one there too."
 EMPTY = "No machines paired yet."
@@ -344,12 +344,16 @@ class PairingSheet(widgets.Module):
 
     # The requester half.
 
-    def set_machines(self, machines: list) -> None:
+    def set_machines(self, machines: list, shown: Callable[[str], str] = lambda text: text) -> None:
         """What discovery hears: dicts with name, address, platform and pairing, and `pair_id` while a
         code is up. Only a machine showing a code is worth choosing, but one that speaks the old exchange
-        is listed too, as Older Beamer, so it is not mistaken for missing."""
+        is listed too, as Older Beamer, so it is not mistaken for missing. A machine heard on two
+        interfaces is two rows of one name, so where names are shared each row says its address, as
+        `shown` (the window's Hide addresses) lets it."""
         listed = [item for item in machines if item.get("pair_id") or item.get("pairing") != pairing.PAIRING_V3]
-        key = tuple((item["address"], item["name"], item.get("platform"), item.get("pairing"), item.get("pair_id")) for item in listed)
+        wheres = [shown(item["address"]) if shared else "" for item, shared in zip(listed, peerlist.sharing_a_name(listed))]
+        key = tuple((item["address"], item["name"], item.get("platform"), item.get("pairing"), item.get("pair_id"), where)
+                    for item, where in zip(listed, wheres))
         if key == self._listed:
             return
         self._listed = key
@@ -360,9 +364,10 @@ class PairingSheet(widgets.Module):
             self.heard_layout.removeWidget(button)
             button.hide()
             button.deleteLater()
-        for item in listed:
+        for item, where in zip(listed, wheres):
             version = item.get("pairing") == pairing.PAIRING_V3
-            text = f"{item['name']}  ·  {peers_view.platform_name(item)}  ·  " + ("showing a code" if version else OLDER)
+            parts = (item["name"], peers_view.platform_name(item), where, "showing a code" if version else OLDER)
+            text = "  ·  ".join(part for part in parts if part)
             button = _button(text, "choice")
             button.setCheckable(True)
             button.setMinimumHeight(widgets.MIN_TARGET)

@@ -8,6 +8,7 @@ import unittest
 from unittest import mock
 
 from core import protocol, receiver
+from core.tests import pngs
 from core.tests.responder_harness import B, C, TOKENS, Initiator, Machine, entry, wait_for
 
 
@@ -132,7 +133,7 @@ class WithoutCapabilities(Case):
 
     def test_an_image_is_dropped_and_the_text_kept(self):
         link = self.owner()
-        link.send(protocol.clipboard_msg("words", protocol.PNG_SIGNATURE + b"\x00" * 16))
+        link.send(protocol.clipboard_msg("words", pngs.png()))
         self.assertTrue(wait_for(lambda: self.machine.clipboard.set_calls == [("words", None)]))
 
 

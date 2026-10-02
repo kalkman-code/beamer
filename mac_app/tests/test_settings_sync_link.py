@@ -1,4 +1,4 @@
-"""Same on both machines over loopback: the Mac's real controller and responder against a PC end
+"""Same on all machines over loopback: the Mac's real controller and responder against a PC end
 made of core's own link and responder, announcing on connect and carrying each change, with two
 small ends holding each machine's state through settings_sync as the apps' windows do (apply_same on
 the Mac, _on_settings on the PC). The Mac's state travels over its own link and over the PC's."""
@@ -162,7 +162,7 @@ class Rig:
         cfg = self.store.save({**config_to_raw(cfg), "host": "127.0.0.1", "port": self.machine.port,
                                "auth_token": PAIRED_TOKEN, "pc_name": "PC"})
         settings = self.store.current()
-        settings["peers"][0]["id"] = protocol.id_text(PC_ID)
+        settings["peers"][0].update(id=protocol.id_text(PC_ID), from_1_4=False)
         if side is not None:
             settings["peers"][0].update(side=side[0], side_set_at=side[1], side_by=self.mac_id_text)
         self.store.save_settings(settings)

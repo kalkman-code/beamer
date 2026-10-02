@@ -229,13 +229,31 @@ class WhatIsSharedTests(unittest.TestCase):
 
         line = pages_win.SCOPE["crossing"]
         self.assertNotIn("Two are shared", line)
-        self.assertIn("Only which side the other machine is on is shared", line)
+        self.assertIn("Only which side a machine is on is shared, with that machine", line)
 
 
 try:
     import kvm_bridge_win
 except ImportError:  # PySide6 is only in the Windows venv
     kvm_bridge_win = None
+
+
+def real_window(path):
+    """The window over the settings at `path`, built offscreen, which starts no receiver, hooks or announcer."""
+    from PySide6.QtWidgets import QApplication
+
+    import theme
+
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    QApplication.instance() or QApplication([])
+    theme.init_fonts()
+    # A free port, as cfad061 has every window test take: 24820 is the installed Beamer's.
+    settings = app_config.load_settings(path)
+    settings["port"] = harness.free_port()
+    app_config.write_settings(path, settings)
+    window = kvm_bridge_win.WindowsApplication(path)
+    window._send_to = lambda peer, message: True
+    return window
 
 
 @unittest.skipIf(kvm_bridge_win is None, "needs PySide6")
@@ -264,6 +282,7 @@ class ArrangementHeldByBothTests(unittest.TestCase):
             _pull_peer_fields=lambda: self.refreshed.append("pulled"),
             sender=types.SimpleNamespace(refresh=lambda: self.refreshed.append("sender")),
             server=types.SimpleNamespace(peers_changed=lambda: self.refreshed.append("server")),
+            _tell=lambda peer: self.refreshed.append("answered"),
         )
 
     def arrive(self, edge, stamp, by=None):
@@ -275,7 +294,7 @@ class ArrangementHeldByBothTests(unittest.TestCase):
     def test_a_newer_arrangement_is_applied_as_this_pcs_opposite_edge(self):
         self.arrive("top", 200)
         self.assertEqual(self.side(), "bottom")
-        self.assertEqual(self.refreshed, ["pulled", "sender", "server"])
+        self.assertEqual(self.refreshed, ["pulled", "sender", "server", "answered"])
 
     def test_an_older_arrangement_is_ignored(self):
         self.arrive("top", 50)
@@ -289,25 +308,18 @@ class ArrangementHeldByBothTests(unittest.TestCase):
             self.arrive("top", 200)
         self.assertEqual(self.refreshed, [])
 
-    def test_a_change_made_here_is_stamped_and_sent_to_the_first_peer(self):
-        from core import protocol
-        from core.tests import responder_harness as harness
-
-        config = default_config()
-        config.mac_return_edge, config.machine_id = "right", self.own
+    def test_a_change_made_here_is_stamped_and_sent_to_that_machine(self):
+        window = real_window(self.path)
+        self.addCleanup(window.server.stop)
         told = []
-        page = types.SimpleNamespace(
-            _config=config, _persist=lambda: True, _first_peer=lambda: harness.B,
-            _send_to=lambda peer, message: told.append((peer, message)) or False,
-            sender=types.SimpleNamespace(update_config=lambda config: None),
-            _reflect_look=lambda: None, _reflect_ways=lambda: None,
-        )
-        kvm_bridge_win.WindowsApplication._set_arrangement(page, "top")
-        self.assertEqual(config.mac_return_edge, "top")
-        self.assertGreater(config.arrangement_set_at, 0)
+        window._send_to = lambda peer, message: told.append((peer, message)) or False
+        window._set_arrangement("top")
+        entry = json.loads(self.path.read_text(encoding="utf-8"))["peers"][0]
+        self.assertEqual((entry["side"], entry["side_by"]), ("top", self.own))
+        self.assertGreater(entry["side_set_at"], 100)
         peer, message = told[0]
         self.assertEqual(peer, harness.B)
-        self.assertEqual(message["data"], {"edge": "top", "set_at": config.arrangement_set_at, "by": self.own})
+        self.assertEqual(message["data"], {"edge": "top", "set_at": entry["side_set_at"], "by": self.own, "way_back": True})
 
     def test_a_fresh_config_holds_no_edge_though_the_crossing_page_offers_right(self):
         # Pinned known gap (G3 in the report).
@@ -321,13 +333,20 @@ if __name__ == "__main__":
 @unittest.skipIf(kvm_bridge_win is None, "needs PySide6")
 class WaysReachTheDesignPageTests(unittest.TestCase):
     def test_changing_a_way_in_moves_the_design_preview(self):
-        config = default_config()
+        import tempfile
+        from pathlib import Path
+
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        path = Path(directory.name) / "settings.json"
+        settings = app_config.migrate(None, machine_id=protocol.id_text(harness.HERE))
+        settings["peers"] = [harness.entry(harness.B, "Mac", side="right")]
+        app_config.write_settings(path, settings)
+        window = real_window(path)
+        self.addCleanup(window.server.stop)
         looked = []
-        page = types.SimpleNamespace(
-            _config=config, _persist=lambda: True, sender=types.SimpleNamespace(update_config=lambda config: None),
-            _reflect_ways=lambda: None, _reflect_look=lambda: looked.append(tuple(config.crossing_methods)),
-        )
-        kvm_bridge_win.WindowsApplication._ways_changed(page, "corner", True)
-        kvm_bridge_win.WindowsApplication._set_part(page, "start", True)
+        window._reflect_look = lambda: looked.append(sorted(window._ways_in()))
+        window._ways_changed("corner", True)
+        window._set_part("start", True)
         self.assertEqual(len(looked), 2)
         self.assertIn("corner", looked[0])

@@ -16,10 +16,12 @@ import struct
 import threading
 import time
 import unittest
+import zlib
 
 from nacl.bindings import crypto_aead_chacha20poly1305_ietf_decrypt
 
 from core import protocol
+from core.tests import pngs
 
 TOKEN = base64.urlsafe_b64encode(bytes(range(32))).decode("ascii").rstrip("=")
 OTHER_TOKEN = base64.urlsafe_b64encode(bytes(range(1, 33))).decode("ascii").rstrip("=")
@@ -117,6 +119,17 @@ class Tokens(unittest.TestCase):
             with self.subTest(token=token):
                 self.assertEqual(protocol.key_id(token), _key_id(token))
         self.assertNotEqual(protocol.key_id(TOKEN), protocol.key_id(OTHER_TOKEN))
+
+    def test_only_an_entry_made_by_pairing_links(self):
+        # 43 "A"s spell 32 zero bytes in the one spelling: the encoding proves nothing about where a
+        # token came from, and 1.4.x kept no record of whether its token was paired or typed.
+        zeros = "A" * 43
+        self.assertTrue(protocol.is_paired_token(zeros))
+        self.assertTrue(protocol.linkable({"token": TOKEN, "from_1_4": False}))
+        for entry in ({"token": zeros, "from_1_4": True}, {"token": TOKEN, "from_1_4": True}, {"token": "hunter2", "from_1_4": False},
+                      {"from_1_4": False}, None):
+            with self.subTest(entry=entry):
+                self.assertFalse(protocol.linkable(entry))
 
     def test_a_typed_token_has_no_key_id_and_no_session(self):
         with self.assertRaises(ValueError):
@@ -693,9 +706,80 @@ class Input(unittest.TestCase):
         self.assertEqual(protocol.read_input({"type": "text", "data": {"text": "é" * 2048, "seq": 9}})["text"], "é" * 2048)
 
 
+class ClipboardImages(unittest.TestCase):
+    """An image's size in pixels and its inflated metadata are bounded from its bytes before anything
+    decodes it (WIRE.md section 3): a PNG of a few megabytes can otherwise decode to gigabytes."""
+
+    def test_screens_up_to_8k_fit(self):
+        for width, height in ((1, 1), (6016, 3384), (7680, 4320), (16384, 2048), (2048, 16384)):
+            with self.subTest(size=(width, height)):
+                self.assertTrue(protocol.png_fits(pngs.png(width, height)))
+
+    def test_a_side_over_16384_or_more_than_2_to_the_25_pixels_does_not(self):
+        for width, height in ((16385, 1), (1, 16385), (0, 1), (1, 0), (6000, 6000), (16384, 16384), (2**31 - 1, 1)):
+            with self.subTest(size=(width, height)):
+                self.assertFalse(protocol.png_fits(pngs.png(width, height)))
+
+    def test_the_header_must_come_first_and_be_whole(self):
+        self.assertFalse(protocol.png_fits(protocol.PNG_SIGNATURE + pngs.chunk(b"tEXt", b"a\x00b") + pngs.ihdr(1, 1)))
+        self.assertFalse(protocol.png_fits(pngs.png(header=pngs.chunk(b"IHDR", bytes(12)))))
+        self.assertFalse(protocol.png_fits(protocol.PNG_SIGNATURE))
+        self.assertFalse(protocol.png_fits(protocol.PNG_SIGNATURE + b"\x00" * 64))
+        self.assertFalse(protocol.png_fits(b"GIF89a" + pngs.png()[8:]))
+
+    def test_a_chunk_that_runs_past_the_end_does_not(self):
+        whole = pngs.png()
+        self.assertFalse(protocol.png_fits(whole[:-5]))
+        self.assertFalse(protocol.png_fits(whole[:33] + struct.pack(">I", 10**6) + whole[37:]))
+
+    def test_metadata_inflates_to_at_most_4_mib_in_all(self):
+        limit = protocol.PNG_METADATA_MAX_BYTES
+        self.assertEqual(limit, 4 * 1024 * 1024)
+        self.assertTrue(protocol.png_fits(pngs.png(64, 64, pngs.iccp(600_000), pngs.ztxt(limit - 600_000))))
+        for extra in ((pngs.ztxt(limit + 1),), (pngs.iccp(limit + 1),), (pngs.itxt(limit + 1, compressed=True),),
+                      (pngs.iccp(limit // 2), pngs.ztxt(limit // 2), pngs.ztxt(1))):
+            with self.subTest(chunks=[c[4:8] for c in extra]):
+                self.assertFalse(protocol.png_fits(pngs.png(64, 64, *extra)))
+        # Uncompressed text is bounded by the file itself.
+        self.assertTrue(protocol.png_fits(pngs.png(64, 64, pngs.itxt(limit + 1, compressed=False))))
+
+    def test_metadata_that_does_not_inflate_does_not_fit(self):
+        stream = zlib.compress(b"a" * 1000)
+        for data in (b"not zlib at all", stream[:-6], stream + b"junk"):
+            with self.subTest(data=data[:8]):
+                self.assertFalse(protocol.png_fits(pngs.png(8, 8, pngs.chunk(b"zTXt", b"Comment\x00\x00" + data))))
+        self.assertFalse(protocol.png_fits(pngs.png(8, 8, pngs.chunk(b"iTXt", b"Key\x00\x02\x00en\x00\x00text"))))
+
+    def test_compressed_text_needs_a_whole_zlib_stream_even_when_empty(self):
+        for chunk in (
+            pngs.chunk(b"zTXt", b"Comment\x00\x00"),
+            pngs.chunk(b"iTXt", b"Key\x00\x01\x00en\x00\x00"),
+            pngs.chunk(b"zTXt", b"Comment\x00\x00" + pngs.run(b"a", 1)[:-1]),
+        ):
+            with self.subTest(kind=chunk[4:8], data_length=len(chunk) - 12):
+                self.assertFalse(protocol.png_fits(pngs.png(8, 8, chunk)))
+        self.assertTrue(protocol.png_fits(pngs.png(8, 8, pngs.chunk(b"iTXt", b"Key\x00\x00\x00en\x00\x00"))))
+
+    def test_a_clipboard_image_is_a_still_with_one_header(self):
+        # A second IHDR or an animation's frames would claim sizes the first header never checked.
+        for extra in (pngs.ihdr(100000, 100000), pngs.chunk(b"acTL", bytes(8)),
+                      pngs.chunk(b"fcTL", struct.pack(">IIIII", 0, 60000, 60000, 0, 0) + bytes(6)),
+                      pngs.chunk(b"fdAT", bytes(8))):
+            with self.subTest(chunk=extra[4:8]):
+                self.assertFalse(protocol.png_fits(pngs.png(8, 8, extra)))
+
+    def test_bytes_after_iend_are_ignored(self):
+        self.assertTrue(protocol.png_fits(pngs.png() + b"trailing"))
+
+    def test_only_the_image_part_of_a_clipboard_is_dropped(self):
+        for image in (pngs.png(16385, 1), pngs.png(8, 8, pngs.ztxt(5 * 1024 * 1024))):
+            with self.subTest(size=len(image)):
+                self.assertEqual(protocol.read_clipboard(protocol.clipboard_msg(text="hi", image=image)), {"text": "hi", "image": None})
+
+
 class Others(unittest.TestCase):
     def test_clipboard(self):
-        png = protocol.PNG_SIGNATURE + b"x"
+        png = pngs.png()
         read = protocol.read_clipboard(protocol.clipboard_msg(text="hi", image=png))
         self.assertEqual(read, {"text": "hi", "image": png})
         read = protocol.read_clipboard({"type": "clipboard", "data": {"text": "x" * (256 * 1024 + 1)}})
@@ -718,6 +802,21 @@ class Others(unittest.TestCase):
                 self.assertIsNone(protocol.read_arrangement_v6({"type": "arrangement", "data": data}, now))
         self.assertIsNotNone(protocol.read_arrangement_v6(
             {"type": "arrangement", "data": {"edge": "top", "set_at": now + 86400, "by": protocol.id_text(ID_A)}}, now))
+
+    def test_arrangement_way_back(self):
+        now = 1_790_000_000
+        for way_back in (True, False):
+            message = protocol.arrangement_v6("left", now, ID_A, way_back=way_back)
+            self.assertIs(message["data"]["way_back"], way_back)
+            self.assertEqual(protocol.read_arrangement_v6(message, now),
+                             {"edge": "left", "set_at": now, "by": ID_A, "way_back": way_back})
+        self.assertNotIn("way_back", protocol.arrangement_v6("left", now, ID_A)["data"])
+        # Anything but a boolean is left out, and the side it came with still stands.
+        for odd in (1, "false", None, [True]):
+            data = {"edge": "left", "set_at": now, "by": protocol.id_text(ID_A), "way_back": odd}
+            with self.subTest(way_back=odd):
+                self.assertEqual(protocol.read_arrangement_v6({"type": "arrangement", "data": data}, now),
+                                 {"edge": "left", "set_at": now, "by": ID_A})
 
     def test_paired(self):
         self.assertEqual(protocol.read_paired(protocol.paired_msg([ID_A, ID_C])), [ID_A, ID_C])

@@ -8,6 +8,7 @@ from __future__ import annotations
 import re
 
 from core import effects
+from core import peerlist
 
 # (key, name, what the page is for), in sidebar order, which is setup order; Ctrl+1 is the first.
 PAGES = (
@@ -15,28 +16,29 @@ PAGES = (
      "The machines paired with this PC, where input is right now, and the controls you reach for "
      "every day. Pair a machine here first."),
     ("crossing", "Crossing",
-     "Choose how the pointer or a key moves input to the other machine, and how hard the edge "
+     "Choose how the pointer or a key moves input to another machine, and how hard the edge "
      "pushes back first."),
     ("keyboard", "Keyboard",
-     "How this PC's Ctrl and Windows keys arrive on the other machine, the keys and buttons that stay "
-     "here, and how fast the other machine's pointer moves here."),
+     "How this PC's Ctrl and Windows keys arrive on another machine, the keys and buttons that stay "
+     "here, and how fast another machine's pointer moves here."),
     ("design", "Design",
-     "How crossing looks on this PC: the light as you push toward the other machine, and where the "
+     "How crossing looks on this PC: the light as you push toward another machine, and where the "
      "pointer lands."),
     ("connection", "Connection",
      "Whether Windows Firewall lets your other machines in, this PC's address, port and shared token, "
-     "and the other machine's IP address, which pairing learns."),
+     "and each paired machine's IP address, which pairing learns."),
 )
 KEYS = tuple(page[0] for page in PAGES)
-# Under the purpose on the pages whose settings are this PC's alone, so nobody looks for the other
+# Under the purpose on the pages whose settings are this PC's alone, so nobody looks for another
 # machine's on the PC: each app sets only its own machine.
 SCOPE = {
-    "crossing": "For this PC only; the other machine keeps its own. Only which side the other machine is on is shared. This PC's "
-                "resistance is also what its pointer meets at the other machine's edge on the way back.",
-    "design": "For this PC's screen only; the other machine keeps its own.",
-    "keyboard": "For this PC's keyboard only; the other machine keeps its own.",
+    "crossing": "For this PC only; every other machine keeps its own. Only which side a machine is on is shared, "
+                "with that machine. This PC's resistance is also what its pointer meets at another machine's edge "
+                "on the way back.",
+    "design": "For this PC's screen only; every other machine keeps its own.",
+    "keyboard": "For this PC's keyboard only; every other machine keeps its own.",
 }
-# With Same on both machines on, under each row of the shared pages that stays this PC's own.
+# With Same on all machines on, under each row of the shared pages that stays this PC's own.
 OWN_ROW = "This PC only."
 # The window's footer; the first sentence goes on Connection, whose changes wait for its button.
 FOOTER_APPLY = "Changes apply as you make them."
@@ -173,7 +175,16 @@ def toggle_part(parts, part, on) -> list:
     return [candidate for candidate in ("start", "middle", "end") if candidate in chosen]
 
 
-NOT_LEARNED_EDGE = "Not learned yet: choose a side here or on the other machine."
+def not_learned_edge(name: str = "the other machine") -> str:
+    """Under Where it is, while this PC holds no side for the machine named."""
+    return f"Not learned yet: choose a side here or on {name}."
+
+
+def crossing_machines(peers: list) -> list:
+    """(id, label) for every paired machine a zone can lead to, in the list's order: never a phone,
+    which is never dialled (WIRE.md section 5). The entry migrated from 1.4.x has the id ""."""
+    labels = peerlist.labels(peers)
+    return [(entry.get("id") or "", labels[entry["token"]]) for entry in peers if entry.get("port") != 0]
 
 
 def crossing_state_sentence(paired, heard, sending, connected, armed, paused, full_screen_app, name="the other machine") -> str:
@@ -256,10 +267,19 @@ def trigger_phrase(key_name: str, style: str) -> str:
     return f"{key_name}, {'held' if style == 'hold' else 'twice'}"
 
 
-def ways_summary(methods, edge, parts, corner, key_name, style) -> str:
-    """The Ways in module's first line: every way input leaves for the Mac, in one sentence."""
+SHORTCUT_SEVERAL = "The shortcut takes input to the machine it was last on."
+
+
+def _joined(items) -> str:
+    return items[0] if len(items) == 1 else ", ".join(items[:-1]) + " and " + items[-1]
+
+
+def ways_summary(methods, edge, parts, corner, key_name, style, name="the other machine", several=False) -> str:
+    """The Ways in module's first line: every way input leaves for the machine `name`, in one
+    sentence. With `several` machines paired the shortcut is not this one's, so it gets a sentence of
+    its own."""
     if not edge:
-        return "Nothing moves input to the other machine until this PC knows which side it is on."
+        return f"Nothing moves input to {name} until this PC knows which side it is on."
     methods = set(methods)
     ways = []
     if "edge" in methods:
@@ -268,17 +288,24 @@ def ways_summary(methods, edge, parts, corner, key_name, style) -> str:
         ways.append(f"push through {parts_phrase(edge, parts)}")
     if "corner" in methods:
         ways.append(f"push diagonally into the {CORNER_NAMES.get(corner, corner)} corner")
-    if "shortcut" in methods:
+    shortcut = "shortcut" in methods
+    if shortcut and not several:
         ways.append(f"hold {key_name}" if style == "hold" else f"press {key_name} twice")
+    after = f" {SHORTCUT_SEVERAL}" if shortcut and several else ""
+    if not ways and several:
+        return f"No edge or corner leads to {name} yet: choose one below.{after}"
     if not ways:
-        return "Nothing moves input to the other machine: choose at least one way below."
+        return f"Nothing moves input to {name}: choose at least one way below."
     joined = ways[0] if len(ways) == 1 else ", ".join(ways[:-1]) + " or " + ways[-1]
-    return f"Input moves to the other machine when you {joined}."
+    return f"Input moves to {name} when you {joined}.{after}"
 
 
-# The arrangement diagram. Each side of this PC has an angle, and the Mac's screen travels round
+# The arrangement diagram. Each side of this PC has an angle, and a machine's screen travels round
 # this PC's between them: through a corner position, never across it.
 SIDE_ANGLE = {"right": 0.0, "top": 90.0, "left": 180.0, "bottom": 270.0}
+SIDE_WORDS = {"right": "to the right of this PC", "left": "to the left of this PC", "top": "above this PC",
+              "bottom": "below this PC"}
+PART_ORDER = ("start", "middle", "end")
 
 
 def turn_to(angle: float, side: str) -> float:
@@ -305,17 +332,99 @@ def square_point(angle: float) -> tuple:
     return round(x / scale, 9), round(y / scale, 9)
 
 
-def arrangement_rects(width: float, top: float, angle: float, screen: tuple, gap: float) -> tuple:
-    """(this PC's screen, your Mac's screen, the pair's height) as (x, y, w, h) rects, the pair
-    centred across `width` and starting at `top`, the Mac's screen at `angle` from this PC's."""
+def _thirds_rank(machine: dict) -> int:
+    parts = machine.get("parts") or ()
+    if "part" in (machine.get("methods") or ()) and any(part in PART_ORDER for part in parts):
+        return min(PART_ORDER.index(part) for part in parts if part in PART_ORDER)
+    return PART_ORDER.index("middle")
+
+
+def side_slots(machines: list) -> list:
+    """Where each machine's screen sits beside this PC's: (side, start, end), the fractions of that
+    side it takes, or None when it has no side. Machines that share a side share its length equally,
+    in the order of the thirds they cross by, then of the list."""
+    slots = [None] * len(machines)
+    by_side: dict = {}
+    for index, machine in enumerate(machines):
+        if machine.get("side") in SIDE_ANGLE:
+            by_side.setdefault(machine["side"], []).append(index)
+    for side, indexes in by_side.items():
+        order = sorted(indexes, key=lambda index: (_thirds_rank(machines[index]), index))
+        for slot, index in enumerate(order):
+            slots[index] = (side, slot / len(order), (slot + 1) / len(order))
+    return slots
+
+
+def neighbour_offset(angle: float, start: float, end: float, screen: tuple, gap: float) -> tuple:
+    """(centre x, centre y, w, h) of a machine's screen from the centre of this PC's, y down: at `angle`
+    round this PC's as `arrangement` placed one, scaled to the share of the side from `start` to `end`
+    and moved along it to that share. Through a corner the share's offset fades out, so the screen
+    goes round this PC's, never across it."""
     w, h = screen
+    share = end - start
+    nw, nh = w * share, h * share
     sx, sy = square_point(angle)
-    dx, dy = sx * (w + gap), -sy * (h + gap)
-    pair_h = h + abs(dy)
-    cx, cy = width / 2.0, top + pair_h / 2.0
-    pc = (cx - dx / 2.0 - w / 2.0, cy - dy / 2.0 - h / 2.0, w, h)
-    mac = (cx + dx / 2.0 - w / 2.0, cy + dy / 2.0 - h / 2.0, w, h)
-    return pc, mac, pair_h
+    along = (start + end) / 2.0 - 0.5
+    cx = sx * (w / 2.0 + gap + nw / 2.0) + along * w * (1.0 - abs(sx))
+    cy = -sy * (h / 2.0 + gap + nh / 2.0) + along * h * (1.0 - abs(sy))
+    return cx, cy, nw, nh
+
+
+def layout_rects(width: float, top: float, placed: list, screen: tuple, gap: float, centre_pc: bool = False) -> tuple:
+    """(this PC's screen, [each machine's screen], the drawing's height) as (x, y, w, h) rects, for
+    `placed` as (angle, start, end) per machine. The drawing is centred across `width` from `top`, or
+    with `centre_pc` this PC's screen is, so it stays put while the machines round it move; either way
+    it is shrunk whole when it would not fit."""
+
+    def rects(scale):
+        w, h, g = screen[0] * scale, screen[1] * scale, gap * scale
+        others = []
+        for angle, start, end in placed:
+            cx, cy, nw, nh = neighbour_offset(angle, start, end, (w, h), g)
+            others.append((cx - nw / 2.0, cy - nh / 2.0, nw, nh))
+        return (-w / 2.0, -h / 2.0, w, h), others
+
+    def span(pc, others):
+        left = min(rect[0] for rect in [pc, *others])
+        right = max(rect[0] + rect[2] for rect in [pc, *others])
+        # This PC's centre is 0, so centred on it the drawing needs its wider half twice over.
+        return (-max(-left, right), max(-left, right)) if centre_pc else (left, right)
+
+    pc, others = rects(1.0)
+    left, right = span(pc, others)
+    if right - left > width > 0:
+        pc, others = rects(width / (right - left))
+        left, right = span(pc, others)
+    upper = min(rect[1] for rect in [pc, *others])
+    lower = max(rect[1] + rect[3] for rect in [pc, *others])
+    dx, dy = width / 2.0 - (left + right) / 2.0, top - upper
+
+    def moved(rect):
+        return rect[0] + dx, rect[1] + dy, rect[2], rect[3]
+
+    return moved(pc), [moved(rect) for rect in others], lower - upper
+
+
+def unplaced_line(labels: list) -> str:
+    """The line under the diagram naming the machines that have no side yet; "" when none."""
+    return f"Not placed yet: {_joined(labels)}" if labels else ""
+
+
+def diagram_description(machines: list, key_name: str, style: str, shortcut: bool) -> str:
+    """The diagram's accessible description: where every machine is, then the chosen one's ways in.
+    Each machine is a dict with `label`, `side`, `methods`, `parts`, `corner` and `chosen`."""
+    placed = [f"{machine['label']} is {SIDE_WORDS[machine['side']]}" for machine in machines
+              if machine.get("side") in SIDE_WORDS]
+    sentences = [_joined(placed) + "."] if placed else []
+    line = unplaced_line([machine["label"] for machine in machines if machine.get("side") not in SIDE_WORDS])
+    if line:
+        sentences.append(line + ".")
+    chosen = next((machine for machine in machines if machine.get("chosen")), machines[0] if machines else None)
+    if chosen is not None:
+        methods = list(chosen.get("methods") or ()) + (["shortcut"] if shortcut else [])
+        sentences.append(ways_summary(methods, chosen.get("side") or "", chosen.get("parts") or (), chosen.get("corner") or "",
+                                      key_name, style, chosen["label"], several=len(machines) > 1))
+    return " ".join(sentences)
 
 
 def side_segment(rect: tuple, side: str, start: float = 0.0, end: float = 1.0, inset: float = 0.0) -> tuple:

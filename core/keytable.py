@@ -66,6 +66,14 @@ EVDEV_NAMES.update({59 + i: f"f{i + 1}" for i in range(10)})
 EVDEV_NAMES.update({87: "f11", 88: "f12"})
 EVDEV_NAMES.update({183 + i: f"f{13 + i}" for i in range(12)})
 
+# What each key types on a US keyboard, by evdev code, which names the key's place rather than its
+# label: `us` in a key message. Codes 1 to 88 are the PC's set-1 scan codes, so Windows reads this
+# table by scan code.
+EVDEV_US = dict(zip(range(0x02, 0x0E), "1234567890-="))
+EVDEV_US.update(zip(range(0x10, 0x1C), "qwertyuiop[]"))
+EVDEV_US.update(zip(range(0x1E, 0x2A), "asdfghjkl;'`"))
+EVDEV_US.update(zip(range(0x2B, 0x36), "\\zxcvbnm,./"))
+
 SPEC_NAMES = frozenset(
     {"shift", "shift_r", "ctrl", "ctrl_r", "alt", "alt_r", "cmd", "cmd_r", "caps_lock",
      "backspace", "tab", "enter", "esc", "space", "delete", "insert", "home", "end", "page_up", "page_down",

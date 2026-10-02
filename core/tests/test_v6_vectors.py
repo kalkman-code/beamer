@@ -730,6 +730,18 @@ class PairingV3TcpTests(unittest.TestCase):
         self.assertIn("id", tcp["frames"][0]["message"])
 
 
+class ClipboardImageVectors(unittest.TestCase):
+    def test_every_case_fits_or_not_as_committed_and_drops_only_the_image(self):
+        cases = V6["clipboard_images"]["cases"]
+        self.assertEqual({case["fits"] for case in cases}, {True, False})
+        for case in cases:
+            with self.subTest(case=case["comment"]):
+                image = unhex(case["png_hex"])
+                self.assertIs(protocol.png_fits(image), case["fits"])
+                read = protocol.read_clipboard(protocol.clipboard_msg("words", image))
+                self.assertEqual(read, {"text": "words", "image": image if case["fits"] else None})
+
+
 @unittest.skipUnless(os.path.exists(os.path.join(_TOOLS, "phone_vectors.py")), "the vector generator is not part of the public source")
 class GeneratorTests(unittest.TestCase):
     OLD_SECTIONS = {
