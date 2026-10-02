@@ -114,14 +114,82 @@ class OneOrNoMachine(Page):
         window = self.build([(BEE, token(100), "Bee")])
         self.assertEqual(window.edge_select.value, "right")
 
-    def test_a_save_with_one_machine_not_placed_writes_the_shown_right_unstamped_so_its_own_side_wins(self):
+    def test_one_machine_not_placed_holds_the_shown_right_unstamped_before_any_save_so_its_own_side_wins(self):
         window = self.build([(BEE, token(100), "Bee")], [{"peer": BEE, "kind": "edge"}])
-        window._apply_settings()
         held = self.store.current()["peers"][0]
         self.assertEqual((held["side"], held["side_set_at"], held["side_by"]), ("right", 0, ""))
-        self.assertEqual(self.sent, [(BEE, "right", 0)])
+        window._apply_settings()
+        self.assertEqual(self.sent, [])
         window.apply_arrangement(BEE, "bottom", 1_790_000_000, BEE, True)
         self.assertEqual(self.ways_of(BEE)["side"], "top")
+
+
+class SharingSide(Page):
+    def build_blocked(self):
+        window = self.build(
+            [(BEE, token(100), "Bee", {"side": "right"}), (SEA, token(150), "Sea", {"side": "right"})],
+            [{"peer": BEE, "kind": "edge"}, {"peer": SEA, "kind": "edge", "off": True}])
+        window._machine_picked(SEA)
+        return window
+
+    def test_the_panel_offers_thirds_under_the_side_picker_and_replaces_the_blocked_sentence(self):
+        window = self.build_blocked()
+        self.assertFalse(window.share_box.isHidden())
+        self.assertEqual([window.share_tiles[p].name.text for p in ("start", "middle", "end")],
+                         ["Top", "Middle", "Bottom"])
+        self.assertEqual([window.share_tiles[p].detail.text for p in ("start", "middle", "end")],
+                         ["Bee", "Bee", "Sea"])
+        self.assertTrue(window.blocked_note.view.isHidden())
+
+    def test_a_tile_moves_to_the_next_machine_and_share_writes_and_tells_both(self):
+        window = self.build_blocked()
+        window.share_tiles["start"]._toggle()
+        self.assertEqual(window.share_tiles["start"].detail.text, "Sea")
+        window._share_side()
+        zones = {(z["peer"], z["kind"]): z for z in self.store.current()["zones"]}
+        self.assertEqual(zones[(BEE, "part")]["parts"], ["middle"])
+        self.assertEqual(zones[(SEA, "part")]["parts"], ["start", "end"])
+        self.assertTrue(zones[(BEE, "edge")].get("off"))
+        self.assertTrue(zones[(SEA, "edge")].get("off"))
+        self.assertEqual({peer for peer, _edge, _stamp in self.sent}, {BEE, SEA})
+
+    def test_turning_on_edge_keeps_it_off_and_focuses_the_share_panel(self):
+        window = self.build_blocked()
+        self.toggle("edge")
+        window._flush()
+        self.assertFalse(window.method_boxes["edge"].value)
+        self.assertFalse(window.share_box.isHidden())
+        self.assertTrue(window.blocked_note.view.isHidden())
+        self.assertIs(window.window.firstResponder(), window.share_button.view)
+
+    def test_turning_on_an_overlapping_part_keeps_it_off_and_focuses_the_share_panel(self):
+        window = self.build_blocked()
+        self.toggle("part")
+        window._flush()
+        self.assertFalse(window.method_boxes["part"].value)
+        self.assertFalse(window.share_box.isHidden())
+        self.assertTrue(window.blocked_note.view.isHidden())
+        self.assertIs(window.window.firstResponder(), window.share_button.view)
+
+    def test_the_first_machine_paired_crosses_at_the_right_edge_the_page_shows_with_nothing_saved(self):
+        # beta.4 on three machines: Edge showed on, the pointer did not cross until a Notch save wrote the side.
+        window = self.build([])
+        self.store.add_peer(entry(BEE, token(100), "Bee", linked=False))
+        window.peers_changed()
+        self.controller.cfg = self.store.load()
+        self.controller.zones_changed()
+        self.assertEqual(window.edge_select.value, "right")
+        self.assertIn("edge", self.ways_of(BEE)["methods"])
+        found = [(way.peer, way.edge, "edge" in way.methods) for way in self.controller.crossing.ways]
+        self.assertEqual(found, [(BEE, "right", True)])
+        self.assertEqual(self.sent, [])
+
+    def test_a_second_machine_paired_is_given_no_side_and_the_first_keeps_its_right(self):
+        window = self.build([(BEE, token(100), "Bee")], [{"peer": BEE, "kind": "edge"}])
+        self.store.add_peer(entry(SEA, token(150), "Sea", linked=False))
+        window.peers_changed()
+        self.assertEqual([(peer["side"], peer["side_set_at"]) for peer in self.store.current()["peers"]],
+                         [("right", 0), ("", 0)])
 
     def test_with_one_machine_a_change_writes_its_ways_and_sends_it_the_side(self):
         window = self.build([(BEE, token(100), "Bee", {"side": "left"})], [{"peer": BEE, "kind": "edge"}])
@@ -146,6 +214,23 @@ class ChoosingAMachine(Page):
         self.assertEqual(window.machine_select.value, BEE)
         self.assertEqual(window.edge_caption.text, "Where Bee is")
         self.assertEqual((window.edge_select.value, self.methods()), ("right", ["edge", "shortcut"]))
+
+    def test_the_picker_omits_machines_not_in_use_and_keeps_their_zones(self):
+        window = self.two()
+        zones = list(self.store.current()["zones"])
+        self.store.set_peer(token(150), in_use=False)
+        window._show_machines()
+        self.assertEqual(window._picker_choices, [(BEE, "Bee")])
+        self.assertTrue(window.machine_row.isHidden())
+        self.assertEqual(self.store.current()["zones"], zones)
+
+    def test_turning_off_the_chosen_machine_selects_an_active_machine(self):
+        window = self.two()
+        window._machine_picked(SEA)
+        self.store.set_peer(token(150), in_use=False)
+        window._show_machines()
+        self.assertEqual(window.chosen_peer, BEE)
+        self.assertTrue(window.machine_row.isHidden())
 
     def test_choosing_a_machine_shows_its_ways(self):
         window = self.two()
@@ -189,23 +274,35 @@ class ChoosingAMachine(Page):
             window._apply_settings()
         rebuilt.assert_called()
 
-    def test_a_clash_is_said_naming_both_and_the_controls_go_back_to_what_is_saved(self):
+    def test_a_way_that_overlaps_an_existing_side_shows_the_share_panel_without_writing(self):
         window = self.two()
         self.pick(SEA)
         # Moved onto Bee's side, Sea keeps the side and its ways there go off (core/ways.py settle).
         window.edge_select._choose("right")
         window._apply_settings()
-        sea = next(entry for entry in self.store.current()["peers"] if entry["id"] == SEA)
-        self.assertEqual(sea["side"], "right")
         before = copy.deepcopy(self.store.current())
-        methods = self.methods()
         self.toggle("edge")
+        window._apply_settings()
+        self.assertFalse(window.method_boxes["edge"].value)
+        self.assertFalse(window.share_box.isHidden())
+        self.assertIn("Bee already crosses from the right edge", window.share_sentence.text)
+        self.assertTrue(window.blocked_note.view.isHidden())
+        self.assertEqual(window.edge_select.value, "right")
+        self.assertEqual(self.store.current()["zones"], before["zones"])
+
+    def test_a_corner_clash_keeps_its_refusal_naming_both_and_the_controls_go_back(self):
+        window = self.build(
+            [(BEE, token(100), "Bee", {"side": "right"}), (SEA, token(150), "Sea", {"side": "right"})],
+            [{"peer": BEE, "kind": "corner", "corner": "top_right", "edge": "right"},
+             {"peer": SEA, "kind": "corner", "corner": "top_right", "edge": "right", "off": True}])
+        self.pick(SEA)
+        before = copy.deepcopy(self.store.current())
+        self.toggle("corner")
         window._apply_settings()
         self.assertEqual(window.message_label.ink, "fault")
         self.assertIn("Bee", window.message_label.text)
         self.assertIn("Sea", window.message_label.text)
-        self.assertEqual(window.edge_select.value, "right")
-        self.assertEqual(self.methods(), methods)
+        self.assertFalse(window.method_boxes["corner"].value)
         self.assertEqual(self.store.current()["zones"], before["zones"])
 
     def test_switching_machines_saves_a_change_still_waiting_first(self):
@@ -330,6 +427,26 @@ class WayBack(Page):
         window._apply_settings()
         self.assertEqual(len(self.sent), 2)
 
+    def test_moving_one_machine_tells_every_machine_whose_way_back_it_changed(self):
+        # Sol's review, 02-10-2026: Sea was told Bee holds its side, and moving Bee told Bee alone,
+        # so Sea's page kept naming Bee as in the way.
+        window = self.build([(BEE, token(100), "Bee", {"side": "right"}), (SEA, token(150), "Sea", {"side": "right"})],
+                            [{"peer": BEE, "kind": "edge"}, {"peer": SEA, "kind": "edge", "off": True}])
+        self.assertEqual(ways.way_back_by(self.store.current(), SEA), BEE)
+        self.pick(BEE)
+        window.edge_select._choose("top")
+        window._apply_settings()
+        self.assertEqual(sorted(peer for peer, _edge, _at in self.sent), sorted([BEE, SEA]))
+        self.assertIsNone(ways.way_back_by(self.store.current(), SEA))
+
+    def test_removing_the_machine_in_the_way_tells_the_one_it_blocked(self):
+        # Opus review: unpairing Sea left Bee told Sea held its side until Bee's link next came up.
+        window = self.build([(BEE, token(100), "Bee", {"side": "left"}), (SEA, token(150), "Sea", {"side": "left"})],
+                            [{"peer": BEE, "kind": "edge", "off": True}, {"peer": SEA, "kind": "edge"}])
+        self.assertEqual(ways.way_back_by(self.store.current(), BEE), SEA)
+        window.panel._remove(token(150))
+        self.assertIn(BEE, [peer for peer, _edge, _at in self.sent])
+
     def test_an_arrangement_that_changed_something_is_answered_with_this_macs_own(self):
         window = self.two()
         window.apply_arrangement(SEA, "top", 5000, SEA, True)
@@ -352,16 +469,15 @@ class WayBack(Page):
 class TheNotes(Page):
     """What the page says under the ways about a machine it cannot reach, or that cannot reach back."""
 
-    def test_a_machine_whose_side_another_holds_is_named_with_the_one_that_holds_it(self):
+    def test_a_machine_whose_side_another_holds_is_named_in_the_share_panel(self):
         window = self.build([(BEE, token(100), "Bee", {"side": "right"}), (SEA, token(150), "Sea", {"side": "right"})],
                             [{"peer": BEE, "kind": "edge"}, {"peer": SEA, "kind": "edge", "off": True}])
         self.pick(SEA)
-        expected = ways.blocked_sentence(self.store.current(), SEA, "this Mac")
-        self.assertIn("Sea has no way in: Bee already leads from the right edge", expected)
-        self.assertFalse(window.blocked_note.view.isHidden())
-        self.assertEqual(window.blocked_note.text, expected)
-        self.pick(BEE)
+        self.assertFalse(window.share_box.isHidden())
+        self.assertIn("Bee already crosses from the right edge", window.share_sentence.text)
         self.assertTrue(window.blocked_note.view.isHidden())
+        self.pick(BEE)
+        self.assertTrue(window.share_box.isHidden())
 
     def test_a_machine_that_said_no_way_leads_back_is_named_until_it_says_one_does(self):
         window = self.build([(BEE, token(100), "Bee", {"side": "right"}),
@@ -373,6 +489,16 @@ class TheNotes(Page):
         self.assertEqual(window.no_way_back_note.text, ways.no_way_back_sentence(self.store.current(), SEA))
         window.apply_arrangement(SEA, "right", 5000, SEA, True)
         self.assertTrue(window.no_way_back_note.view.isHidden())
+
+    def test_an_arrangement_names_the_machine_holding_the_way_back_side(self):
+        window = self.build([(BEE, token(100), "Bee", {"side": "right"}),
+                             (SEA, token(150), "Sea", {"side": "left"})],
+                            [{"peer": BEE, "kind": "edge"}, {"peer": SEA, "kind": "edge", "off": True}])
+        self.pick(SEA)
+        window.apply_arrangement(SEA, "right", 5000, SEA, False, BEE)
+        entry = next(item for item in self.store.current()["peers"] if item["id"] == SEA)
+        self.assertEqual(entry["way_back_by"], BEE)
+        self.assertIn("Bee on its right too", window.no_way_back_note.text)
 
 
 class TheOverview(Page):

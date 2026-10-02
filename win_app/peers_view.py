@@ -42,6 +42,8 @@ def describe(entry: dict, label: str, *, up: bool, driving: bool, input_there: b
     """`up`: a link to this machine is live, either way round. `driving`: its input is on this PC.
     `input_there`: this PC's input is on it. `kind` and `status`: what the link this PC dials to it
     last reported."""
+    if entry.get("in_use", True) is not True:
+        return PeerState("amber", "NOT IN USE", f"{label} is not in use on this PC.")
     if driving:
         return PeerState("signal", "Driving this PC",
                          f"{label}'s keyboard and pointer are on this PC. Push the pointer back through the edge it arrived by to send them home.")

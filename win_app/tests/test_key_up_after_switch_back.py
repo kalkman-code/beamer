@@ -58,6 +58,47 @@ class KeyUpAfterSwitchBackTest(unittest.TestCase):
         self.sender.set_redirecting(False)
         self.assertEqual(self.keys(), [protocol.MSG_KEYDOWN, protocol.MSG_KEYUP])
 
+    def test_the_jump_chord_for_the_current_machine_returns_input_home(self):
+        entry = self.rig.settings.data["peers"][0]
+        entry["jump_key"] = "ctrl+shift+2"
+        self.sender.refresh()
+        self.assertFalse(self.sender.handle_jump_key("ctrl", True))
+        self.assertFalse(self.sender.handle_jump_key("shift", True))
+        self.assertTrue(self.sender.handle_jump_key("2", True))
+        self.assertFalse(self.sender.redirecting)
+        self.assertTrue(self.sender.handle_jump_key("2", True))
+        self.assertFalse(self.sender.redirecting)
+        self.assertTrue(self.sender.handle_jump_key("2", False))
+
+    def test_a_key_already_down_when_its_modifiers_arrive_is_not_a_jump(self):
+        self.rig.settings.data["peers"][0]["jump_key"] = "ctrl+shift+2"
+        self.sender.refresh()
+        self.assertFalse(self.sender.handle_jump_key("2", True, 0x32))
+        self.assertFalse(self.sender.handle_jump_key("ctrl", True))
+        self.assertFalse(self.sender.handle_jump_key("shift", True))
+        self.assertFalse(self.sender.handle_jump_key("2", True, 0x32))
+        self.assertTrue(self.sender.redirecting)
+        self.assertFalse(self.sender.handle_jump_key("2", False, 0x32))
+
+    def test_a_swallowed_key_is_released_by_its_virtual_key_even_when_shift_changed_its_name(self):
+        self.rig.settings.data["peers"][0]["jump_key"] = "ctrl+shift+@"
+        self.sender.refresh()
+        self.sender.handle_jump_key("ctrl", True)
+        self.sender.handle_jump_key("shift", True)
+        self.assertTrue(self.sender.handle_jump_key("@", True, 0x32))
+        self.sender.handle_jump_key("shift", False)
+        self.assertTrue(self.sender.handle_jump_key("2", False, 0x32))
+        self.assertFalse(self.sender.handle_jump_key("@", True, 0x32))
+
+    def test_nothing_jumps_while_a_jump_key_is_being_recorded(self):
+        self.rig.settings.data["peers"][0]["jump_key"] = "ctrl+shift+2"
+        self.sender.refresh()
+        self.sender.jump_recording = True
+        self.sender.handle_jump_key("ctrl", True)
+        self.sender.handle_jump_key("shift", True)
+        self.assertFalse(self.sender.handle_jump_key("2", True, 0x32))
+        self.assertTrue(self.sender.redirecting)
+
 
 if __name__ == "__main__":
     unittest.main()

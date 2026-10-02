@@ -56,6 +56,64 @@ class ReadingOnePeer(unittest.TestCase):
         self.assertEqual(ways.ways(settings(), A)["methods"], [])
 
 
+class JumpKeys(unittest.TestCase):
+    def test_missing_jump_key_is_none(self):
+        self.assertIsNone(ways.jump_key(peer(A, "Ay")))
+
+    def test_trigger_key_cannot_be_recorded_as_a_jump_key(self):
+        held = settings(peer(A, "Ay"))
+        with self.assertRaisesRegex(ValueError, "trigger"):
+            ways.check_jump_key(held, A, "ctrl+f9", "f9")
+
+    def test_a_chord_with_the_trigger_key_or_its_modifier_is_refused(self):
+        # A chord holding the trigger's modifier would start its double-tap or hold, and leave the
+        # modifier held here once input had jumped away.
+        held = settings(peer(A, "Ay"))
+        for value, trigger in (("ctrl+f9", "f9"), ("ctrl+alt+2", "alt_r"), ("alt+2", "alt_r")):
+            with self.subTest(value=value), self.assertRaisesRegex(ValueError, "trigger"):
+                ways.check_jump_key(held, A, value, trigger)
+        self.assertEqual(ways.check_jump_key(held, A, "ctrl+cmd+2", "alt_r"), "ctrl+cmd+2")
+
+    def test_space_is_recorded_by_its_name_not_as_a_blank(self):
+        self.assertFalse(ways.valid_jump_key("cmd+ "))
+        self.assertEqual(ways.jump_chord(["cmd"], "space"), "cmd+space")
+
+    def test_shift_alone_is_not_enough_because_it_would_swallow_typing(self):
+        for value in ("shift+a", "shift+2"):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                ways.check_jump_key(settings(peer(A, "Ay")), A, value, "alt_r")
+        self.assertEqual(ways.jump_chord(["shift"], "a"), None)
+
+    def test_bare_modifiers_and_unrecognised_words_are_not_jump_chords(self):
+        for value in ("ctrl", "nonsense+2", "shift+ctrl+2"):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                ways.check_jump_key(settings(peer(A, "Ay")), A, value, "alt_r")
+        with self.assertRaises(ValueError):
+            ways.check_jump_key(settings(peer(A, "Ay")), A, 2, "alt_r")
+
+    def test_shifted_printable_keys_and_plus_have_stable_chords(self):
+        self.assertEqual(ways.jump_chord(["ctrl", "shift"], "@"), "ctrl+shift+@")
+        self.assertEqual(ways.jump_chord(["ctrl"], "+"), "ctrl+plus")
+        self.assertEqual(ways.jump_chord(["ctrl_r"], "2"), "ctrl+2")
+
+    def test_another_peers_jump_key_cannot_be_reused(self):
+        held = settings(peer(A, "Ay", jump_key="ctrl+shift+2"), peer(B, "Bee"))
+        with self.assertRaisesRegex(ValueError, "already"):
+            ways.check_jump_key(held, B, "ctrl+shift+2", "alt_r")
+
+    def test_clearing_a_jump_key_removes_it(self):
+        entry = peer(A, "Ay", jump_key="ctrl+shift+2")
+        self.assertIsNone(ways.check_jump_key(settings(entry), A, "", "alt_r"))
+
+    def test_a_chord_finds_its_in_use_machine(self):
+        held = settings(peer(A, "Ay", jump_key="ctrl+shift+2"), peer(B, "Bee", jump_key="ctrl+shift+3"))
+        self.assertEqual(ways.jump_peer(held["peers"], "ctrl+shift+3"), B)
+
+    def test_a_not_in_use_machines_jump_key_is_ignored(self):
+        held = settings(peer(A, "Ay", jump_key="ctrl+shift+2", in_use=False))
+        self.assertIsNone(ways.jump_peer(held["peers"], "ctrl+shift+2"))
+
+
 class WritingOnePeer(unittest.TestCase):
     def test_one_zone_of_each_kind_is_written_for_that_peer_and_the_others_are_left_alone(self):
         other = {"peer": B, "kind": "edge"}
@@ -243,6 +301,55 @@ class WayBack(unittest.TestCase):
         self.assertEqual(ways.no_way_back_sentence(held, C), "")
 
 
+    def test_with_no_way_back_the_sender_names_the_machine_whose_zone_holds_that_side(self):
+        # The laptop on 02-10-2026: the Mac and the rig both on its left, the rig's edge in use.
+        held = settings(peer(A, "Mac", side="left"), peer(B, "Rig", side="left"),
+                        zones=[{"peer": A, "kind": "edge", "off": True}, {"peer": B, "kind": "edge"}])
+        self.assertEqual(ways.way_back_by(held, A), B)
+        self.assertIsNone(ways.way_back_by(held, B))
+        held["zones"][0].pop("off")
+        held["zones"][1]["off"] = True
+        self.assertIsNone(ways.way_back_by(held, A))
+        # Off by choice, with nobody else on that side: no way back, and nobody in the way.
+        held["zones"][0]["off"] = True
+        self.assertIsNone(ways.way_back_by(held, A))
+
+    def test_what_each_machine_is_told_of_its_way_back_so_a_change_reaches_every_machine_it_touches(self):
+        # Moving one machine can open or close another's way back: Sol's review, 02-10-2026.
+        held = settings(peer(A, "Mac", side="left"), peer(B, "Rig", side="left"),
+                        zones=[{"peer": A, "kind": "edge", "off": True}, {"peer": B, "kind": "edge"}])
+        before = ways.way_back_state(held)
+        self.assertEqual(before, {A: (False, B), B: (True, None)})
+        held["peers"][1]["side"] = "right"
+        held["zones"][0].pop("off")
+        after = ways.way_back_state(held)
+        self.assertEqual(sorted(peer for peer in after if after[peer] != before.get(peer)), [A])
+
+    def test_an_arrangement_keeps_who_is_in_the_way_only_beside_a_way_back_of_false(self):
+        held = settings(peer(A, "Ay", side="left", side_set_at=50, side_by=A))
+        self.assertEqual(ways.arrangement(held, A, "right", 50, A, "this PC", way_back=False, way_back_by=C), (True, []))
+        self.assertEqual(held["peers"][0]["way_back_by"], C)
+        ways.arrangement(held, A, "right", 50, A, "this PC", way_back=False)
+        self.assertNotIn("way_back_by", held["peers"][0])
+        ways.arrangement(held, A, "right", 50, A, "this PC", way_back=False, way_back_by=C)
+        ways.arrangement(held, A, "right", 50, A, "this PC", way_back=True, way_back_by=C)
+        self.assertNotIn("way_back_by", held["peers"][0])
+        # This machine's own id, or one that is not an id, is ignored as if absent.
+        for odd in (HERE, "x"):
+            ways.arrangement(held, A, "right", 50, A, "this PC", way_back=False, way_back_by=odd)
+            self.assertNotIn("way_back_by", held["peers"][0])
+
+    def test_the_sentence_names_the_machine_in_the_way_and_where_to_change_it(self):
+        held = settings(peer(A, "Laptop-PC", side="right", way_back=False, way_back_by=B), peer(B, "Desk-PC"))
+        self.assertEqual(ways.no_way_back_sentence(held, A),
+                         "Laptop-PC has Desk-PC on its left too, so none of its edges leads back here. On "
+                         "Laptop-PC's Crossing page, share that side by thirds or move one of them.")
+        held["peers"][0]["way_back_by"] = C
+        self.assertEqual(ways.no_way_back_sentence(held, A),
+                         "Laptop-PC has another machine on its left too, so none of its edges leads back here. On "
+                         "Laptop-PC's Crossing page, share that side by thirds or move one of them.")
+
+
 class Arrangement(unittest.TestCase):
     def test_a_newer_arrangement_sets_the_opposite_side_for_that_peer_only(self):
         held = settings(peer(A, "Ay", side="left", side_set_at=10, side_by=HERE), peer(B, "Bee", side="right"))
@@ -297,6 +404,10 @@ class TheShortcutsMachine(unittest.TestCase):
         peers = [peer(A, "Ay", send=False)]
         self.assertIsNone(ways.shortcut_peer(peers, A, lambda ident: True))
 
+    def test_a_machine_not_in_use_is_never_picked(self):
+        peers = [peer(A, "Ay", in_use=False), peer(B, "Bee")]
+        self.assertEqual(ways.shortcut_peer(peers, A, lambda ident: True), B)
+
     def test_a_phone_or_an_entry_without_an_id_is_never_picked(self):
         peers = [peer(PHONE, "Phone", port=0, host="", send=False), peer("", "Old", from_1_4=True)]
         self.assertIsNone(ways.shortcut_peer(peers, None, lambda ident: True))
@@ -313,6 +424,10 @@ class MissingPairings(unittest.TestCase):
 
     def test_a_machine_not_allowed_to_drive_this_one_needs_no_pairing(self):
         held = settings(peer(A, "Ay"), peer(B, "Bee", allow_drive=False))
+        self.assertEqual(ways.missing_pairings(held, A), [])
+
+    def test_a_machine_not_in_use_needs_no_pairing(self):
+        held = settings(peer(A, "Ay"), peer(B, "Bee", in_use=False))
         self.assertEqual(ways.missing_pairings(held, A), [])
 
     def test_a_machine_that_has_never_linked_is_not_judged(self):
@@ -337,22 +452,46 @@ class MissingPairings(unittest.TestCase):
 
 
 class TheShownDefault(unittest.TestCase):
-    """The Mac's page shows Right for its one machine before a side is set, and a save writes it."""
+    """The Mac's page shows Right for its one machine before a side is set, so the settings hold it
+    from the moment that machine is paired, not from the first save (beta.4: Edge did nothing until
+    a save of another way wrote it)."""
 
-    def test_a_side_written_as_the_pages_default_is_unstamped_so_the_peers_own_wins(self):
+    def test_the_one_machine_not_placed_holds_right_unstamped_so_its_edge_fires(self):
         held = settings(peer(A, "Ay"), zones=[{"peer": A, "kind": "edge"}])
-        self.assertTrue(ways.edit(held, A, side="right", methods=["edge"], parts=["middle"], corner="top_left",
-                                  kinds=MAC, corner_edge=mac_corner_edge, now=1_900_000_000, default=True))
+        self.assertFalse(ways.has_way(held, A))
+        self.assertTrue(ways.default_side(held))
         entry = held["peers"][0]
         self.assertEqual((entry["side"], entry["side_set_at"], entry["side_by"]), ("right", 0, ""))
+        self.assertTrue(ways.has_way(held, A))
+        self.assertFalse(ways.default_side(held))
+
+    def test_the_held_default_loses_to_a_side_the_peer_chooses(self):
+        held = settings(peer(A, "Ay"), zones=[{"peer": A, "kind": "edge"}])
+        ways.default_side(held)
         self.assertEqual(ways.arrangement(held, A, "bottom", 1_899_999_000, A, "this Mac"), (True, []))
         self.assertEqual(held["peers"][0]["side"], "top")
 
     def test_a_default_never_moves_a_side_already_set(self):
         held = settings(peer(A, "Ay", side="left", side_set_at=5, side_by=A), zones=[{"peer": A, "kind": "edge"}])
-        self.assertFalse(ways.edit(held, A, side="right", methods=["edge"], parts=["middle"], corner="top_left",
-                                   kinds=MAC, corner_edge=mac_corner_edge, now=1_900_000_000, default=True))
+        self.assertFalse(ways.default_side(held))
         self.assertEqual(held["peers"][0]["side"], "left")
+
+    def test_with_several_machines_none_is_given_a_side_nobody_chose(self):
+        held = settings(peer(A, "Ay"), peer(B, "Bee"),
+                        zones=[{"peer": A, "kind": "edge"}, {"peer": B, "kind": "edge", "off": True}])
+        self.assertFalse(ways.default_side(held))
+        self.assertEqual([entry["side"] for entry in held["peers"]], ["", ""])
+
+    def test_a_machine_paired_beside_the_one_migrated_from_1_4_is_given_no_side(self):
+        # The migrated entry has no id and holds the 1.4 side: Right as well would clash with it.
+        held = settings(peer("", "Studio", side="right", from_1_4=True), peer(A, "Ay"),
+                        zones=[{"peer": "", "kind": "edge"}, {"peer": A, "kind": "edge"}])
+        self.assertFalse(ways.default_side(held))
+        self.assertEqual(held["peers"][1]["side"], "")
+
+    def test_a_phone_alone_is_given_no_side(self):
+        held = settings(peer(PHONE, "Phone", port=0, host="", send=False))
+        self.assertFalse(ways.default_side(held))
 
 
 class TheCornerFollowsAnArrivingSide(unittest.TestCase):
@@ -361,6 +500,80 @@ class TheCornerFollowsAnArrivingSide(unittest.TestCase):
                         zones=[{"peer": A, "kind": "corner", "corner": "top_right", "edge": "top"}])
         self.assertEqual(ways.arrangement(held, A, "left", 10, A, "this PC", corner_edge=pc_corner_edge), (True, []))
         self.assertEqual((held["peers"][0]["side"], held["zones"][0]["edge"]), ("right", "right"))
+
+
+
+class SharingASide(unittest.TestCase):
+    """A machine put on a side another machine already crosses from is offered that side by thirds
+    on the spot, rather than refused (beta.4, 02-10-2026: "it rejects the option and hides it")."""
+
+    def two_on_the_right(self, rig_zone=None):
+        return settings(peer(A, "Desk-PC", side="right"), peer(B, "Laptop-PC", side="right"),
+                        zones=[rig_zone or {"peer": A, "kind": "edge"}, {"peer": B, "kind": "edge", "off": True}])
+
+    def test_a_machine_whose_side_another_holds_whole_is_offered_the_end_third(self):
+        held = self.two_on_the_right()
+        self.assertEqual(ways.share_offer(held, B),
+                         {"side": "right", "holders": [A], "thirds": {"start": A, "middle": A, "end": B}})
+
+    def test_free_thirds_go_to_the_machine_asking(self):
+        held = self.two_on_the_right({"peer": A, "kind": "part", "parts": ["end"]})
+        self.assertEqual(ways.share_offer(held, B)["thirds"], {"start": B, "middle": B, "end": A})
+
+    def test_nothing_is_offered_where_nothing_is_in_the_way(self):
+        held = settings(peer(A, "Ay", side="left"), peer(B, "Bee", side="right"),
+                        zones=[{"peer": A, "kind": "edge"}, {"peer": B, "kind": "edge", "off": True}])
+        self.assertIsNone(ways.share_offer(held, B))
+        self.assertIsNone(ways.share_offer(self.two_on_the_right(), A))
+
+    def test_sharing_writes_each_machines_thirds_and_turns_their_whole_edges_off(self):
+        held = self.two_on_the_right()
+        changed = ways.share(held, "right", {"start": A, "middle": A, "end": B}, kinds=MAC)
+        self.assertEqual(sorted(changed), sorted([A, B]))
+        mine = {(zone["peer"], zone["kind"]): zone for zone in held["zones"]}
+        self.assertTrue(mine[(A, "edge")].get("off"))
+        self.assertTrue(mine[(B, "edge")].get("off"))
+        self.assertEqual((mine[(A, "part")]["parts"], mine[(A, "part")].get("off")), (["start", "middle"], None))
+        self.assertEqual((mine[(B, "part")]["parts"], mine[(B, "part")].get("off")), (["end"], None))
+        self.assertIsNone(ways.clash(held, "this Mac"))
+        self.assertTrue(ways.has_way(held, A) and ways.has_way(held, B))
+
+    def test_a_machine_on_that_side_left_with_no_third_crosses_there_no_more(self):
+        held = self.two_on_the_right()
+        ways.share(held, "right", {"start": B, "middle": B, "end": B}, kinds=MAC)
+        self.assertFalse(ways.has_way(held, A))
+        self.assertIsNone(ways.clash(held, "this Mac"))
+
+    def test_a_machine_left_with_no_third_keeps_a_part_zone_the_settings_accept(self):
+        # Sol's review: an empty `parts` made the Mac's store refuse the whole share.
+        held = settings(peer(A, "Ay", side="right"), peer(B, "Bee", side="right"), peer(C, "Sea", side="right"),
+                        zones=[{"peer": A, "kind": "part", "parts": ["start", "middle"]},
+                               {"peer": C, "kind": "part", "parts": ["end"]},
+                               {"peer": B, "kind": "edge", "off": True}])
+        ways.share(held, "right", {"start": A, "middle": A, "end": B}, kinds=MAC)
+        sea = next(zone for zone in held["zones"] if zone["peer"] == C and zone["kind"] == "part")
+        self.assertTrue(sea.get("off"))
+        self.assertTrue(sea["parts"])
+        self.assertIsNone(ways.clash(held, "this Mac"))
+
+    def test_sharing_reports_every_machine_whose_way_back_it_changed_not_only_whose_zones(self):
+        # Sol's review: Sea's blocker moved from Ay to Bee, and only Ay and Bee were told.
+        held = settings(peer(A, "Ay", side="right"), peer(B, "Bee", side="right"), peer(C, "Sea", side="right"),
+                        zones=[{"peer": B, "kind": "part", "parts": ["middle"], "off": True},
+                               {"peer": A, "kind": "edge"},
+                               {"peer": B, "kind": "edge", "off": True},
+                               {"peer": C, "kind": "edge", "off": True}])
+        before = ways.way_back_state(held)
+        changed = ways.share(held, "right", {"start": A, "middle": A, "end": B}, kinds=MAC)
+        after = ways.way_back_state(held)
+        self.assertTrue({peer for peer in after if after[peer] != before.get(peer)} <= set(changed), changed)
+
+    def test_a_split_naming_a_machine_not_on_that_side_or_leaving_a_third_out_is_refused(self):
+        held = self.two_on_the_right()
+        held["peers"].append(peer(C, "Sea", side="left"))
+        for thirds in ({"start": A, "middle": A, "end": C}, {"start": A, "middle": B}):
+            with self.subTest(thirds=thirds), self.assertRaises(ValueError):
+                ways.share(held, "right", thirds, kinds=MAC)
 
 
 if __name__ == "__main__":

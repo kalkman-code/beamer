@@ -631,6 +631,22 @@ class Answers(unittest.TestCase):
         with self.assertRaises(ValueError):
             protocol.refuse_msg(5, "because")
 
+    def test_a_refuse_names_the_machine_in_the_way_only_when_owned_or_busy(self):
+        for why in ("owned", "busy"):
+            with self.subTest(why=why):
+                message = protocol.refuse_msg(5, why, other=ID_B)
+                self.assertEqual(message["data"], {"route": 5, "why": why, "other": protocol.id_text(ID_B)})
+                self.assertEqual(protocol.read_refuse(message), {"route": 5, "why": why, "other": ID_B})
+        for why in ("not_allowed", "sent_home", "malformed"):
+            with self.subTest(why=why):
+                self.assertNotIn("other", protocol.refuse_msg(5, why, other=ID_B)["data"])
+        self.assertNotIn("other", protocol.refuse_msg(5, "owned")["data"])
+        # One that is not an id is left out, and the refusal still stands.
+        for odd in ("x", 7, None, protocol.id_text(bytes(16))):
+            data = {"route": 5, "why": "owned", "other": odd}
+            with self.subTest(other=odd):
+                self.assertEqual(protocol.read_refuse({"type": "refuse", "data": data}), {"route": 5, "why": "owned"})
+
     def test_switch(self):
         read = protocol.read_switch(protocol.switch_v6(3, ID_A, edge="right", offset=0.5))
         self.assertEqual(read, {"route": 3, "next": ID_A, "edge": "right", "offset": 0.5})
@@ -817,6 +833,23 @@ class Others(unittest.TestCase):
             with self.subTest(way_back=odd):
                 self.assertEqual(protocol.read_arrangement_v6({"type": "arrangement", "data": data}, now),
                                  {"edge": "left", "set_at": now, "by": ID_A})
+
+    def test_arrangement_way_back_by_names_the_machine_holding_the_side_only_with_way_back_false(self):
+        now = 1_790_000_000
+        message = protocol.arrangement_v6("left", now, ID_A, way_back=False, way_back_by=ID_C)
+        self.assertEqual(message["data"]["way_back_by"], protocol.id_text(ID_C))
+        self.assertEqual(protocol.read_arrangement_v6(message, now),
+                         {"edge": "left", "set_at": now, "by": ID_A, "way_back": False, "way_back_by": ID_C})
+        for way_back in (True, None):
+            with self.subTest(way_back=way_back):
+                self.assertNotIn("way_back_by", protocol.arrangement_v6("left", now, ID_A, way_back=way_back,
+                                                                        way_back_by=ID_C)["data"])
+        for data in ({"way_back": True, "way_back_by": protocol.id_text(ID_C)},
+                     {"way_back_by": protocol.id_text(ID_C)},
+                     {"way_back": False, "way_back_by": "x"}):
+            data = {"edge": "left", "set_at": now, "by": protocol.id_text(ID_A), **data}
+            with self.subTest(data=data):
+                self.assertNotIn("way_back_by", protocol.read_arrangement_v6({"type": "arrangement", "data": data}, now))
 
     def test_paired(self):
         self.assertEqual(protocol.read_paired(protocol.paired_msg([ID_A, ID_C])), [ID_A, ID_C])

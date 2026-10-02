@@ -112,10 +112,9 @@ class NotificationTests(unittest.TestCase):
     def test_a_notification_hides_the_pcs_address(self):
         tray = mock.Mock()
         tray.controller.cfg.hide_addresses = True
-        with mock.patch.object(kvm_bridge_app.rumps, "notification") as notification, \
-                mock.patch.object(kvm_bridge_app.AppKit, "NSBeep"):
+        with mock.patch.object(kvm_bridge_app.AppKit, "NSBeep"):
             kvm_bridge_app.TrayApp._notify_user_main(tray, "Cannot switch", "Connecting to 192.0.2.20:24820")
-        self.assertNotIn("192.0.2.20", notification.call_args.args[2])
+        self.assertNotIn("192.0.2.20", tray.notices.post.call_args.args[1])
 
 
 if __name__ == "__main__":

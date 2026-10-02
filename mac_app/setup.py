@@ -39,6 +39,7 @@ setup(
         "machines_panel",
         "media_keys",
         "motion",
+        "notices",
         "notch_beam",
         "notch_island",
         "pages",
@@ -75,7 +76,7 @@ setup(
             # The rest of core/ is named too, through the repo root put on sys.path above, so a module
             # the scan misses cannot drop out; naming the package whole would ship its tests too.
             "includes": [
-                "objc", "AppKit", "ApplicationServices", "Quartz",
+                "objc", "AppKit", "ApplicationServices", "Quartz", "UserNotifications",
                 "core.effects", "core.ignored", "core.keytable", "core.link", "core.owner", "core.pairing",
                 "core.peerlist", "core.protocol", "core.receiver", "core.return_edge", "core.settings_sync",
                 "core.updates", "core.wol",

@@ -330,6 +330,7 @@ def peer_entry(identity: bytes, name: str, platform: str, port: int, token: str,
     return {
         "id": _b64(identity), "name": name, "platform": platform, "token": token,
         "host": "" if phone else host, "port": port, "hw": "", "send": not phone, "allow_drive": True,
+        "in_use": True,
         "side": "", "side_set_at": 0, "side_by": "", "paired_with": [], "paired_at": int(paired_at),
         "linked": False, "from_1_4": False,
     }

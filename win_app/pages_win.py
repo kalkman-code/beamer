@@ -150,6 +150,16 @@ def parts_phrase(edge, parts):
     return f"the {joined} of the {edge} edge"
 
 
+def share_sentence(holders, side, name):
+    """Name the machines already using the side the chosen machine wants."""
+    names = holders[0] if len(holders) == 1 else ", ".join(holders[:-1]) + " and " + holders[-1]
+    verb = "crosses" if len(holders) == 1 else "cross"
+    # The sentence says what picking a third means: it goes to `name`.
+    keep = f"stay with {holders[0]}" if len(holders) == 1 else "stay where they are"
+    return (f"{names} already {verb} from the {side} edge of this PC. The thirds you pick go to {name}; "
+            f"the rest {keep}.")
+
+
 # The Crossing page's ways in, in the page's order. Edge and Part of the edge are two readings of
 # one edge, so choosing either drops the other.
 WAYS = ("shortcut", "edge", "part", "corner")
@@ -184,7 +194,8 @@ def crossing_machines(peers: list) -> list:
     """(id, label) for every paired machine a zone can lead to, in the list's order: never a phone,
     which is never dialled (WIRE.md section 5). The entry migrated from 1.4.x has the id ""."""
     labels = peerlist.labels(peers)
-    return [(entry.get("id") or "", labels[entry["token"]]) for entry in peers if entry.get("port") != 0]
+    return [(entry.get("id") or "", labels[entry["token"]]) for entry in peers
+            if entry.get("in_use", True) is True and entry.get("port") != 0]
 
 
 def crossing_state_sentence(paired, heard, sending, connected, armed, paused, full_screen_app, name="the other machine") -> str:
@@ -278,9 +289,14 @@ def ways_summary(methods, edge, parts, corner, key_name, style, name="the other 
     """The Ways in module's first line: every way input leaves for the machine `name`, in one
     sentence. With `several` machines paired the shortcut is not this one's, so it gets a sentence of
     its own."""
-    if not edge:
-        return f"Nothing moves input to {name} until this PC knows which side it is on."
     methods = set(methods)
+    if not edge:
+        # A PC's edge, thirds and corner all cross the side it holds; only the shortcut needs none.
+        if "shortcut" in methods and not several:
+            press = f"hold {key_name}" if style == "hold" else f"press {key_name} twice"
+            return (f"Input moves to {name} when you {press}. Its edges and corner wait until this PC knows "
+                    f"which side {name} is on.")
+        return f"Nothing moves input to {name} until this PC knows which side it is on."
     ways = []
     if "edge" in methods:
         ways.append(f"push through the whole {edge} edge")

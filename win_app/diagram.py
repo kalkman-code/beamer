@@ -57,7 +57,8 @@ def _marks(machines, shortcut) -> dict:
     alone = len(machines) == 1
     marks = {("cap",): 1.0 if shortcut else 0.0}
     for machine in machines:
-        key, methods, edge = machine["key"], set(machine["methods"]), _drawn_side(machine, alone)
+        key, methods = machine["key"], set(machine["methods"])
+        edge = _drawn_side(machine, alone) if machine.get("side") else ""
         for side in pages_win.SIDE_ANGLE:
             marks[("edge", key, side)] = 1.0 if "edge" in methods and side == edge else 0.0
             marks[("track", key, side)] = 1.0 if "part" in methods and side == edge else 0.0
@@ -132,7 +133,7 @@ class ArrangementDiagram(QWidget):
         self._unplaced = "" if alone else pages_win.unplaced_line(
             [machine["label"] for machine in machines if not machine.get("side")])
         self.setAccessibleDescription(pages_win.diagram_description(
-            [dict(machine, label=self._labels[machine["key"]], side=_drawn_side(machine, alone)) for machine in machines],
+            [dict(machine, label=self._labels[machine["key"]]) for machine in machines],
             key_name, style, shortcut))
         targets = _marks(machines, shortcut)
         slots = pages_win.side_slots([dict(machine, side=_drawn_side(machine, alone)) for machine in machines])

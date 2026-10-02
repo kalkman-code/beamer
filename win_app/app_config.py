@@ -500,6 +500,7 @@ def _peer_entry(raw: dict, token: str, port: int, own_id: str) -> dict:
         "id": "", "name": _text(raw.get("paired_with")), "platform": "macos", "token": token,
         "host": _text(raw.get("mac_host")), "port": port, "hw": _text(raw.get("mac_hardware_address")),
         "send": _flag(raw.get("send_to_mac"), True), "allow_drive": _flag(raw.get("allow_mac_to_drive"), True),
+        "in_use": True,
         "side": side, "side_set_at": set_at, "side_by": own_id if set_at else "",
         "paired_with": [], "paired_at": 0, "linked": False, "from_1_4": True,
     }
@@ -640,6 +641,14 @@ def load_settings(path: Path) -> dict:
         or not all(isinstance(entry, dict) for entry in settings["peers"] + settings["zones"])
     ):
         raise SettingsFileError(f"{path} is not a version {SCHEMA} Beamer settings file, and is left as it is")
+    if any("way_back_by" in entry and not isinstance(entry["way_back_by"], str) for entry in settings["peers"]):
+        raise SettingsFileError(f"{path} has a peer way_back_by that is not text, and is left as it is")
+    if any("in_use" in entry and not isinstance(entry["in_use"], bool) for entry in settings["peers"]):
+        raise SettingsFileError(f"{path} has a peer in_use that is not true or false, and is left as it is")
+    if any("jump_key" in entry and (not isinstance(entry["jump_key"], str)
+                                    or (entry["jump_key"] and not ways.valid_jump_key(entry["jump_key"])))
+           for entry in settings["peers"]):
+        raise SettingsFileError(f"{path} has a peer jump_key that is not a recorded modifier chord, and is left as it is")
     if _overlapping_zones(settings):
         raise SettingsFileError(f"{path} has two zones in use over the same stretch of the screen, and is left as it is")
     settings.setdefault("name", "")
@@ -804,8 +813,29 @@ def save_config(path: Path, config: Config) -> None:
         _write_json(path, settings)
 
 
+def set_jump_key(path: Path, peer_id: str, value, trigger_key: str) -> dict:
+    """Sets or clears one peer's local jump chord after the shared clash checks."""
+    with SETTINGS_LOCK:
+        settings = load_settings(path)
+        entry = next((peer for peer in settings["peers"] if peer["id"] == peer_id), None)
+        if entry is None:
+            raise ConfigError("that machine is no longer paired with this PC")
+        try:
+            entry["jump_key"] = ways.check_jump_key(settings, peer_id, value, trigger_key) or ""
+        except ValueError as exc:
+            raise ConfigError(str(exc)) from exc
+        write_settings(path, settings)
+        return copy.deepcopy(entry)
+
+
 def write_settings(path: Path, settings: dict) -> None:
     """The settings as the link changed them (an id learnt, an address, `linked`), written atomically."""
+    if any("in_use" in entry and not isinstance(entry["in_use"], bool) for entry in settings.get("peers", []) if isinstance(entry, dict)):
+        raise SettingsFileError(f"{path} has a peer in_use that is not true or false")
+    if any("jump_key" in entry and (not isinstance(entry["jump_key"], str)
+                                    or (entry["jump_key"] and not ways.valid_jump_key(entry["jump_key"])))
+           for entry in settings.get("peers", []) if isinstance(entry, dict)):
+        raise SettingsFileError(f"{path} has a peer jump_key that is not a recorded modifier chord")
     _write_json(path, settings)
 
 
@@ -872,14 +902,24 @@ def set_ways(path: Path, peer: str, *, side=None, methods, parts, corner) -> boo
         return moved
 
 
-def apply_arrangement(path: Path, peer: str, edge: str, set_at: int, by: str, way_back=None):
+def share_side(path: Path, side: str, thirds: dict) -> list:
+    """Split one side's zones under the settings lock, returning every machine whose zones changed."""
+    with SETTINGS_LOCK:
+        settings = load_settings(path)
+        changed = ways.share(settings, side, thirds, kinds=KINDS)
+        _write_json(path, settings)
+        return changed
+
+
+def apply_arrangement(path: Path, peer: str, edge: str, set_at: int, by: str, way_back=None, way_back_by=None):
     """A peer's `arrangement` (WIRE.md section 8), as core.ways takes it: `edge` is the edge of the peer
     that faces this PC, so this PC's side for it is the opposite, and `way_back` is kept whatever the
     side. Returns (changed, notices): whether the file was written, and a sentence for each of that
     peer's zones turned off by a clash."""
     with SETTINGS_LOCK:
         settings = load_settings(path)
-        changed, notices = ways.arrangement(settings, peer, edge, set_at, by, "this PC", way_back, _corner_edge)
+        changed, notices = ways.arrangement(settings, peer, edge, set_at, by, "this PC", way_back,
+                                             way_back_by=way_back_by, corner_edge=_corner_edge)
         if changed:
             _write_json(path, settings)
         return changed, notices

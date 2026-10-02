@@ -120,6 +120,7 @@ A peer entry:
 | `linked` | boolean | a version 6 link with this peer has authenticated at least once |
 | `from_1_4` | boolean | this entry was migrated from a 1.4.x pairing, and never links |
 | `way_back` | boolean, optional | what the peer last said in `arrangement`'s `way_back` (section 8): whether one of its zones leads here; absent until it says |
+| `way_back_by` | `b64`, optional | what the peer last said in `arrangement`'s `way_back_by` (section 8): the machine whose zone holds the side it has for this one; absent when it named none |
 
 Rules:
 
@@ -319,7 +320,8 @@ The responder:
    is not a valid `hello` (a plaintext that is not JSON or not an object, another `type`, a
    malformed field) is answered with `welcome` carrying only `version` 6 and
    `error: "invalid_hello"`, and the link is closed. This is the one place a plaintext that is
-   not a JSON object is answered rather than ending the link at once.
+   not a JSON object is answered rather than ending the link at once. A paired peer with `in_use`
+   set to `false` receives this same refusal after its authenticated `hello`.
 8. Checks the `id` in `hello`. When it is this machine's own, or is not the entry's, it answers
    `welcome` carrying only `version` 6 and `error: "wrong_id"`, and closes. Only a holder of the
    token can read that answer, so it tells nobody else anything. Otherwise it sets `linked`, and
@@ -687,6 +689,15 @@ anything but `true`, is malformed; on a re-arm `edge` and `offset` do not belong
 one of `"owned"`, `"not_allowed"`, `"busy"`, `"sent_home"` and `"malformed"`. A valid `route` is
 all a `refuse` needs: one whose `why` is missing, not a string, or another string is not
 malformed, and the initiator acts on it at once as a refusal it cannot name.
+
+A `refuse` may also carry **`other`**, a machine id: with `owned`, the owner that holds the
+responder; with `busy`, the machine the responder's own input is on. The responder includes it
+whenever it knows that machine's id, and never with any other `why`. It is there so the initiator
+can say which machine is in the way ("Can't cross to Bee: it is being driven from Sea"); the
+initiator names it by its own peer entry for that id, and as another machine when it has none, or
+when `other` is not a valid id or is the initiator's own, in which case it is ignored and the
+refusal still stands. A version 6 machine from before 1.5.0-beta.5 ignores it, as it ignores any
+unknown key (Encodings).
 
 `switch`, responder to its owner only:
 
@@ -1152,6 +1163,9 @@ only for the entry migrated from 1.4.x, which never links. A zone never names a 
 - **Every machine starts with its whole edge.** Pairing gives the new machine an `edge` zone,
   and so does an `arrangement` for a machine that has no zone yet, and so does reading a
   settings file in which a paired desktop has none (pairing made no zones before 1.5.0-beta.5).
+  On a Mac with one desktop machine paired and no side for it, Beamer holds `right` unstamped and
+  with no author, as the Crossing page shows, so the edge crosses from pairing and a side either
+  machine chooses wins over it.
   An `edge` zone whose side another zone in use already covers is written `off`, so the file
   stays one the settings accept. A machine with a side and no way in, because another machine
   holds that side, is named on the Crossing page with the machine that holds it.
@@ -1181,6 +1195,17 @@ whether or not the side in the same message was newer, and its Crossing page nam
 having no way back while it is `false`. An answer is sent only after an `arrangement` that changed
 something here, so two machines never answer each other in turn. A version 6 machine from before
 1.5.0-beta.5 ignores it, as it ignores any unknown key (Encodings).
+
+With `way_back` false, `arrangement` may also carry **`way_back_by`**, a machine id: the machine
+whose zone in use already covers the sender's side for the receiver, which is why the sender's own
+zone there was turned `off` (Every machine starts with its whole edge, and Order and overlap). The
+sender includes it whenever one such machine holds that side, the first in its zone list when
+several do, and never with `way_back` true or absent. The receiver keeps it as `way_back_by` on the
+sender's entry beside `way_back`, and drops it whenever an `arrangement` from the sender carries
+`way_back` without it; one that is not a valid id, or is the receiver's own, is ignored as if
+absent. With it, the receiver's Crossing page says which machine is in the way ("Bee has Sea on its
+left too"), naming it by its own entry for that id and as another machine when it has none. A
+version 6 machine from before 1.5.0-beta.5 ignores it, as it ignores any unknown key (Encodings).
 
 **From 1.4.x's settings.** The migration turns the one pair's ways across into zones for its one
 peer, one of each kind, with `off` set for each method that was not on: an `edge` zone; a `part`

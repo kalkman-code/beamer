@@ -983,10 +983,15 @@ def accept_msg(route: int) -> dict:
     return {"type": MSG_ACCEPT, "data": {"route": route}}
 
 
-def refuse_msg(route: int, why: str) -> dict:
+def refuse_msg(route: int, why: str, other=None) -> dict:
     if why not in REFUSE_REASONS:
         raise ValueError(f"not a refusal: {why!r}")
-    return {"type": MSG_REFUSE, "data": {"route": route, "why": why}}
+    data = {"route": route, "why": why}
+    if why in ("owned", "busy") and isinstance(other, bytes):
+        text = id_text(other)
+        if read_id(text) is not None:
+            data["other"] = text
+    return {"type": MSG_REFUSE, "data": data}
 
 
 def accepts_msg(accepts: bool) -> dict:
@@ -1009,7 +1014,11 @@ def read_refuse(message):
     route, why = parsed[1].get("route"), parsed[1].get("why")
     if not _int(route, 1, MAX_SAFE_INTEGER):
         return None
-    return {"route": route, "why": why if isinstance(why, str) else None}
+    result = {"route": route, "why": why if isinstance(why, str) else None}
+    other = read_id(parsed[1].get("other")) if why in ("owned", "busy") else None
+    if other is not None:
+        result["other"] = other
+    return result
 
 
 def read_accepts(message):
@@ -1146,18 +1155,23 @@ def read_clipboard(message):
     return {"text": text, "image": clipboard_image(data)}
 
 
-def arrangement_v6(edge: str, set_at: int, by: bytes, way_back=None) -> dict:
-    """`way_back`, when a boolean, says whether one of the sender's zones leads to the receiver (WIRE.md section 8)."""
+def arrangement_v6(edge: str, set_at: int, by: bytes, way_back=None, way_back_by=None) -> dict:
+    """`way_back` says whether a sender's zone leads here; `way_back_by` names a holder when it does not."""
     data = {"edge": edge, "set_at": int(set_at), "by": id_text(by)}
     if isinstance(way_back, bool):
         data["way_back"] = way_back
+        if way_back is False and isinstance(way_back_by, bytes):
+            text = id_text(way_back_by)
+            if read_id(text) is not None:
+                data["way_back_by"] = text
     return {"type": MSG_ARRANGEMENT, "data": data}
 
 
 def read_arrangement_v6(message, now: float):
-    """{edge, set_at, by} from an `arrangement`, with `way_back` when it carried a boolean one, or
-    None: malformed, or stamped more than a day ahead of `now` or above 2^53 - 2, which the
-    receiver ignores. A `way_back` that is not a boolean is left out, and the side still stands."""
+    """{edge, set_at, by} from an `arrangement`, with `way_back` when it carried a boolean one and,
+    beside a `way_back` of false, `way_back_by` when it is a valid id; or None: malformed, or stamped
+    more than a day ahead of `now` or above 2^53 - 2, which the receiver ignores. A `way_back` that is
+    not a boolean is left out, and the side still stands."""
     parsed = read_message(message)
     if parsed is None or parsed[0] != MSG_ARRANGEMENT:
         return None
@@ -1169,6 +1183,10 @@ def read_arrangement_v6(message, now: float):
     read = {"edge": data["edge"], "set_at": set_at, "by": by}
     if isinstance(data.get("way_back"), bool):
         read["way_back"] = data["way_back"]
+        if data["way_back"] is False:
+            way_back_by = read_id(data.get("way_back_by"))
+            if way_back_by is not None:
+                read["way_back_by"] = way_back_by
     return read
 
 

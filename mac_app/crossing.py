@@ -144,7 +144,8 @@ class CrossingEngine:
         """An engine for every zone in use that leads to one of `peers` (settings entries, each with
         its `id` and `side`): the machines this Mac can send to now. A machine with no side keeps its
         corner and the notch, which do not need one."""
-        sides = {entry.get("id"): entry.get("side") for entry in peers if entry.get("id")}
+        sides = {entry.get("id"): entry.get("side") for entry in peers
+                 if entry.get("id") and entry.get("in_use", True) is True}
         found = {}
         for zone in zones:
             peer = zone.get("peer")

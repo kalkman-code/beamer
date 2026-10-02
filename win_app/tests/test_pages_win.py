@@ -15,6 +15,13 @@ except ImportError:  # PySide6 is only in the Windows venv
 
 
 class PagesWinTest(unittest.TestCase):
+    def test_crossing_machine_picker_omits_peers_not_in_use(self):
+        peers = [
+            {"id": "A", "name": "Bee", "token": "ta", "port": 24820},
+            {"id": "B", "name": "Sea", "token": "tb", "port": 24820, "in_use": False},
+        ]
+        self.assertEqual(pages_win.crossing_machines(peers), [("A", "Bee")])
+
     def test_keys_match_pages_in_order(self):
         self.assertEqual(pages_win.KEYS, tuple(page[0] for page in pages_win.PAGES))
 
@@ -108,6 +115,14 @@ class DesignGroupsTest(unittest.TestCase):
 
 
 class CrossingWaysTest(unittest.TestCase):
+    def test_a_shared_side_names_its_holder_and_uses_plural_when_needed(self):
+        self.assertEqual(pages_win.share_sentence(["Bee"], "right", "Oak"),
+                         "Bee already crosses from the right edge of this PC. The thirds you pick go to Oak; "
+                         "the rest stay with Bee.")
+        self.assertEqual(pages_win.share_sentence(["Bee", "Sea"], "top", "Oak"),
+                         "Bee and Sea already cross from the top edge of this PC. The thirds you pick go to Oak; "
+                         "the rest stay where they are.")
+
     def test_edge_and_part_of_the_edge_exclude_each_other(self):
         self.assertEqual(pages_win.toggle_way(["shortcut", "edge"], "part", True), ["shortcut", "part"])
         self.assertEqual(pages_win.toggle_way(["part", "corner"], "edge", True), ["edge", "corner"])
@@ -161,6 +176,14 @@ class CrossingWaysTest(unittest.TestCase):
             "Input moves to the other machine when you push through the top of the left edge, push diagonally into "
             "the bottom-right corner or hold Right Ctrl.")
         self.assertIn("choose at least one way", summary([], "left", [], "top_left", "F13", "hold"))
+
+    def test_with_no_side_learned_the_summary_still_names_the_shortcut_which_needs_none(self):
+        summary = pages_win.ways_summary
+        self.assertEqual(summary(["edge", "corner", "shortcut"], "", [], "top_left", "Right Ctrl", "double_tap", "Bee"),
+                         "Input moves to Bee when you press Right Ctrl twice. Its edges and corner wait until this PC "
+                         "knows which side Bee is on.")
+        self.assertEqual(summary(["edge"], "", [], "top_left", "Right Ctrl", "double_tap", "Bee"),
+                         "Nothing moves input to Bee until this PC knows which side it is on.")
 
     def test_the_key_cap_line_says_how_the_key_is_pressed(self):
         self.assertEqual(pages_win.trigger_phrase("Right Ctrl", "double_tap"), "Right Ctrl, twice")

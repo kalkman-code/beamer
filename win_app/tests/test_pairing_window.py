@@ -30,8 +30,10 @@ ID_A = b"\x0a" * 15 + b"\x01"
 ID_B = b"\x0b" * 15 + b"\x02"
 
 
-def peer(identity, name, token, host, platform="macos", paired_at=1_780_000_000):
-    return pairing.peer_entry(identity, name, platform, 24820, token, host, paired_at)
+def peer(identity, name, token, host, platform="macos", paired_at=1_780_000_000, in_use=True):
+    entry = pairing.peer_entry(identity, name, platform, 24820, token, host, paired_at)
+    entry["in_use"] = in_use
+    return entry
 
 
 @unittest.skipIf(kvm_bridge_win is None, "needs PySide6")
@@ -84,6 +86,30 @@ class MachinesWindowTest(unittest.TestCase):
         self.assertEqual(row.word.text(), "Waiting")
         self.assertIn("Studio Mac", row.detail.text())
 
+    def test_the_direction_switches_start_under_a_closed_disclosure(self):
+        window = self.open(peer(ID_A, "Studio Mac", TOKEN_A, "192.0.2.10"))
+        row = next(iter(window.machines.rows.values()))
+        self.assertFalse(row.directions.isChecked())
+        self.assertTrue(row.direction_group.isHidden())
+        row.directions.click()
+        self.assertFalse(row.direction_group.isHidden())
+
+    def test_the_send_button_names_the_only_machine_in_use(self):
+        window = self.open(peer(ID_A, "Studio Mac", TOKEN_A, "192.0.2.10"),
+                           peer(ID_B, "Inactive", TOKEN_B, "192.0.2.11", in_use=False))
+        window.sender.shortcut_target = lambda: None
+        self.assertEqual(window._redirect_text(), "Send input to Studio Mac")
+
+    def test_the_paired_announcement_omits_machines_not_in_use(self):
+        window = self.open(peer(ID_A, "Studio Mac", TOKEN_A, "192.0.2.10"),
+                           peer(ID_B, "Inactive", TOKEN_B, "192.0.2.11", in_use=False))
+        sent = []
+        window._send_to = lambda ident, message: sent.append((ident, message)) or True
+        window._send_paired()
+        self.assertEqual(len(sent), 1)
+        self.assertEqual(sent[0][0], ID_A)
+        self.assertEqual(sent[0][1]["data"]["ids"], [])
+
     def test_any_token_from_1_4_x_asks_to_pair_again(self):
         # "A" * 43 has pairing's shape: 1.4.x kept no record of whether a token was paired or typed.
         for token in ("typed by hand", "A" * 43):
@@ -132,6 +158,18 @@ class MachinesWindowTest(unittest.TestCase):
         window._refresh_window()
         rows = list(window.machines.rows.values())
         self.assertEqual([(row.send.isChecked(), row.allow.isChecked()) for row in rows], [(True, False), (False, True)])
+
+    def test_the_tray_send_items_omit_machines_not_in_use(self):
+        entries = [
+            peer(ID_A, "Studio", TOKEN_A, "192.0.2.10"),
+            peer(ID_B, "Laptop", TOKEN_B, "192.0.2.11"),
+            peer(b"\x0c" * 15 + b"\x03", "Spare", protocol.id_text(bytes(range(2, 34))), "192.0.2.12"),
+        ]
+        window = self.open(*entries)
+        window._edit_peer(protocol.id_text(bytes(range(2, 34))), in_use=False)
+        window._after_peers_edit()
+        window._refresh_tray_machines()
+        self.assertEqual(list(window.machine_actions), [protocol.id_text(ID_A), protocol.id_text(ID_B)])
 
     def test_the_trays_ticks_change_every_machine_in_one_write(self):
         window = self.open(peer(ID_A, "Studio", TOKEN_A, "192.0.2.10"), peer(ID_B, "Laptop", TOKEN_B, "192.0.2.11"))

@@ -26,6 +26,10 @@ def row(**kwargs):
 
 
 class StateTests(unittest.TestCase):
+    def test_a_machine_not_in_use_shows_its_own_status(self):
+        state = row(entry=entry(in_use=False), live=True).state
+        self.assertEqual((state.key, state.word), ("not_in_use", "NOT IN USE"))
+
     def test_a_machine_driving_this_mac_beats_the_rest(self):
         state = row(driving=True, live=True, here=True).state
         self.assertEqual((state.key, state.tone, state.word), ("driving", "signal", "Driving this Mac"))

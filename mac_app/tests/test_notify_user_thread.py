@@ -4,7 +4,6 @@ import unittest
 from unittest import mock
 
 import AppKit
-import rumps
 from PyObjCTools import AppHelper
 
 from kvm_bridge_app import TrayApp
@@ -17,6 +16,7 @@ class _FakeTrayApp:
 
     def __init__(self):
         self.logger = logging.getLogger("test-notify-user")
+        self.notices = mock.Mock()
 
 
 class NotifyUserMainThreadTest(unittest.TestCase):
@@ -27,7 +27,7 @@ class NotifyUserMainThreadTest(unittest.TestCase):
         straight to controller.on_user_alert, which bridge.py's _alert()
         invokes from the event-tap thread (see set_redirecting calls in
         _handle_trigger and the crossing-feed path) -- so it must do the
-        same hop instead of calling AppKit.NSBeep()/rumps.notification
+        same hop instead of calling AppKit.NSBeep()/Notices.post
         directly on the calling thread.
         """
         calling_threads = []
@@ -52,7 +52,7 @@ class NotifyUserMainThreadTest(unittest.TestCase):
         )
 
         with mock.patch.object(AppKit, "NSBeep", side_effect=record_and_beep), mock.patch.object(
-            rumps, "notification", side_effect=record_and_notify
+            fake_self.notices, "post", side_effect=record_and_notify
         ), mock.patch.object(AppHelper, "callAfter", side_effect=tracking_call_after):
             background.start()
             background.join(timeout=2)
@@ -67,7 +67,7 @@ class NotifyUserMainThreadTest(unittest.TestCase):
         self.assertEqual(
             calling_threads,
             [],
-            "AppKit.NSBeep/rumps.notification ran synchronously on the calling "
+            "AppKit.NSBeep/Notices.post ran synchronously on the calling "
             "(background) thread instead of being marshalled onto the main thread "
             "via AppHelper.callAfter",
         )

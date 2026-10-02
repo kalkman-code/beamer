@@ -6,6 +6,7 @@ import logging
 import time
 
 import config
+from core import protocol
 from core.tests import pngs
 
 class FakeQuartz:
@@ -134,6 +135,14 @@ def make_config(token="synthetic-token"):
     )
 
 
+def redirect_to(controller, peer=None):
+    """Put both views of where input is on the other machine."""
+    if peer is None:
+        peer = controller._primary_link.peer_id or protocol.id_text(bytes(range(1, 17)))
+    controller.owner.on = peer
+    controller.redirecting = True
+
+
 def crossing_config(token="synthetic-token", **overrides):
     cfg = make_config(token)
     cfg.crossing = dict(config.DEFAULT_CROSSING, **overrides)
@@ -191,5 +200,4 @@ class FakeClipboard:
         self.text, self.image = text, image
         self.stamp += 1
         return True
-
 

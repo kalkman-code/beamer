@@ -38,7 +38,7 @@ OWN_ID = b64(bytes([9]) * 16)
 # What a migrated entry is, for the fixture: every field of section 1's table.
 MIGRATED_PEER = {
     "id": "", "name": "MacBook Pro", "platform": "macos", "host": "192.0.2.10", "port": 24820,
-    "hw": "aa:bb:cc:dd:ee:ff", "send": True, "allow_drive": True, "side": "left", "side_set_at": 1790000000,
+    "hw": "aa:bb:cc:dd:ee:ff", "send": True, "allow_drive": True, "in_use": True, "side": "left", "side_set_at": 1790000000,
     "paired_with": [], "paired_at": 0, "linked": False, "from_1_4": True,
 }
 
@@ -94,6 +94,39 @@ class MigrationTests(Folder):
         for key, value in LEGACY.items():
             if key not in MOVED_OR_DROPPED and key != "port":
                 self.assertEqual(settings[key], value, key)
+
+    def test_peer_in_use_must_be_a_boolean(self):
+        settings = app_config.load_settings(self.path)
+        settings["peers"][0]["in_use"] = "yes"
+        self.put(settings)
+        with self.assertRaises(app_config.SettingsFileError):
+            app_config.load_settings(self.path)
+
+    def test_jump_key_must_be_a_recorded_chord_and_round_trips(self):
+        settings = app_config.load_settings(self.path)
+        settings["peers"][0]["jump_key"] = "ctrl+shift+2"
+        app_config.write_settings(self.path, settings)
+        self.assertEqual(app_config.load_settings(self.path)["peers"][0]["jump_key"], "ctrl+shift+2")
+        settings["peers"][0]["jump_key"] = "nonsense"
+        with self.assertRaises(app_config.SettingsFileError):
+            app_config.write_settings(self.path, settings)
+
+    def test_load_rejects_a_malformed_jump_key(self):
+        settings = app_config.load_settings(self.path)
+        settings["peers"][0]["jump_key"] = "ctrl"
+        self.put(settings)
+        with self.assertRaises(app_config.SettingsFileError):
+            app_config.load_settings(self.path)
+
+    def test_jump_key_clash_is_refused_without_saving_and_can_be_cleared(self):
+        settings = app_config.load_settings(self.path)
+        peer_id = settings["peers"][0]["id"]
+        app_config.set_jump_key(self.path, peer_id, "ctrl+shift+2", "alt_r")
+        with self.assertRaises(app_config.ConfigError):
+            app_config.set_jump_key(self.path, peer_id, "ctrl+alt+2", "alt_r")
+        self.assertEqual(app_config.load_settings(self.path)["peers"][0]["jump_key"], "ctrl+shift+2")
+        app_config.set_jump_key(self.path, peer_id, "", "alt_r")
+        self.assertEqual(app_config.load_settings(self.path)["peers"][0]["jump_key"], "")
 
     def test_the_machine_id_is_sixteen_random_bytes_in_b64_and_never_zero(self):
         ids = set()

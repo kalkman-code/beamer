@@ -225,7 +225,8 @@ class OutboundLink:
         """Where to dial the entry, or None when it is not dialled: send off, no address, or not
         made by pairing (a typed token, or any token migrated from 1.4.x)."""
         host, port = entry.get("host"), entry.get("port")
-        if not protocol.linkable(entry) or entry.get("send") is not True or not host or isinstance(port, bool) or not isinstance(port, int) or not 1 <= port <= 65535:
+        if (not protocol.linkable(entry) or entry.get("in_use", True) is not True or entry.get("send") is not True
+                or not host or isinstance(port, bool) or not isinstance(port, int) or not 1 <= port <= 65535):
             return None
         return host, port
 

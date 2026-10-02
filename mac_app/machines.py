@@ -24,6 +24,7 @@ class Row:
     platform: str
     address: str
     state: LinkState
+    in_use: bool
     drives: bool
     driven: bool
 
@@ -41,12 +42,14 @@ def row(entry: dict, label: str, live: bool, kind: str, status: str, here: bool,
     address = f"{host} · port {port}" if host and port else "No address"
     return Row(
         entry["token"], label, platform_name(entry.get("platform", "")), address,
-        _state(entry, label, live, kind, status, here, driving, inbound, has_link),
+        _state(entry, label, live, kind, status, here, driving, inbound, has_link), entry.get("in_use", True) is True,
         entry.get("send") is True, entry.get("allow_drive") is True,
     )
 
 
 def _state(entry, label, live, kind, status, here, driving, inbound, has_link) -> LinkState:
+    if entry.get("in_use", True) is not True:
+        return LinkState("not_in_use", AMBER, "NOT IN USE", "NOT IN USE", f"{label} is not in use on this Mac.", AMBER)
     if not protocol.linkable(entry):
         return LinkState(
             "pair_again", AMBER, "Pair again", "Pair again",

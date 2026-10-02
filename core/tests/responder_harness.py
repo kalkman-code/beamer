@@ -229,19 +229,10 @@ class Machine:
         self.port = None
 
     def start(self):
-        with socket.socket() as probe:
-            probe.bind(("127.0.0.1", 0))
-            self.port = probe.getsockname()[1]
-        self.responder.start(self.port)
-        assert wait_for(lambda: self.responder.listening and self._accepting()), "the responder did not listen"
+        self.responder.start(0)
+        assert wait_for(lambda: self.responder.listening_port is not None), "the responder did not listen"
+        self.port = self.responder.listening_port
         return self
-
-    def _accepting(self):
-        try:
-            with socket.create_connection(("127.0.0.1", self.port), timeout=0.2):
-                return True
-        except OSError:
-            return False
 
     def stop(self):
         self.responder.stop()

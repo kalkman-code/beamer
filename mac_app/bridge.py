@@ -5,8 +5,10 @@ import logging
 import platform
 import queue
 import socket
+import sys
 import threading
 import time
+import traceback
 import types
 import dataclasses
 from dataclasses import dataclass
@@ -68,9 +70,7 @@ MEDIA_KEY_NAMES = frozenset({"volume_mute", "volume_down", "volume_up", "media_n
 
 # Why input came home, in words, for the alert. A why that is not here comes home quietly.
 WHY_TEXT = {
-    "owned": "{name} is being driven from another machine",
     "not_allowed": "{name} does not accept input from this Mac",
-    "busy": "{name} is driving another machine",
     "malformed": "{name} could not read the request to take it",
     "refused": "{name} refused the input",
     "no_answer": "{name} did not answer",
@@ -474,7 +474,10 @@ class KVMController:
 
     @redirecting.setter
     def redirecting(self, value):
+        old = self._redirecting
         self._redirecting = bool(value)
+        if old != self._redirecting:
+            self.logger.info("redirecting %s -> %s (thread %s)", old, self._redirecting, threading.current_thread().name)
         if not self._redirecting:
             self.pointer.show()
 
@@ -523,6 +526,11 @@ class KVMController:
         self.pointer = PointerHider(quartz, logger=self.logger)
         self._cursor_assoc_status_logged = False
         self._cursor_warp_error_logged = False
+        self._redirecting = False
+        self._repair_lock = threading.Lock()
+        self._repair_running = False
+        self._repair_again = False
+        self._repair_disagreement_seen = False
         self.redirecting = False
         # True while another machine is driving this Mac over a link it opened. The tap passes
         # everything through while it is, except this Mac's own trigger key, so the two directions
@@ -558,6 +566,8 @@ class KVMController:
         self.tap_callback_ref = self._event_tap_callback
         self.translator = QuartzEventTranslator(quartz)
         self.trigger_code = KEY_NAME_TO_CODE[cfg.trigger_key]
+        self._jump_swallowed = set()
+        self.jump_recording = False
         self.last_trigger_down = 0.0
         self.trigger_suppressed = False
         self.redirect_started_at = 0.0
@@ -643,7 +653,8 @@ class KVMController:
                 return crossing.CrossingEngine(resistance_px=self.cfg.crossing["resistance_px"],
                                                block_while_dragging=self.cfg.crossing["block_while_dragging"], ways=[])
             return crossing.CrossingEngine.from_config(self.cfg.crossing)
-        peers = [entry for entry in self.book.peers() if entry.get("send") is True]
+        peers = [entry for entry in self.book.peers()
+                 if entry.get("in_use", True) is True and entry.get("send") is True]
         return crossing.CrossingEngine.from_zones(self.cfg.crossing, self.book.zones(), peers)
 
     def zones_changed(self):
@@ -674,7 +685,8 @@ class KVMController:
         its link goes only at the next sync."""
         if self._memory is not None:
             return bool(self.cfg.send_to_windows)
-        return any(entry.get("id") == peer and entry.get("send") is True for entry in self.book.peers())
+        return any(entry.get("id") == peer and entry.get("in_use", True) is True and entry.get("send") is True
+                   for entry in self.book.peers())
 
     def _zone_peer(self, step):
         """The machine a push through a zone goes to; a Config-built controller's one machine has no id in its zones."""
@@ -1258,6 +1270,8 @@ class KVMController:
                 if self.event_tap is not None:
                     self.quartz.CGEventTapEnable(self.event_tap, True)
                 return event
+            if not self._was_injected(event) and self._handle_jump_key(event_type, event):
+                return None
             if self.receiving:
                 # The PC is driving this Mac over the other link. Everything
                 # passes through untouched: crossing must not read a pointer
@@ -1286,9 +1300,25 @@ class KVMController:
                     return self._handle_local_mouse(event_type, event)
                 return event
             if self.gesture_translator.wants(event_type):
-                return self._handle_gesture_event(event_type, event)
+                if self.redirecting and not self.owner.away:
+                    self._repair_redirecting_disagreement()
+                    return event
+                handled = self._handle_gesture_event(event_type, event)
+                if handled is None and self.redirecting and not self.owner.away:
+                    # Input came home while it was converted: this one is the user's.
+                    self._repair_redirecting_disagreement()
+                    return event
+                return handled
             if event_type == media_keys.NX_SYSDEFINED_EVENT_TYPE:
-                return self._handle_system_event(event)
+                if self.redirecting and not self.owner.away:
+                    self._repair_redirecting_disagreement()
+                    return event
+                handled = self._handle_system_event(event)
+                if handled is None and self.redirecting and not self.owner.away:
+                    # Input came home while it was converted: this one is the user's.
+                    self._repair_redirecting_disagreement()
+                    return event
+                return handled
             if self._was_injected(event):
                 # One Beamer itself posted for the PC, on its way to an app
                 # here. Only keys and pointer events are ever injected, which
@@ -1307,6 +1337,9 @@ class KVMController:
                 )
                 if result.is_trigger:
                     return self._handle_trigger(result, event)
+                if self.redirecting and not self.owner.away:
+                    self._repair_redirecting_disagreement()
+                    return event
                 had = len(result.messages)
                 result.messages = self._after_home_presses(result.messages)
                 if self.redirecting:
@@ -1325,6 +1358,9 @@ class KVMController:
                     # The release of a key pressed here, while the input was home, stays here.
                     return event
             else:
+                if self.redirecting and not self.owner.away:
+                    self._repair_redirecting_disagreement()
+                    return event
                 button = self.translator.button_of(event_type, event)
                 if not self.redirecting:
                     if button is not None:
@@ -1360,6 +1396,9 @@ class KVMController:
             if self.redirecting and event_type in self.translator.movement_event_types:
                 self._warp_cursor_to_pin()
             if not self.redirecting:
+                return event
+            if not self.owner.away:
+                self._repair_redirecting_disagreement()
                 return event
             return None
         except BaseException:
@@ -1481,6 +1520,47 @@ class KVMController:
         if step.pressure > 0:
             self._notify_crossing("tick" if step.tick else "pressure", step)
         return event
+
+    def _handle_jump_key(self, event_type, event):
+        """Moves input to the peer named by a local jump chord and consumes its key press."""
+        quartz = self.quartz
+        if event_type not in (quartz.kCGEventKeyDown, quartz.kCGEventKeyUp):
+            return False
+        keycode = int(quartz.CGEventGetIntegerValueField(event, quartz.kCGKeyboardEventKeycode))
+        if event_type == quartz.kCGEventKeyUp and keycode in self._jump_swallowed:
+            self._jump_swallowed.discard(keycode)
+            return True
+        if event_type == quartz.kCGEventKeyDown and keycode in self._jump_swallowed:
+            return True
+        if event_type != quartz.kCGEventKeyDown or self.jump_recording:
+            return False
+        # A key already down when its modifiers arrive repeats; it is not a press of the chord.
+        if quartz.CGEventGetIntegerValueField(event, quartz.kCGKeyboardEventAutorepeat):
+            return False
+        key = SPECIAL_KEY_NAMES.get(keycode) or PRINTABLE_KEY_FALLBACKS.get(keycode)
+        if key is None:
+            character = self.translator._unicode_character(event, keycode)
+            key = character.lower() if character and len(character) == 1 else None
+        if key is None or key in ("shift", "shift_r", "alt", "alt_r", "ctrl", "ctrl_r", "cmd", "cmd_r"):
+            return False
+        flags = quartz.CGEventGetFlags(event)
+        modifiers = []
+        for name, mask in (("ctrl", quartz.kCGEventFlagMaskControl), ("alt", quartz.kCGEventFlagMaskAlternate),
+                           ("shift", quartz.kCGEventFlagMaskShift), ("cmd", quartz.kCGEventFlagMaskCommand)):
+            if flags & mask:
+                modifiers.append(name)
+        chord = ways.jump_chord(modifiers, key)
+        if chord is None:
+            return False
+        peer = ways.jump_peer(self.book.peers(), chord)
+        if peer is None:
+            return False
+        self._jump_swallowed.add(keycode)
+        if self.owner.on == peer:
+            self.set_redirecting(False)
+        else:
+            self.set_redirecting(True, peer=peer)
+        return True
 
     def _current_desktop_bounds(self):
         now = self.clock()
@@ -1700,8 +1780,10 @@ class KVMController:
         """One link per peer with `send` on, made and ended to match the peers as the book has them
         now. Cheap, and called every couple of seconds as well as when the settings change."""
         peers = self.book.peers()
-        wanted = {peer["token"] for peer in peers if peer.get("token") and peer.get("send") is True}
-        first = peers[0].get("token") if peers else None
+        wanted = {peer["token"] for peer in peers if peer.get("token") and peer.get("in_use", True) is True
+                  and peer.get("send") is True}
+        first = next((peer["token"] for peer in peers
+                      if peer.get("token") and peer.get("in_use", True) is True and peer.get("send") is True), None)
         with self._links_lock:
             gone = [self.links.pop(token) for token in [token for token in self.links if token not in wanted]]
             if not self.stop_event.is_set():
@@ -1847,8 +1929,10 @@ class KVMController:
         own = bytes(self.identity()["id"])
         if entry.get("side") in crossing.EDGES:
             by = protocol.read_id(entry.get("side_by")) or own
-            link.post(protocol.arrangement_v6(entry["side"], entry.get("side_set_at", 0), by,
-                                              way_back=self.way_back(link.peer_id)))
+            link.post(protocol.arrangement_v6(
+                entry["side"], entry.get("side_set_at", 0), by, way_back=self.way_back(link.peer_id),
+                way_back_by=protocol.read_id(self.way_back_by(link.peer_id)),
+            ))
         if "settings" in link.caps:
             try:
                 announcements = list(self.announce())
@@ -1861,10 +1945,12 @@ class KVMController:
         self._announce_paired(link)
 
     def _pairing_ids(self):
-        return tuple(peer.get("id") for peer in self.book.peers() if protocol.read_id(peer.get("id")) is not None)
+        return tuple(peer.get("id") for peer in self.book.peers()
+                     if peer.get("in_use", True) is True and protocol.read_id(peer.get("id")) is not None)
 
     def _announce_paired(self, link):
-        ids = [protocol.read_id(peer.get("id")) for peer in self.book.peers() if peer.get("id") != link.peer_id]
+        ids = [protocol.read_id(peer.get("id")) for peer in self.book.peers()
+               if peer.get("in_use", True) is True and peer.get("id") != link.peer_id]
         ids = [ident for ident in ids if ident is not None][:protocol.MAX_PEERS]
         link.post(protocol.paired_msg(ids))
 
@@ -1933,13 +2019,21 @@ class KVMController:
         read = protocol.read_arrangement_v6(message, time.time())
         if read is None or self.on_arrangement is None or not peer:
             return
-        self.on_arrangement(peer, read["edge"], read["set_at"], protocol.id_text(read["by"]), read.get("way_back"))
+        args = (peer, read["edge"], read["set_at"], protocol.id_text(read["by"]), read.get("way_back"))
+        if read.get("way_back_by"):
+            args += (protocol.id_text(read["way_back_by"]),)
+        self.on_arrangement(*args)
 
     def way_back(self, peer):
         """Whether one of this Mac's zones in use leads to `peer` and can fire: what every `arrangement`
         to it says as `way_back` (WIRE.md section 8)."""
         with self.book.lock:
             return ways.has_way({"peers": self.book.peers(), "zones": self.book.zones()}, peer)
+
+    def way_back_by(self, peer):
+        with self.book.lock:
+            return ways.way_back_by({"machine_id": protocol.id_text(self.identity()["id"]),
+                                     "peers": self.book.peers(), "zones": self.book.zones()}, peer)
 
     def send_arrangement(self, peer, mac_edge, set_at, by=None):
         """Tell `peer` which edge of this Mac faces it, stamped `set_at` by `by` (a b64 id, this Mac when
@@ -1950,7 +2044,10 @@ class KVMController:
         if link is None or not link.live():
             return False
         author = protocol.read_id(by) or bytes(self.identity()["id"])
-        return link.post(protocol.arrangement_v6(mac_edge, int(set_at), author, way_back=self.way_back(peer)))
+        return link.post(protocol.arrangement_v6(
+            mac_edge, int(set_at), author, way_back=self.way_back(peer),
+            way_back_by=protocol.read_id(self.way_back_by(peer)),
+        ))
 
     def send_settings(self, data, source=None):
         """Tell every peer that keeps Same on all machines this Mac's state, but `source` (the peer
@@ -2127,7 +2224,16 @@ class KVMController:
         return {"type": message["type"], "data": data}
 
     def _on_moved(self, moved):
+        self.logger.info(
+            "move applied: to %s from %s why %s (thread %s)",
+            self._name_of(moved.to) if moved.to is not None else "home",
+            self._name_of(moved.left) if moved.left is not None else "home",
+            moved.why,
+            threading.current_thread().name,
+        )
         if moved.to is not None:
+            with self._repair_lock:
+                self._repair_disagreement_seen = False
             if not self.redirecting:
                 self.redirect_started_at = self.clock()
                 self.redirecting = True
@@ -2138,9 +2244,14 @@ class KVMController:
             self.logger.info("redirecting input to %s", self._name_of(moved.to))
             return
         self._local_cleanup()
-        why = WHY_TEXT.get(moved.why)
-        if why is not None:
-            text = why.format(name=self._name_of(moved.left))
+        other = ""
+        if isinstance(moved.other, bytes) and moved.other != bytes(self.identity()["id"]):
+            other = peerlist.label_for(self.book.peers(), peer_id=protocol.id_text(moved.other))
+        name = self._name_of(moved.left)
+        text = peerlist.refusal_text(moved.why, name, other)
+        if text is None and moved.why in WHY_TEXT:
+            text = WHY_TEXT[moved.why].format(name=name)
+        if text is not None:
             self.logger.warning("%s; input returned to this Mac", text)
             self._alert("Beamer", text)
         if moved.why == "switch":
@@ -2168,7 +2279,12 @@ class KVMController:
         why = unreachable.why
         if why == "unreachable" and self._accepts.get(unreachable.peer) is False:
             why = "not_allowed"
-        text = WHY_TEXT.get(why, "{name} could not be reached").format(name=name)
+        other = ""
+        if isinstance(unreachable.other, bytes) and unreachable.other != bytes(self.identity()["id"]):
+            other = peerlist.label_for(self.book.peers(), peer_id=protocol.id_text(unreachable.other))
+        text = peerlist.refusal_text(why, name, other)
+        if text is None:
+            text = WHY_TEXT.get(why, "{name} could not be reached").format(name=name)
         self.logger.warning("%s", text)
         self._alert("Beamer", text)
 
@@ -2264,7 +2380,64 @@ class KVMController:
             return
         if not self.redirecting:
             return
-        self._step(lambda owner: owner.input(message) if owner.away else [])
+        def route(owner):
+            if owner.away:
+                return owner.input(message)
+            self._repair_redirecting_disagreement()
+            return []
+
+        self._step(route)
+
+    def _repair_redirecting_disagreement(self):
+        """The tap is about to swallow input as redirected while the owner says it is home. Starts
+        one repair and nothing else: the tap thread never logs, formats a stack or takes the owner's
+        or the effects lock, since anything that stalls it holds the user's keyboard."""
+        with self._repair_lock:
+            if self._repair_running:
+                # Asked again while one runs: it looks once more before it ends.
+                self._repair_again = True
+                return
+            self._repair_running = True
+            self._repair_again = False
+        try:
+            threading.Thread(target=self._repair, name="Beamer-repair", daemon=True).start()
+        except BaseException:
+            with self._repair_lock:
+                self._repair_running = False
+
+    def _repair(self):
+        """Puts redirecting right if the two views still disagree once every move in flight has
+        been applied: checked under the owner's and the effects lock, so the gap of an ordinary
+        return, or a take that landed since, is left alone. The first disagreement of an episode is
+        logged with every thread's stack, so the next one names its cause."""
+        while True:
+            self._repair_once()
+            with self._repair_lock:
+                if not self._repair_again:
+                    self._repair_running = False
+                    return
+                self._repair_again = False
+
+    def _repair_once(self):
+        try:
+            # Both held through the check, as _step holds them between deciding a move and
+            # applying it, so a return in flight is never read as a disagreement.
+            with self._owner_lock, self._effects_lock:
+                diverged = self.redirecting and not self.owner.away
+                if diverged:
+                    self._local_cleanup()
+            with self._repair_lock:
+                log = diverged and not self._repair_disagreement_seen
+                if diverged:
+                    self._repair_disagreement_seen = True
+            if log:
+                frames = sys._current_frames()
+                stacks = ["Thread %s:\n%s" % (thread.name, "".join(traceback.format_stack(frames[thread.ident])))
+                          for thread in threading.enumerate() if thread.ident in frames]
+                self.logger.error("redirecting while the owner says input is home; input forced local\n%s",
+                                  "\n".join(stacks))
+        except Exception:
+            self.logger.exception("putting redirecting right failed")
 
     def _force_local(self, reason):
         self._return_local()

@@ -15,7 +15,7 @@ from core import ignored
 from core import protocol
 import settings_store
 from bridge import KVMController
-from bridge_fakes import PAIRED_TOKEN, FakeClock, FakeQuartz, make_config, quiet_logger
+from bridge_fakes import PAIRED_TOKEN, FakeClock, FakeQuartz, make_config, quiet_logger, redirect_to
 from fake_link import FakeLink
 
 KEY_F13 = 0x69
@@ -40,7 +40,7 @@ class TapTests(unittest.TestCase):
             link_factory=FakeLink,
             system_event_converter=lambda event: event,
         )
-        self.controller.redirecting = True
+        redirect_to(self.controller)
 
     def tap(self, event_type, event):
         return self.controller._event_tap_callback(None, event_type, event, None)
@@ -120,7 +120,7 @@ class TapTests(unittest.TestCase):
         self.tap(FakeQuartz.kCGEventKeyDown, key_event(KEY_F13))
         self.configure([ignored.key(KEY_F13)])
         self.controller._return_local()
-        self.controller.redirecting = True
+        redirect_to(self.controller)
         up = key_event(KEY_F13)
         self.assertIs(self.tap(FakeQuartz.kCGEventKeyUp, up), up)
 

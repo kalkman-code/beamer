@@ -268,13 +268,14 @@ class ArrangementOverTheLinksTests(unittest.TestCase):
         peer, read = duo.pc_responder.arrangements[0]
         self.assertEqual((read["edge"], read["set_at"], read["by"]), ("top", 300, HERE))
 
-    def test_a_side_never_learnt_is_announced_as_nothing(self):
+    def test_the_one_machine_never_placed_is_announced_on_the_right_unstamped_as_the_page_shows_it(self):
         duo = self.duo(side="")
         duo.link_mac_to_pc()
         # What a link announces goes before anything sent after it, so this one is the fence.
         self.assertTrue(duo.mac.send_arrangement(protocol.id_text(HERE), "left", 9))
         self.assertTrue(wait_for(lambda: self.heard(duo, 9)))
-        self.assertEqual([read["set_at"] for _, read in duo.pc_responder.arrangements], [9])
+        self.assertEqual([(read["edge"], read["set_at"]) for _, read in duo.pc_responder.arrangements],
+                         [("right", 0), ("left", 9)])
 
 
 class WhatIsSharedTests(unittest.TestCase):
@@ -484,14 +485,16 @@ class MacDrivenTests(unittest.TestCase):
                 self.assertIsNotNone(duo.pc_switch(), "this Mac's left edge never led home")
                 duo.close()
 
-    def test_a_mac_that_has_learned_no_side_for_the_pc_has_no_way_home_however_it_is_pushed(self):
+    def test_a_mac_whose_one_machine_was_never_placed_leads_home_through_the_right_it_shows(self):
         duo = self.duo(side="")
         duo.link_pc_to_mac()
         duo.pc_drives("left", 0.5)
-        for edge in EDGES:
+        for edge in [edge for edge in EDGES if edge != "right"]:
             duo.pc_leans(MAC_EDGE_POINT[edge], *outward(edge), times=3)
             self.assertIsNone(duo.pc_switch(0.2), edge)
         self.assertTrue(duo.mac.receiving)
+        duo.pc_leans(MAC_EDGE_POINT["right"], *outward("right"), times=3)
+        self.assertIsNotNone(duo.pc_switch(), "the right edge the page shows never led home")
 
     def test_a_pc_this_mac_does_not_allow_to_drive_it_is_refused(self):
         duo = self.duo(allow_drive=False)
@@ -545,7 +548,9 @@ class MacDrivenTests(unittest.TestCase):
         self.assertTrue(wait_for(lambda: duo.pc_responder.responder.owner == duo.mac_id))
         # And while it drives, the PC cannot take it: one machine never drives and is driven at once.
         route = duo.pc_takes()
-        self.assertEqual(duo.pc.answer(route), (protocol.MSG_REFUSE, {"route": route, "why": "busy"}))
+        # The refusal names the machine this Mac drives, which is the PC itself here.
+        self.assertEqual(duo.pc.answer(route), (protocol.MSG_REFUSE, {"route": route, "why": "busy",
+                                                                       "other": protocol.id_text(HERE)}))
         self.assertTrue(duo.mac.redirecting)
 
 

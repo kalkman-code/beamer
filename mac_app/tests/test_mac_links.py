@@ -3,6 +3,7 @@ goes, what is sent to the machine it leaves and the one it takes, the pointer an
 way home, the key table on the way out, and the clipboard. The links themselves are
 core/tests/test_link.py's; the two ends together are test_mac_loopback.py's."""
 
+import logging
 import os
 import sys
 import threading
@@ -73,6 +74,13 @@ class RemovedLinksTests(Base):
         self.controller._sync_links()
         self.assertTrue(self.link.stopped)
         self.assertFalse(self.link.stop_waited)
+
+    def test_the_primary_link_moves_to_the_first_machine_still_in_use(self):
+        self.controller.book.data["peers"][0]["in_use"] = False
+        self.controller.book.data["peers"].append({**self.controller.book.peers()[0], "token": "second", "in_use": True})
+        self.controller._sync_links()
+        self.assertEqual(self.controller._primary_token, "second")
+        self.assertIsNotNone(self.controller._primary_link)
 
     def test_a_link_that_goes_down_after_its_machine_went_cannot_bring_input_back_or_report_up(self):
         self.up()
@@ -458,7 +466,14 @@ class ComingHomeTests(Base):
     def test_a_refusal_for_the_current_route_sends_input_home_with_the_reason(self):
         self.arrives(protocol.refuse_msg(1, "owned"))
         self.assertFalse(self.controller.redirecting)
-        self.assertEqual(self.alerts, ["Office PC is being driven from another machine"])
+        self.assertEqual(self.alerts, ["Can't cross to Office PC: another machine is driving it."])
+
+    def test_a_refusal_names_the_other_machine_that_owns_the_responder(self):
+        peer = dict(self.controller.book.data["peers"][0], id=protocol.id_text(OTHER_ID),
+                    token="second-peer", name="Desk-PC")
+        self.controller.book.data["peers"].append(peer)
+        self.arrives(protocol.refuse_msg(1, "owned", other=OTHER_ID))
+        self.assertEqual(self.alerts, ["Can't cross to Office PC: it is being driven from Desk-PC."])
 
     def test_a_refusal_for_an_old_route_is_ignored(self):
         self.arrives(protocol.accept_msg(1))
@@ -582,6 +597,8 @@ class AnnouncementTests(Base):
         with self.controller.book.lock:
             self.controller.book.data["peers"][0].update(side="left", side_set_at=7, id=self.peer)
             self.controller.book.data["peers"].append({**entry, "id": protocol.id_text(OTHER_ID), "token": "other", "send": False})
+            inactive_id = bytes([33]) * 16
+            self.controller.book.data["peers"].append({**entry, "id": protocol.id_text(inactive_id), "token": "inactive", "in_use": False})
         self.controller.announce = lambda: [protocol.settings_msg({"on": False, "set_at": 3, "by": ""})]
         self.up()
         types = self.link.types()
@@ -591,6 +608,13 @@ class AnnouncementTests(Base):
         self.assertEqual(paired["data"]["ids"], [protocol.id_text(OTHER_ID)])
         arrangement = next(m for m in self.link.posted if m["type"] == protocol.MSG_ARRANGEMENT)
         self.assertEqual((arrangement["data"]["edge"], arrangement["data"]["set_at"]), ("left", 7))
+
+    def test_the_available_pairing_ids_skip_machines_not_in_use(self):
+        entry = self.controller.book.peers()[0]
+        self.controller.book.data["peers"][0]["id"] = self.peer
+        inactive_id = protocol.id_text(bytes([33]) * 16)
+        self.controller.book.data["peers"].append({**entry, "id": inactive_id, "token": "inactive", "in_use": False})
+        self.assertEqual(self.controller._pairing_ids(), (self.peer,))
 
     def test_settings_are_not_announced_to_a_peer_that_does_not_keep_them(self):
         self.controller.announce = lambda: [protocol.settings_msg({"on": False, "set_at": 3, "by": ""})]
@@ -770,6 +794,136 @@ class GestureNamesTests(Base):
             self.controller._process_outbound(self.controller.outbound.get_nowait())
         keys = [m["data"]["key"] for m in self.link.sent if m["type"] in (protocol.MSG_KEYDOWN, protocol.MSG_KEYUP)]
         self.assertEqual(keys, ["ctrl", "ctrl"])
+
+
+
+
+class UnreachableWordsTests(Base):
+    def test_a_hand_over_refused_as_owned_says_so_rather_than_could_not_be_reached(self):
+        # Opus review: owned and busy left WHY_TEXT, so an onward refusal fell back to "could not be reached".
+        from core.owner import Unreachable
+        self.up()
+        self.controller._on_unreachable(Unreachable(self.peer, "owned", OTHER_ID))
+        self.assertEqual(self.alerts, ["Can't cross to Office PC: another machine is driving it."])
+
+
+class ItsOwnKeyboardTests(Base):
+    """beta.4 on 02-10-2026: the Mac's tap kept swallowing every key for nine minutes while its owner
+    said input was home, and the outbound worker dropped each one without a word. A Mac that thinks
+    it is redirecting never keeps its keyboard while its input is home."""
+
+    def tap(self, kind, keycode=0x00, character="a"):
+        event = {FakeQuartz.kCGKeyboardEventKeycode: keycode, FakeQuartz.kCGKeyboardEventAutorepeat: 0, "unicode": character}
+        return event, self.controller._event_tap_callback(None, kind, event, None)
+
+    def diverge(self):
+        """The state the Mac was found in: redirecting, with the owner at home."""
+        self.up()
+        self.controller._redirecting = True
+        self.assertFalse(self.controller.owner.away)
+
+    def test_a_key_while_the_owner_is_home_reaches_this_mac_and_the_state_is_put_right(self):
+        self.diverge()
+        event, returned = self.tap(FakeQuartz.kCGEventKeyDown)
+        self.assertIs(returned, event)
+        self.assertTrue(_wait(lambda: not self.controller.redirecting), "redirecting was never put right")
+        self.assertTrue(self.controller.outbound.empty())
+        # And the keyboard is this Mac's from then on.
+        event, returned = self.tap(FakeQuartz.kCGEventKeyUp)
+        self.assertIs(returned, event)
+
+    def test_the_tap_never_takes_a_lock_to_put_it_right(self):
+        self.diverge()
+        self.assertTrue(self.controller._owner_lock.acquire(timeout=1))
+        try:
+            started = time.monotonic()
+            event, returned = self.tap(FakeQuartz.kCGEventKeyDown)
+            self.assertIs(returned, event)
+            self.assertLess(time.monotonic() - started, 0.2, "the tap waited on the owner's lock")
+        finally:
+            self.controller._owner_lock.release()
+        self.assertTrue(_wait(lambda: not self.controller.redirecting))
+
+    def test_a_repair_that_finds_a_new_take_by_the_time_it_runs_leaves_it_alone(self):
+        # Sol's review: a repair queued in the gap of an ordinary return must not send a later take home.
+        self.diverge()
+        self.assertTrue(self.controller._owner_lock.acquire(timeout=1))
+        try:
+            self.tap(FakeQuartz.kCGEventKeyDown)
+            # The take that lands before the repair gets the lock.
+            self.controller.owner.on = self.peer
+        finally:
+            self.controller._owner_lock.release()
+        time.sleep(0.2)
+        self.assertTrue(self.controller.redirecting)
+        self.assertEqual(self.controller.owner.on, self.peer)
+
+    def test_the_tap_returns_the_key_even_while_logging_is_stuck(self):
+        self.diverge()
+        stuck = threading.Event()
+
+        class Stuck(logging.Handler):
+            def emit(self, record):
+                stuck.wait(3)
+
+        handler = Stuck()
+        self.controller.logger.addHandler(handler)
+        try:
+            started = time.monotonic()
+            event, returned = self.tap(FakeQuartz.kCGEventKeyDown)
+            self.assertIs(returned, event)
+            self.assertLess(time.monotonic() - started, 0.2, "the tap waited on the log")
+        finally:
+            stuck.set()
+            self.controller.logger.removeHandler(handler)
+        self.assertTrue(_wait(lambda: not self.controller.redirecting))
+
+    def test_input_that_reaches_the_worker_after_the_owner_came_home_puts_it_right_rather_than_vanishing(self):
+        self.diverge()
+        self.controller._process_outbound({"type": protocol.MSG_KEYDOWN, "data": {"key": "a"}})
+        self.assertTrue(_wait(lambda: not self.controller.redirecting), "the worker dropped the key and left the tap swallowing")
+
+    def test_the_disagreement_is_logged_once_with_every_threads_stack(self):
+        self.diverge()
+        with self.assertLogs(self.controller.logger, level="ERROR") as said:
+            self.tap(FakeQuartz.kCGEventKeyDown)
+            self.controller._redirecting = True
+            self.tap(FakeQuartz.kCGEventKeyDown)
+            self.assertTrue(_wait(lambda: not self.controller.redirecting))
+        disagreements = [line for line in said.output if "redirecting while the owner says input is home" in line]
+        self.assertEqual(len(disagreements), 1, said.output)
+        self.assertIn("Thread", disagreements[0])
+
+    def test_every_change_of_redirecting_and_every_move_applied_is_logged_with_its_thread(self):
+        self.up()
+        with self.assertLogs(self.controller.logger, level="INFO") as said:
+            self.controller.set_redirecting(True)
+            self.controller.set_redirecting(False)
+        here = threading.current_thread().name
+        changes = [line for line in said.output if "redirecting False -> True" in line or "redirecting True -> False" in line]
+        moves = [line for line in said.output if "move applied:" in line]
+        self.assertEqual(len(changes), 2, said.output)
+        self.assertGreaterEqual(len(moves), 2, said.output)
+        self.assertTrue(all(here in line for line in changes + moves), said.output)
+
+    def test_a_take_racing_a_hand_over_from_the_link_never_leaves_the_two_views_apart(self):
+        # The 12:29:36 to 12:29:38 race: input moved on by the peer's switch on a link thread while
+        # this Mac's tap took the same peer again.
+        self.up()
+        for _ in range(200):
+            self.controller.set_redirecting(True)
+            route = self.controller.owner.route
+            switch = threading.Thread(target=self.link.arrives, daemon=True, args=(
+                self.controller, protocol.switch_v6(route, protocol.read_id(self.own), "right", 0.5)))
+            take = threading.Thread(target=self.controller.set_redirecting, args=(True,), daemon=True)
+            switch.start()
+            take.start()
+            switch.join(2)
+            take.join(2)
+            settle(self.controller)
+            self.assertEqual(self.controller.redirecting, self.controller.owner.away)
+            self.controller.set_redirecting(False)
+            self.assertFalse(self.controller.redirecting or self.controller.owner.away)
 
 
 if __name__ == "__main__":

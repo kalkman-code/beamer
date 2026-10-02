@@ -198,10 +198,14 @@ class DirectionAndRemovalTests(Base):
     def test_each_switch_hands_the_handler_its_machine_and_one_change(self):
         self.panel.refresh()
         row = self.rows()[0]
+        self.assertEqual(len([view for view in self.descend(row)
+                              if view.accessibilityRole() == AppKit.NSAccessibilityCheckBoxRole]), 1)
+        self.panel._toggle_directions(PAIRED_TOKEN)
+        row = self.rows()[0]
         switches = [view for view in self.descend(row) if view.accessibilityRole() == AppKit.NSAccessibilityCheckBoxRole]
-        self.assertEqual(len(switches), 2)
-        switches[0].callback()
+        self.assertEqual(len(switches), 3)
         switches[1].callback()
+        switches[2].callback()
         token = PAIRED_TOKEN
         self.assertEqual([call[0] for call in self.directions], [token, token])
         self.assertEqual({tuple(call[1]) for call in self.directions}, {("send",), ("allow_drive",)})
@@ -274,6 +278,7 @@ class FocusTests(Base):
 
     def test_a_rebuild_keeps_focus_on_the_same_switch(self):
         self.panel.refresh()
+        self.panel._toggle_directions(PAIRED_TOKEN)
         self.focus((PAIRED_TOKEN, "drives"))
         self.panel.invalidate()
         self.panel.refresh()
@@ -281,6 +286,7 @@ class FocusTests(Base):
 
     def test_asking_to_remove_puts_focus_on_keep_and_keeping_puts_it_back_on_remove(self):
         self.panel.refresh()
+        self.panel._toggle_directions(PAIRED_TOKEN)
         self.focus((PAIRED_TOKEN, "remove"))
         self.panel._ask_to_remove(PAIRED_TOKEN)
         self.assertEqual(self.focused(), (PAIRED_TOKEN, "keep"))
@@ -297,6 +303,7 @@ class FocusTests(Base):
     def test_a_removed_machines_focus_is_not_chased(self):
         self.pair(FIRST, SECOND_TOKEN, "Laptop")
         self.panel.refresh()
+        self.panel._toggle_directions(SECOND_TOKEN)
         self.focus((SECOND_TOKEN, "drives"))
         self.panel._remove(SECOND_TOKEN)
         self.panel.refresh()
@@ -561,6 +568,50 @@ class EnteringACodeTests(Base):
         self.panel._heard_key = None
         self.panel.refresh()
         self.assertIn("cannot look for machines: address already in use", self.panel.heard_empty.text)
+
+
+class CodeBoxCentringTests(Base):
+    """beta.4 on Toby's Mac: each typed digit sat left of the middle of its box. Measured on the real
+    window's boxes, drawn offscreen at the 773-point width it had, never put on screen."""
+
+    def ink_offsets(self):
+        window = self.window.window
+        window.setContentSize_((773, window.frame().size.height))
+        boxes = self.panel.code_boxes
+        boxes.focus(window)
+        for digit in "408819":
+            window.firstResponder().insertText_(digit)
+        self.assertEqual(boxes.value, "408819")
+        window.contentView().layoutSubtreeIfNeeded()
+        view = boxes.view
+        bounds = view.bounds()
+        picture = view.bitmapImageRepForCachingDisplayInRect_(bounds)
+        view.cacheDisplayInRect_toBitmapImageRep_(bounds, picture)
+        scale = picture.pixelsWide() / bounds.size.width
+
+        def level(x, y):
+            colour = picture.colorAtX_y_(x, y).colorUsingColorSpace_(AppKit.NSColorSpace.sRGBColorSpace())
+            return colour.redComponent() + colour.greenComponent() + colour.blueComponent()
+
+        offsets = []
+        rows = range(int(4 * scale), int((bounds.size.height - 4) * scale), 2)
+        for control in boxes.fields:
+            box = control.superview()
+            frame = box.convertRect_toView_(box.bounds(), view)
+            # Inside the box's border and corner, on its own ground.
+            first, last = int((frame.origin.x + 4) * scale), int((frame.origin.x + frame.size.width - 4) * scale)
+            ground = level(first, int(bounds.size.height * scale / 2))
+            inked = [x for x in range(first, last) if any(abs(level(x, y) - ground) > 0.6 for y in rows)]
+            self.assertTrue(inked, "no digit drawn in a box")
+            ink = (inked[0] + inked[-1] + 1) / 2 / scale
+            offsets.append(round(ink - (frame.origin.x + frame.size.width / 2), 2))
+        return offsets
+
+    def test_each_typed_digit_sits_in_the_middle_of_its_box(self):
+        self.panel._toggle_sheet()
+        self.panel.refresh()
+        for offset in self.ink_offsets():
+            self.assertLessEqual(abs(offset), 0.3, f"digits sit off the middle of their boxes: {self.ink_offsets()}")
 
 
 class TrayTests(Base):

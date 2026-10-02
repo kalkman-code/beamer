@@ -22,7 +22,7 @@ import motion
 import qr
 import theme
 import widgets
-from core import pairing, peerlist, protocol
+from core import pairing, peerlist, protocol, ways as core_ways
 
 QR_SIDE = 176
 CODE_GROUP = 3
@@ -53,6 +53,7 @@ class MachinesPanel:
         self.wide = True
         self._targets = []
         self._rows_key = None
+        self.directions_open = set()
         self._heard_key = None
         self._heard = []
         self._showing = False
@@ -207,8 +208,10 @@ class MachinesPanel:
         # Not the sentence under each state: a link that is still trying changes it every attempt,
         # and a rebuild takes keyboard and VoiceOver focus off whatever it was on.
         key = (hide, self.removing, self.wide, tuple(
-            (r.token, r.label, r.platform, r.address, r.state.key, r.state.word, r.state.tone, r.state.led, r.drives, r.driven)
+            (r.token, r.label, r.platform, r.address, r.state.key, r.state.word, r.state.tone, r.state.led,
+             r.in_use, r.drives, r.driven)
             for r in rows))
+        key += (tuple(sorted(self.directions_open)),)
         if key != self._rows_key:
             self._rows_key = key
             self._build_rows(rows)
@@ -277,13 +280,20 @@ class MachinesPanel:
             place.addArrangedSubview_(remove)
         widgets.add(body, place)
         widgets.add(body, widgets.note(self._shown(state.detail)).view)
+        in_use = widgets.Switch("In use", on_change=lambda on, t=row.token: self._direction(t, in_use=on))
+        in_use.value = row.in_use
+        in_use.view.focus_id = (row.token, "in_use")
         drives = widgets.Switch("This Mac drives it", on_change=lambda on, t=row.token: self._direction(t, send=on))
         drives.value = row.drives
         drives.view.focus_id = (row.token, "drives")
         driven = widgets.Switch("It drives this Mac", on_change=lambda on, t=row.token: self._direction(t, allow_drive=on))
         driven.value = row.driven
         driven.view.focus_id = (row.token, "driven")
-        widgets.add(body, self._controls(row, drives, driven, remove))
+        opened = row.token in self.directions_open
+        disclosure = self._chip("Hide directions" if opened else "Directions", lambda t=row.token: self._toggle_directions(t),
+                                f"{'Hide' if opened else 'Show'} directions for {label}",
+                                (row.token, "directions"))
+        widgets.add(body, self._controls(row, in_use, disclosure, drives, driven, remove))
         frame.addSubview_(body)
         widgets.pin(body, frame, (10, 12, 10, 12))
         return frame
@@ -297,21 +307,35 @@ class MachinesPanel:
         widgets.pin(word.view, chip, (6, 12, 6, 12))
         return chip
 
-    def _controls(self, row, drives, driven, remove):
-        """The two switches, and the way to remove them on the same line while there is room."""
+    def _controls(self, row, in_use, disclosure, drives, driven, remove):
+        """The machine switch leads; its two direction switches stay under their disclosure."""
         if self.removing == row.token:
             column = widgets.stack(spacing=6)
-            for view in (drives.view, driven.view, remove):
+            for view in (remove,):
                 widgets.add(column, view)
             return column
-        line = widgets.stack(vertical=False, spacing=24)
-        for view in (drives.view, driven.view):
-            line.addArrangedSubview_(view)
-            widgets.hug(view, AppKit.NSLayoutPriorityRequired)
+        line = widgets.stack(vertical=False, spacing=16)
+        line.addArrangedSubview_(widgets.hug(in_use.view, AppKit.NSLayoutPriorityRequired))
         line.addArrangedSubview_(widgets.hug(widgets.box(), AppKit.NSLayoutPriorityDefaultLow))
+        line.addArrangedSubview_(disclosure)
         if self.wide:
             line.addArrangedSubview_(remove)
-        return line
+        column = widgets.stack(spacing=4)
+        column.addArrangedSubview_(line)
+        if row.token in self.directions_open:
+            directions = widgets.stack(vertical=False, spacing=24)
+            for view in (drives.view, driven.view):
+                directions.addArrangedSubview_(view)
+                widgets.hug(view, AppKit.NSLayoutPriorityRequired)
+            column.addArrangedSubview_(directions)
+        return column
+
+    def _toggle_directions(self, token):
+        if token in self.directions_open:
+            self.directions_open.remove(token)
+        else:
+            self.directions_open.add(token)
+        self.refresh()
 
     def _removal(self, row):
         label = self._shown(row.label)
@@ -337,6 +361,7 @@ class MachinesPanel:
 
     def _remove(self, token):
         self.removing = None
+        before = core_ways.way_back_state(self.settings_store.current())
         try:
             removed = self.settings_store.remove_peer(token)
         except Exception as exc:
@@ -347,6 +372,10 @@ class MachinesPanel:
         if removed is not None:
             self.logger.info("removed %s", removed.get("name") or "a machine")
         self.owner.peers_changed()
+        after = core_ways.way_back_state(self.settings_store.current())
+        changed_peers = [peer for peer, state in after.items() if before.get(peer) != state]
+        for peer in changed_peers:
+            self.owner._tell(peer)
 
     def _direction(self, token, **change):
         handler = self.owner.direction_handler

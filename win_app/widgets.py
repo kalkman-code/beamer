@@ -24,6 +24,7 @@ from PySide6.QtWidgets import (
 import motion
 import theme
 import tokens
+from core import ways as core_ways
 
 LEFT_CTRL_VK = 0xA2
 # The smallest a Segmented cell or small button is drawn, so each is a fair target.
@@ -561,6 +562,101 @@ class InputRecorder(QPushButton):
             self.cancel()
             self.on_record("button", name)
             return True
+        return False
+
+
+class JumpKeyRecorder(QPushButton):
+    """Records a modifier chord and keeps its local spelling for one peer."""
+
+    def __init__(self, on_record, on_arm=None, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.on_record = on_record
+        self.on_arm = on_arm
+        self.value = ""
+        self.armed = False
+        self.setProperty("vernier", "keycap")
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setFixedHeight(42)
+        row = QHBoxLayout(self)
+        row.setContentsMargins(12, 0, 12, 0)
+        row.setSpacing(10)
+        self.key = label("Choose a key combination", "keycap")
+        self.hint = label("Click, then press a key combination", "small")
+        self.key.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        self.hint.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        row.addWidget(self.key, 1)
+        row.addWidget(self.hint, 0, Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        self.clicked.connect(self._toggle)
+        self._names = {"ctrl": "Win", "cmd": "Ctrl", "alt": "Alt", "shift": "Shift"}
+
+    def set_value(self, value: str) -> None:
+        self.value = value or ""
+        shown = " ".join(self._names.get(part, part.upper() if len(part) == 1 else part.replace("_", " ").title())
+                         for part in self.value.split("+")) if self.value else "Choose a key combination"
+        self.setAccessibleName(f"Jump straight here key, {shown}")
+        if not self.armed:
+            self.key.setText(shown)
+
+    def cancel(self) -> None:
+        if not self.armed:
+            return
+        self.armed = False
+        QApplication.instance().removeEventFilter(self)
+        if self.on_arm is not None:
+            self.on_arm(False)
+        self.set_value(self.value)
+        set_role(self.key, "keycap")
+        self.hint.setText("Click, then press a key combination")
+        set_role(self, "keycap")
+
+    def _toggle(self) -> None:
+        if self.armed:
+            self.cancel()
+            return
+        self.armed = True
+        self.key.setText("Press a key combination…")
+        set_role(self.key, "keycap-live")
+        self.hint.setText("Click again to cancel")
+        set_role(self, "keycap-live")
+        QApplication.instance().installEventFilter(self)
+        if self.on_arm is not None:
+            self.on_arm(True)
+
+    def eventFilter(self, watched, event) -> bool:
+        if not self.armed:
+            return False
+        if event.type() == QEvent.Type.KeyPress:
+            modifiers = event.modifiers()
+            held = []
+            for flag, name in ((Qt.KeyboardModifier.ControlModifier, "cmd"),
+                               (Qt.KeyboardModifier.AltModifier, "alt"),
+                               (Qt.KeyboardModifier.ShiftModifier, "shift"),
+                               (Qt.KeyboardModifier.MetaModifier, "ctrl")):
+                if modifiers & flag:
+                    held.append(name)
+            key = event.text().lower()
+            if not key or len(key) != 1 or not key.isprintable() or key == " ":
+                value = event.key()
+                key = next((f"f{i}" for i in range(1, 25) if value == getattr(Qt.Key, f"Key_F{i}")), "")
+                names = {Qt.Key.Key_Backspace: "backspace", Qt.Key.Key_Delete: "delete", Qt.Key.Key_Left: "left",
+                         Qt.Key.Key_Right: "right", Qt.Key.Key_Up: "up", Qt.Key.Key_Down: "down",
+                         Qt.Key.Key_Home: "home", Qt.Key.Key_End: "end", Qt.Key.Key_PageUp: "page_up",
+                         Qt.Key.Key_PageDown: "page_down", Qt.Key.Key_Insert: "insert", Qt.Key.Key_Tab: "tab",
+                         Qt.Key.Key_Return: "enter", Qt.Key.Key_Enter: "enter", Qt.Key.Key_Escape: "esc",
+                         Qt.Key.Key_Space: "space"}
+                key = key or names.get(value, "")
+            chord = core_ways.jump_chord(held, key)
+            if chord:
+                self.cancel()
+                self.set_value(chord)
+                self.on_record(chord)
+            return True
+        if event.type() == QEvent.Type.KeyRelease:
+            return True
+        if event.type() == QEvent.Type.MouseButtonPress:
+            inside = isinstance(watched, QWidget) and (watched is self or self.isAncestorOf(watched))
+            self.cancel()
+            return inside
         return False
 
 

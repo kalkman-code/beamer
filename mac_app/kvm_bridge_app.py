@@ -44,6 +44,7 @@ from key_codes import KEY_NAME_TO_CODE
 import link_state
 import machines_panel
 import login_item
+import notices
 import pages
 from core import updates
 from core import protocol
@@ -1123,6 +1124,7 @@ class ControlWindow(AppKit.NSObject):
         # another page.
         if key != "crossing":
             self.key_recorder.cancel()
+            self.jump_recorder.cancel()
         if key != "keyboard":
             self.ignored_recorder.cancel()
         self._run_previews()
@@ -1330,12 +1332,13 @@ class ControlWindow(AppKit.NSObject):
     @objc.python_method
     def _load_ways(self, flat=None):
         """The chosen machine's ways into the page's controls, from the settings (core/ways.py);
-        with nothing paired, from `flat`, the crossing settings as 1.4.x kept them. A chosen machine
-        no longer paired gives way to the first."""
+        with nothing active, from `flat`, the crossing settings as 1.4.x kept them. A chosen machine
+        no longer paired or in use gives way to the first active machine."""
         settings = self.settings_store.current()
         peers = settings["peers"]
-        if self.chosen_peer not in {entry["id"] for entry in peers}:
-            self.chosen_peer = peers[0]["id"] if peers else None
+        available = [entry for entry in peers if entry.get("in_use", True) is True]
+        if self.chosen_peer not in {entry["id"] for entry in available}:
+            self.chosen_peer = available[0]["id"] if available else None
         if self.chosen_peer is None:
             flat = flat or self.controller.cfg.crossing
             held = {"side": flat["edge"], "methods": flat["methods"], "parts": flat["edge_parts"], "corner": flat["corner"]}
@@ -1355,12 +1358,14 @@ class ControlWindow(AppKit.NSObject):
         machines or their names change, and the words on the page that name the chosen one."""
         settings = self.settings_store.current()
         peers = settings["peers"]
-        if self.chosen_peer not in {entry["id"] for entry in peers} and (peers or self.chosen_peer is not None):
+        available = [entry for entry in peers if entry.get("in_use", True) is True]
+        if self.chosen_peer not in {entry["id"] for entry in available} and (available or self.chosen_peer is not None):
             self._load_ways()
             self._reflect()
             return
         labels = peerlist.labels(peers)
-        choices = [(entry["id"], self._shown(labels[entry["token"]])) for entry in peers]
+        choices = [(entry["id"], self._shown(labels[entry["token"]])) for entry in peers
+                   if entry.get("in_use", True) is True]
         several = len(choices) > 1
         if choices != self._picker_choices:
             self._picker_choices = choices
@@ -1381,12 +1386,59 @@ class ControlWindow(AppKit.NSObject):
             self.edge_select.view.setAccessibilityLabel_(caption)
         self.edge_note.set(pages.notch_or_corner_note(label))
         chosen = self.chosen_peer
+        offer = core_ways.share_offer(settings, chosen) if chosen else None
+        holders = [self._shown(peerlist.label_for(peers, peer_id=peer) or peerlist.UNNAMED)
+                   for peer in offer["holders"]] if offer else []
+        identity = (offer["side"], tuple(offer["holders"]), tuple(offer["thirds"].items())) if offer else None
+        if identity != getattr(self, "_share_identity", None):
+            self._share_identity = identity
+            self.share_thirds = dict(offer["thirds"]) if offer else {}
+        motion.set_hidden(self.share_box, offer is None)
+        if offer:
+            side = offer["side"]
+            self.share_title.set(f"Share the {side} edge")
+            self.share_sentence.set(pages.share_sentence(holders, side, self._chosen_label()))
+            self.share_button.set_title(f"Share the {side} edge")
+            self.share_recipients = [chosen, *offer["holders"]]
+            for part, tile in self.share_tiles.items():
+                tile.name.set(pages.part_names(side)[part])
+                owner = self.share_thirds[part]
+                tile.set_detail(self._shown(peerlist.label_for(peers, peer_id=owner) or peerlist.UNNAMED))
+                tile.value = owner == chosen
+            self.share_button.set_enabled(chosen in self.share_thirds.values())
         for note, sentence in (
-                (self.blocked_note, core_ways.blocked_sentence(settings, chosen, "this Mac") if chosen else ""),
+                (self.blocked_note, core_ways.blocked_sentence(settings, chosen, "this Mac") if chosen and not offer else ""),
                 (self.missing_note, core_ways.missing_sentence(settings, chosen, "this Mac") if chosen else ""),
                 (self.no_way_back_note, core_ways.no_way_back_sentence(settings, chosen) if chosen else "")):
             note.set(self._shown(sentence))
             motion.set_hidden(note.view, not sentence)
+
+        self._show_jump_key()
+
+    @objc.python_method
+    def _share_third(self, part):
+        """Move one offered third to the next machine without writing until Share is pressed."""
+        recipients = self.share_recipients
+        current = recipients.index(self.share_thirds[part])
+        self.share_thirds[part] = recipients[(current + 1) % len(recipients)]
+        self._show_machines()
+
+    @objc.python_method
+    def _share_side(self):
+        """Apply the proposed split, rebuild the live zones and tell every affected machine."""
+        side, thirds = self._share_identity[0], dict(self.share_thirds)
+        try:
+            changed = self.settings_store.share_side(side, thirds)
+            cfg = self.settings_store.load()
+        except (SettingsError, ValueError):
+            self.logger.exception("The shared side could not be saved")
+            return
+        self.controller.cfg = cfg
+        self.controller.zones_changed()
+        for peer in changed:
+            self._tell(peer)
+        self._load_ways()
+        self._reflect()
 
     @objc.python_method
     def _machine_picked(self, peer):
@@ -1592,6 +1644,7 @@ class ControlWindow(AppKit.NSObject):
 
     def windowWillClose_(self, _notification):
         self.key_recorder.cancel()
+        self.jump_recorder.cancel()
         self.ignored_recorder.cancel()
         # A code that stays up with nobody watching would still accept a pairing.
         self.panel.stop_showing()
@@ -2104,6 +2157,24 @@ class ControlWindow(AppKit.NSObject):
         )
         self.edge_row, self.edge_caption = widgets.field_row(pages.where_caption(None), self.edge_select.view)
         module.add(self.edge_row)
+        # A group within Ways, never a panel of its own: a panel inside a panel also forced the
+        # window's layout and squeezed the pairing sheet's code boxes to 28 pt.
+        self.share_box = widgets.stack(spacing=8)
+        self.share_title = widgets.Label("Share the edge", theme.TYPE["eyebrow"], 700, "ink_3",
+                                         tracking=theme.TRACKING["eyebrow"], upper=True)
+        widgets.add(self.share_box, self.share_title.view)
+        self.share_sentence = widgets.note()
+        widgets.add(self.share_box, self.share_sentence.view)
+        self.share_thirds = {}
+        self.share_tiles = {
+            part: widgets.WayTile(pages.part_names("right")[part], on_change=lambda _on, part=part:
+                                  self._share_third(part)) for part in return_edge.PARTS
+        }
+        widgets.add(self.share_box, widgets.grid([tile.view for tile in self.share_tiles.values()], 3))
+        self.share_button = widgets.action_button("Share the right edge", self._share_side, style="primary")
+        self.share_box.addArrangedSubview_(self.share_button.view)
+        self.share_box.setHidden_(True)
+        module.add(self.share_box)
         self.edge_note = widgets.note(pages.notch_or_corner_note(None))
         self.edge_note.view.setHidden_(True)
         module.add(self.edge_note.view)
@@ -2136,7 +2207,55 @@ class ControlWindow(AppKit.NSObject):
             module.add(note.view)
         self.dragging_box = widgets.Switch("Don't cross while dragging", on_change=self._changed)
         module.add(self.dragging_box.view)
+        self.jump_box = widgets.stack(spacing=8)
+        widgets.add(self.jump_box, widgets.eyebrow("Jump straight here"))
+        self.jump_recorder = widgets.JumpKeyRecorder(on_change=self._record_jump_key, on_arm=self._jump_arming)
+        jump_controls = widgets.stack(vertical=False, spacing=8)
+        jump_controls.addArrangedSubview_(self.jump_recorder.view)
+        self.jump_clear = widgets.Button("Clear", self, "clearJumpKey:", scale="small")
+        jump_controls.addArrangedSubview_(self.jump_clear.view)
+        widgets.add(self.jump_box, jump_controls)
+        self.jump_note = widgets.note()
+        widgets.add(self.jump_box, self.jump_note.view)
+        module.add(self.jump_box)
+        module.body.setCustomSpacing_afterView_(18, self.dragging_box.view)
         return module
+
+    @objc.python_method
+    def _show_jump_key(self):
+        peers = self.settings_store.current()["peers"]
+        entry = next((peer for peer in peers if peer.get("id") == self.chosen_peer), None)
+        self.jump_box.setHidden_(entry is None)
+        if entry is None:
+            self.jump_recorder.cancel()
+            return
+        self.jump_recorder.set_value(entry.get("jump_key", ""))
+        name = self._shown(peerlist.label_for(peers, peer_id=self.chosen_peer) or "this machine")
+        self.jump_note.set(f"sends input to {name}")
+        self.jump_clear.view.setAccessibilityLabel_(f"Clear jump key for {name}")
+
+    @objc.python_method
+    def _jump_arming(self, armed):
+        self.controller.jump_recording = armed
+
+    @objc.python_method
+    def _record_jump_key(self, value):
+        self._save_jump_key(value)
+
+    @objc.python_method
+    def _save_jump_key(self, value):
+        try:
+            self.settings_store.set_jump_key(self.chosen_peer, value, self.controller.cfg.trigger_key)
+        except SettingsError as exc:
+            peer = next((peer for peer in self.settings_store.current()["peers"] if peer.get("id") == self.chosen_peer), None)
+            if peer is not None:
+                self.jump_recorder.set_value(peer.get("jump_key", ""))
+            self.jump_note.set(str(exc), ink="amber")
+            return
+        self._show_jump_key()
+
+    def clearJumpKey_(self, _sender):
+        self._save_jump_key("")
 
     @objc.python_method
     def _way_toggled(self, way, on):
@@ -2732,24 +2851,31 @@ class ControlWindow(AppKit.NSObject):
     @objc.python_method
     def _write_ways(self):
         """The chosen machine's side and zones from the page's controls (core/ways.py), the engine
-        built again from them, and a side that moved, or a way there that opened or closed, sent to
-        that machine (`_tell`). False, with the store's sentence said and the controls back at what is
-        saved, when the store refuses them."""
+        built again from them, and every machine whose way back changed told, along with the chosen
+        machine when its side or way changed. False, with the store's sentence said and the controls
+        back at what is saved, when the store refuses them."""
         peer = self.chosen_peer
         current = self.settings_store.current()
         if peer not in {entry["id"] for entry in current["peers"]}:
             # None chosen, or one removed while its change waited: nothing of its to write.
             return True
         side = self.edge_select.value or ""
+        methods = [name for name in core_ways.KIND_WORDS if self.method_boxes[name].value]
+        parts = [name for name, tile in self.part_boxes.items() if tile.value] or ["middle"]
+        offer = core_ways.share_offer(current, peer)
+        occupied = {part for part, owner in offer["thirds"].items() if owner in offer["holders"]} if offer else set()
+        if offer and side == offer["side"] and (
+                "edge" in methods or "part" in methods and occupied.intersection(parts)):
+            self._load_ways()
+            self._reflect()
+            self.window.makeFirstResponder_(self.share_button.view)
+            return False
+        before = core_ways.way_back_state(current)
         had_way = core_ways.has_way(current, peer)
-        # Right is shown for one machine not placed yet, and cannot be picked again while shown: written
-        # unstamped, so it crosses here and a side either machine does choose wins over it.
-        default = not core_ways.ways(current, peer)["side"] and side == pages.shown_side("", len(current["peers"]))
         try:
             moved = self.settings_store.set_ways(
-                peer, side=side, default=default, corner=self.corner_select.value,
-                methods=[name for name in core_ways.KIND_WORDS if self.method_boxes[name].value],
-                parts=[name for name, tile in self.part_boxes.items() if tile.value] or ["middle"])
+                peer, side=side, corner=self.corner_select.value,
+                methods=methods, parts=parts)
             cfg = self.settings_store.load()
         except SettingsError as exc:
             self._say(str(exc), "fault")
@@ -2764,8 +2890,13 @@ class ControlWindow(AppKit.NSObject):
             # A side moved onto another machine's turns this machine's ways there off: show what was kept.
             self._load_ways()
             self._reflect()
-        if moved or core_ways.has_way(self.settings_store.current(), peer) != had_way:
-            self._tell(peer)
+        updated = self.settings_store.current()
+        changed_peers = [target for target, state in core_ways.way_back_state(updated).items()
+                         if before.get(target) != state]
+        if moved or core_ways.has_way(updated, peer) != had_way:
+            changed_peers.append(peer)
+        for target in dict.fromkeys(changed_peers):
+            self._tell(target)
         return True
 
     @objc.python_method
@@ -2780,7 +2911,7 @@ class ControlWindow(AppKit.NSObject):
             self.windows_input.send_arrangement(peer, side, at, by)
 
     @objc.python_method
-    def apply_arrangement(self, peer, edge, set_at, by, way_back=None):
+    def apply_arrangement(self, peer, edge, set_at, by, way_back=None, way_back_by=None):
         """A machine changed which of its edges faces this Mac (`edge` is its own). Applied here
         rather than at either link, because this is the side that owns the settings file; kept only
         when newer than the side held for that machine, a tie going to the larger `by` (WIRE.md
@@ -2791,8 +2922,9 @@ class ControlWindow(AppKit.NSObject):
         # A change still waiting out the pause is written first: the page reloads from the
         # settings below, which would otherwise drop it.
         self._flush()
+        before = core_ways.way_back_state(self.settings_store.current())
         try:
-            changed, notices = self.settings_store.arrangement(peer, edge, set_at, by, way_back)
+            changed, notices = self.settings_store.arrangement(peer, edge, set_at, by, way_back, way_back_by)
             cfg = self.settings_store.load() if changed else None
         except (SettingsError, TypeError, ValueError):
             self.logger.exception("could not save the arrangement %s sent", peer)
@@ -2806,7 +2938,10 @@ class ControlWindow(AppKit.NSObject):
         self.logger.info("%s's arrangement: this Mac's %s edge", peer, crossing.OPPOSITE[edge])
         self._load(config_to_raw(cfg))
         self.refresh()
-        self._tell(peer)
+        changed_peers = [target for target, state in core_ways.way_back_state(self.settings_store.current()).items()
+                         if before.get(target) != state]
+        for target in dict.fromkeys([*changed_peers, peer]):
+            self._tell(target)
 
     def quitApp_(self, _sender):
         self.quit_handler()
@@ -3047,6 +3182,7 @@ class _LaunchWatch(AppKit.NSObject):
         return self
 
     def launched_(self, note):
+        self.tray.notices.ask()
         info = note.userInfo() or {}
         default = info.get("NSApplicationLaunchIsDefaultLaunchKey")
         if default is not None and not bool(default):
@@ -3056,6 +3192,7 @@ class _LaunchWatch(AppKit.NSObject):
 class TrayApp(rumps.App):
     def __init__(self, controller, settings_store, logger, hidden=False):
         self.hidden = hidden
+        self.notices = notices.Notices(logger)
         self.launch_watch = _LaunchWatch.alloc().initWithTray_(self)
         self.controller = controller
         self.settings_store = settings_store
@@ -3186,10 +3323,10 @@ class TrayApp(rumps.App):
     def _settings(self, data, peer=None):
         AppHelper.callAfter(self.control_window.apply_same, data, peer)
 
-    def _arrangement(self, peer, edge, set_at, by, way_back=None):
+    def _arrangement(self, peer, edge, set_at, by, way_back=None, way_back_by=None):
         """An arrangement from a machine, over either link, applied on the main
         thread -- it writes the settings file and redraws the window."""
-        AppHelper.callAfter(self.control_window.apply_arrangement, peer, edge, set_at, by, way_back)
+        AppHelper.callAfter(self.control_window.apply_arrangement, peer, edge, set_at, by, way_back, way_back_by)
 
     def show_on_startup(self, _timer):
         self.startup_timer.stop()
@@ -3318,7 +3455,7 @@ class TrayApp(rumps.App):
         self._switch([peer["token"] for peer in peers], allow_drive=not all(peer.get("allow_drive") is True for peer in peers))
 
     def _set_direction(self, token, **change):
-        """One machine's switch from its row on Overview: `send=` or `allow_drive=`."""
+        """One machine's switch from its row on Overview."""
         self._switch([token], **change)
 
     def _switch(self, tokens, **change):
@@ -3337,7 +3474,8 @@ class TrayApp(rumps.App):
             self.control_window.panel.invalidate()
             self.control_window.peers_changed()
             return
-        if change.get("send") is False and any(entry.get("id") == controller.owner.on for entry in entries):
+        if ((change.get("send") is False or change.get("in_use") is False)
+                and any(entry.get("id") == controller.owner.on for entry in entries)):
             # Input comes home by this switch, and shows where the pointer is as any switch does.
             controller.set_redirecting(False)
         self.control_window.peers_changed()
@@ -3494,7 +3632,7 @@ class TrayApp(rumps.App):
         except Exception:
             self.logger.exception("failed to beep for a user alert")
         try:
-            rumps.notification("Beamer", title, pages.redact(message, self.controller.cfg.hide_addresses))
+            self.notices.post(title, pages.redact(message, self.controller.cfg.hide_addresses))
         except Exception:
             self.logger.exception("failed to show a user notification")
 

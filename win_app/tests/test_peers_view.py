@@ -28,6 +28,10 @@ def state(peer=None, **link):
 
 
 class DescribeTest(unittest.TestCase):
+    def test_a_machine_not_in_use_shows_its_own_status(self):
+        found = state(entry(in_use=False), up=True)
+        self.assertEqual((found.tone, found.word), ("amber", "NOT IN USE"))
+
     def test_a_peer_whose_input_is_on_this_pc_is_driving_it(self):
         found = state(up=True, driving=True)
         self.assertEqual((found.word, found.tone), ("Driving this PC", "signal"))

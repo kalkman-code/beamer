@@ -151,6 +151,16 @@ def parts_phrase(edge, parts):
     return f"the {joined} of the {edge} edge"
 
 
+def share_sentence(holders, side, name):
+    """Name the machines already using the side the chosen machine wants."""
+    names = holders[0] if len(holders) == 1 else ", ".join(holders[:-1]) + " and " + holders[-1]
+    verb = "crosses" if len(holders) == 1 else "cross"
+    # The sentence says what picking a third means: it goes to `name`.
+    keep = f"stay with {holders[0]}" if len(holders) == 1 else "stay where they are"
+    return (f"{names} already {verb} from the {side} edge of this Mac. The thirds you pick go to {name}; "
+            f"the rest {keep}.")
+
+
 # The ways in, in the Crossing page's order.
 WAYS = ("shortcut", "edge", "part", "corner", "notch")
 _EXCLUSIVE = {"edge": "part", "part": "edge"}
@@ -304,7 +314,8 @@ def send_items(peers, on, hide):
     for each machine this Mac sends to, "Bring input back" on the one input is on (`on`). [] with
     one or none, where the one Send input item stands as it always has."""
     labels = peerlist.labels(peers)
-    targets = [entry for entry in peers if entry.get("id") and entry.get("send") is True and entry.get("port") != 0]
+    targets = [entry for entry in peers if entry.get("id") and entry.get("in_use", True) is True
+               and entry.get("send") is True and entry.get("port") != 0]
     if len(targets) < 2:
         return []
     return [(entry["id"], "Bring input back" if entry["id"] == on else redact(f"Send input to {labels[entry['token']]}", hide))

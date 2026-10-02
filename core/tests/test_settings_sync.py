@@ -54,6 +54,11 @@ class MessageTests(unittest.TestCase):
                     "methods", "edge_parts", "corner"):
             self.assertNotIn(own, flat)
 
+    def test_jump_keys_are_not_sent_by_same_on_all_machines(self):
+        values = settings_sync.mac_values(mac_raw())
+        values["jump_key"] = "ctrl+alt+2"
+        self.assertNotIn("jump_key", settings_sync.message_data(True, 50, values)["crossing"])
+
     def test_a_round_trip_reads_back_what_was_sent(self):
         values = settings_sync.mac_values(mac_raw())
         on, set_at, read = settings_sync.read(settings_sync.message_data(True, 7, values), KEYS)

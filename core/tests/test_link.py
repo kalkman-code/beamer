@@ -174,6 +174,7 @@ class LinkHandshakeTests(unittest.TestCase):
         time.sleep(0.3)
         self.assertEqual(self.machine.links, [])
 
+
     def test_a_peer_that_does_not_know_the_key_id_closes_and_the_text_follows_linked(self):
         for linked, expected in ((False, "Update Beamer on Far to 1.5.0"), (True, "closed the connection")):
             side = Side(self.machine, token=other_token(), linked=linked)
@@ -555,6 +556,11 @@ class LinkFollowTests(unittest.TestCase):
         link = side.link(socket_factory=factory, clock=clock, reconnect_seconds=0.02)
         self.addCleanup(link.stop)
         return side, link
+
+    def test_a_peer_not_in_use_has_no_dial_target(self):
+        side, _link = self.link(FakeClock(), [])
+        side.peer()["in_use"] = False
+        self.assertIsNone(OutboundLink._target(side.peer()))
 
     def test_a_beacon_with_the_exact_name_is_tried_once_the_link_has_been_down_ten_seconds(self):
         clock, tried = FakeClock(), []

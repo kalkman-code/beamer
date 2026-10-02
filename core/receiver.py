@@ -119,6 +119,7 @@ OUTBOX_LIMIT = 512
 ADMITTED = "admitted"
 WRONG_ID = "wrong_id"
 GONE = "gone"
+IN_USE_OFF = "in_use_off"
 
 _DROPPED_TEXT = frozenset(chr(code) for code in list(range(0x00, 0x20)) + list(range(0x7F, 0xA0))) - {"\n", "\t"}
 _TEXT_KEYS = {"\n": "enter", "\t": "tab"}
@@ -179,7 +180,7 @@ def zone_models(zones, peers, allowed, resistance_px: int, notch_span=None) -> l
     sides = {}
     for peer in peers or ():
         ident = protocol.read_id(peer.get("id")) if isinstance(peer, dict) else None
-        if ident is not None:
+        if ident is not None and peer.get("in_use", True) is True:
             sides[ident] = peer.get("side")
     found = {"corner": [], "edge": [], "part": [], "notch": []}
     for zone in zones or ():
@@ -310,6 +311,8 @@ class PeerBook:
                 return GONE, None
             if peer_id == own_id or entry.get("id") != protocol.id_text(peer_id):
                 return WRONG_ID, None
+            if entry.get("in_use", True) is not True:
+                return IN_USE_OFF, None
             before = copy.deepcopy(entry)
             entry.update(changes)
             entry["linked"] = True
@@ -505,6 +508,11 @@ class LinkResponder:
             return self._requested_running and self._thread is not None and self._thread.is_alive()
 
     @property
+    def listening_port(self) -> Optional[int]:
+        with self._lock:
+            return self._port if self._listener is not None else None
+
+    @property
     def owner(self) -> Optional[bytes]:
         link = self._owner
         return link.peer_id if link is not None else None
@@ -572,7 +580,8 @@ class LinkResponder:
             listener.settimeout(0.1)
             with self._lock:
                 self._listener = listener
-            LOGGER.info("Listening for version 6 links on 0.0.0.0:%s", port)
+                self._port = listener.getsockname()[1]
+            LOGGER.info("Listening for version 6 links on 0.0.0.0:%s", self._port)
             self._report()
             while not stop_event.is_set():
                 try:
@@ -693,6 +702,9 @@ class LinkResponder:
             if outcome == WRONG_ID:
                 LOGGER.warning("%s holds a pairing of this machine's under another machine's id", host)
                 self._answer(connection, host, session.seal(protocol.wrong_id_v6()))
+                return None
+            if outcome == IN_USE_OFF:
+                self._answer(connection, host, session.seal(protocol.invalid_hello_v6()))
                 return None
             allow_drive = entry.get("allow_drive") is True
             welcome = protocol.welcome_v6(
@@ -1094,7 +1106,8 @@ class LinkResponder:
             else:
                 why = self._refusal_locked(link, focus)
                 if why is not None:
-                    link.post(protocol.refuse_msg(focus["route"], why))
+                    reason, other = why
+                    link.post(protocol.refuse_msg(focus["route"], reason, other=other))
                     return
                 link.route = focus["route"]
                 # The answer goes before the pointer is placed or anything plays.
@@ -1105,33 +1118,39 @@ class LinkResponder:
         if stale:
             self._rearm_fresh()
 
-    def _refusal_locked(self, link: _Link, focus: dict) -> Optional[str]:
+    def _refusal_locked(self, link: _Link, focus: dict):
         """Section 4's decision order, after the stale route (steps 2 to 7). The take is made
         visible (`driven`) before `away()` is read, and stays so until it is refused or becomes
         the ownership; `away()` is called under the lock, so it must be a plain read."""
         if focus["malformed"]:
-            return "malformed"
+            return "malformed", None
         if not link.allow_drive:
-            return "not_allowed"
+            return "not_allowed", None
         self._claiming = link
         try:
-            busy = bool(self._away())
+            away = self._away()
+            busy = bool(away)
         except Exception:
             LOGGER.exception("Could not tell whether this machine's input is elsewhere")
             busy = False
+            away = None
         why = None
+        other = None
         sent_home_at = self._sent_home_at.get(link.peer_id)
         if busy:
             why = "busy"
+            if isinstance(away, bytes) and len(away) == protocol.MACHINE_ID_SIZE:
+                other = away
         elif sent_home_at is not None and time.monotonic() - sent_home_at < SENT_HOME_SECONDS:
             why = "sent_home"
         elif self._owner is not None and self._owner is not link:
             why = "owned"
+            other = self._owner.peer_id
         elif focus["stay"] and self._owner is not link:
             why = "malformed"
         if why is not None:
             self._claiming = None
-        return why
+        return (why, other) if why is not None else None
 
     def _own_locked(self, link: _Link, focus: dict, peers, zones) -> list:
         began = self._owner is not link
@@ -1234,6 +1253,11 @@ class LinkResponder:
                     after += self._end_locked(link)
                     LOGGER.info("%s was removed; its link is closed", link.name)
                     link.close()
+                    continue
+                if peer.get("in_use", True) is not True:
+                    after += self._end_locked(link)
+                    link.close()
+                    LOGGER.info("%s is not in use; its link is closed", link.name)
                     continue
                 allow_drive = peer.get("allow_drive") is True
                 if allow_drive != link.allow_drive:

@@ -63,9 +63,7 @@ INPUT_TYPES = protocol.INPUT_TYPES
 
 # What the owner's reasons for bringing input home say, naming the machine (WIRE.md section 5).
 HOME_REASONS = {
-    "owned": "{name} is being driven from another machine",
     "not_allowed": "{name} does not accept input from this one",
-    "busy": "{name} is driving another machine",
     "sent_home": "{name} sent the input back",
     "link_lost": "Lost the link to {name}",
     "no_answer": "{name} did not answer",
@@ -178,6 +176,10 @@ class LinkSender:
         self._clipboard_stamp = None
         # The machine this PC's input last landed on, as an id text, for the shortcut's choice.
         self._last_on: Optional[str] = None
+        self._jump_modifiers = set()
+        self._jump_swallowed = set()
+        self._jump_pressed = set()
+        self.jump_recording = False
         self._reported_redirecting = False
         self._followed_at = 0.0
         self._overflowed = False
@@ -251,7 +253,8 @@ class LinkSender:
         id (the one migrated from 1.4.x), of the first this PC dials, by its token."""
         peer = self.shortcut_target()
         entry = self._peers.get(peer) if peer is not None else next(
-            (item for item in self._entries if item.get("send") and item.get("host") and item.get("port")), None)
+            (item for item in self._entries if item.get("in_use", True) is True and item.get("send")
+             and item.get("host") and item.get("port")), None)
         return (self._statuses.get(self.links.key_of(entry)) if entry is not None else None) or NOT_CONNECTED_STATUS
 
     def shortcut_target(self) -> Optional[bytes]:
@@ -375,6 +378,42 @@ class LinkSender:
         self.links.close(peer)
         self._forget_held(peer)
         self._feed(lambda o: o.link_down(peer))
+
+    def handle_jump_key(self, name: str, down: bool, vk: Optional[int] = None) -> bool:
+        """Handles a recorded local chord before trigger detection or ordinary key routing. Keys are
+        known by virtual key where there is one: the name carries Shift, so a Shift let go before the
+        key would make its release a different name."""
+        modifiers = {"alt", "alt_r", "cmd", "cmd_r", "ctrl", "ctrl_r", "shift", "shift_r"}
+        if name in modifiers:
+            if down:
+                self._jump_modifiers.add(name)
+            else:
+                self._jump_modifiers.discard(name)
+            return False
+        held = vk if vk is not None else name
+        if not down:
+            self._jump_pressed.discard(held)
+            if held in self._jump_swallowed:
+                self._jump_swallowed.discard(held)
+                return True
+            return False
+        # A key already down when its modifiers arrive repeats; it is not a press of the chord.
+        repeat = held in self._jump_pressed
+        self._jump_pressed.add(held)
+        if held in self._jump_swallowed:
+            return True
+        if repeat or self.jump_recording:
+            return False
+        chord = ways.jump_chord(self._jump_modifiers, name)
+        target = protocol.read_id(ways.jump_peer(self._entries, chord)) if chord else None
+        if target is None:
+            return False
+        self._jump_swallowed.add(held)
+        if self.owner == target:
+            self.set_redirecting(False)
+        else:
+            self.go(target)
+        return True
 
     def on_key(self, name: str, down: bool, vk: Optional[int] = None, us: Optional[str] = None) -> bool:
         """One key, from the hook thread: True when it is not for this PC. Held keys are known by
@@ -698,7 +737,12 @@ class LinkSender:
 
     def send_arrangement(self, peer: bytes, edge: str, set_at: int) -> bool:
         """Tells a peer which of this PC's edges faces it, when the change was made here."""
-        return self.send_to(peer, protocol.arrangement_v6(edge, set_at, self._own_id))
+        settings = {"machine_id": protocol.id_text(self._own_id), "peers": self._entries, "zones": self._zone_list}
+        peer_text = protocol.id_text(peer)
+        way_back = ways.has_way(settings, peer_text)
+        way_back_by = protocol.read_id(ways.way_back_by(settings, peer_text))
+        return self.send_to(peer, protocol.arrangement_v6(edge, set_at, self._own_id,
+                                                          way_back=way_back, way_back_by=way_back_by))
 
     def peers_up(self) -> list:
         return [peer for peer in self._peers if self.links.up(peer)]
@@ -958,8 +1002,13 @@ class LinkSender:
         elif moved.why in ("asked", "switch"):
             self._report_arrival(None)
         else:
-            reason = HOME_REASONS.get(moved.why, "{name} returned the input")
-            self._alert(reason.format(name=self._name(moved.left)))
+            other = ""
+            if isinstance(moved.other, bytes) and moved.other != self._own_id:
+                other = peerlist.label_for(self._entries, peer_id=protocol.id_text(moved.other))
+            reason = peerlist.refusal_text(moved.why, self._name(moved.left), other)
+            if reason is None:
+                reason = HOME_REASONS.get(moved.why, "{name} returned the input").format(name=self._name(moved.left))
+            self._alert(reason)
 
     def _land(self, edge: str, offset: float) -> None:
         """The peer pushed the pointer back through its zone: land it on the edge of this PC it comes
@@ -999,7 +1048,13 @@ class LinkSender:
         if action.why == "unreachable" and self._accepts.get(action.peer) is False:
             self._alert("Cannot switch — " + HOME_REASONS["not_allowed"].format(name=name))
             return
-        self._alert(f"Cannot switch — {name} could not be reached")
+        other = ""
+        if isinstance(action.other, bytes) and action.other != self._own_id:
+            other = peerlist.label_for(self._entries, peer_id=protocol.id_text(action.other))
+        reason = peerlist.refusal_text(action.why, name, other)
+        if reason is None:
+            reason = f"Cannot switch — {name} could not be reached"
+        self._alert(reason)
 
     def _learn_hardware(self, peer: bytes) -> None:
         """A peer's hardware address, read from the ARP table while the entry is fresh, for the wake-up

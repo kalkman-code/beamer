@@ -67,12 +67,14 @@ class Moved:
     why: str                    # "asked", "switch", a refusal's `why`, "refused", "no_answer", "link_lost"
     edge: Optional[str] = None  # where to land the pointer, when the move says
     offset: Optional[float] = None
+    other: Optional[object] = None
 
 
 @dataclass(frozen=True)
 class Unreachable:
     peer: str
     why: str                    # a refusal's `why`, "refused", "no_answer", "link_lost", "unreachable"
+    other: Optional[object] = None
 
 
 @dataclass(frozen=True)
@@ -257,12 +259,12 @@ class Owner:
         wait = self._wait
         if wait is not None and wait.chain:
             if peer == wait.peer and route == wait.route:
-                return self._not_taken(peer, why)
+                return self._not_taken(peer, why, data.get("other"))
             return []
         # The take's own route too: a re-arm sent before its answer came raised the route past it.
         if peer == self.on and (route == self.route or (wait is not None and route == wait.route)):
             self._hold_back(peer, why)
-            return self._come_home(why)
+            return self._come_home(why, other=data.get("other"))
         return []
 
     def tick(self):
@@ -386,7 +388,7 @@ class Owner:
     def _forget_pressed(self, peer):
         self._swallow.update(self._pressed.pop(peer, {}))
 
-    def _come_home(self, why, edge=None, offset=None):
+    def _come_home(self, why, edge=None, offset=None, other=None):
         left = self.on
         if self._wait is not None and not self._wait.chain:
             # Never taken: a clipboard sent after the take was dropped there.
@@ -399,7 +401,7 @@ class Owner:
             self._forget_pressed(left)
         self.on = None
         self.reach_sent = []
-        actions.append(Moved(None, left, why, edge, offset))
+        actions.append(Moved(None, left, why, edge, offset, other))
         return actions + self._replay_held()
 
     def _abandon(self, unless=None):
@@ -415,12 +417,12 @@ class Owner:
         self._clipboard_at.discard(wait.peer)
         return [Drop(wait.peer)]
 
-    def _not_taken(self, peer, why):
+    def _not_taken(self, peer, why, other=None):
         """A hand-over from the machine the input is on did not happen: re-arm it without `peer`."""
         self._wait = None
         if peer is not None:
             self._hold_back(peer, why)
-        return self._stay() + [Unreachable(peer, why)] + self._replay_held()
+        return self._stay() + [Unreachable(peer, why, other)] + self._replay_held()
 
     def held_back(self, peer):
         """Whether `peer` refused, or did not take, a move a moment ago and is not asked again yet."""

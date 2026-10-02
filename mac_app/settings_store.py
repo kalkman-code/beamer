@@ -45,8 +45,8 @@ ZONE_KINDS = tuple(method for method in METHODS if method != "shortcut")
 SETTINGS_ONLY = ("schema", "machine_id", "name", "port", "shortcut", "migrated_token_sha256", "peers", "zones", "crossing")
 PEER_DEFAULTS = {
     "id": "", "name": "", "platform": "", "token": "", "host": "", "port": 0, "hw": "", "send": True,
-    "allow_drive": True, "side": "", "side_set_at": 0, "side_by": "", "paired_with": [], "paired_at": 0,
-    "linked": False, "from_1_4": False,
+    "allow_drive": True, "in_use": True, "side": "", "side_set_at": 0, "side_by": "", "paired_with": [], "paired_at": 0,
+    "linked": False, "from_1_4": False, "jump_key": "",
 }
 
 
@@ -331,10 +331,10 @@ class SettingsStore:
             self.save_settings(settings)
 
     def set_peer(self, token, **switches):
-        """Turns `send` (this Mac drives the machine) and `allow_drive` (it may drive this Mac) on
-        or off for the machine holding `token`; returns its entry, None when no machine holds it."""
-        if not switches or any(name not in ("send", "allow_drive") or not isinstance(value, bool) for name, value in switches.items()):
-            raise SettingsError("only send and allow_drive can be switched, each on or off")
+        """Turns `send`, `allow_drive` and `in_use` on or off for the machine holding `token`; returns
+        its entry, None when no machine holds it."""
+        if not switches or any(name not in ("send", "allow_drive", "in_use") or not isinstance(value, bool) for name, value in switches.items()):
+            raise SettingsError("only send, allow_drive and in_use can be switched, each on or off")
         with self.lock:
             settings = copy.deepcopy(self.current())
             entry = next((peer for peer in settings["peers"] if peer["token"] == token), None)
@@ -342,6 +342,19 @@ class SettingsStore:
                 return None
             entry.update(switches)
             return copy.deepcopy(next(peer for peer in self.save_settings(settings)["peers"] if peer["token"] == token))
+
+    def set_jump_key(self, peer_id, value, trigger_key):
+        """Sets or clears one peer's local jump chord after the shared clash checks."""
+        with self.lock:
+            settings = copy.deepcopy(self.current())
+            entry = next((peer for peer in settings["peers"] if peer["id"] == peer_id), None)
+            if entry is None:
+                raise SettingsError("that machine is no longer paired with this Mac")
+            try:
+                entry["jump_key"] = ways.check_jump_key(settings, peer_id, value, trigger_key) or ""
+            except ValueError as exc:
+                raise SettingsError(str(exc)) from exc
+            return copy.deepcopy(next(peer for peer in self.save_settings(settings)["peers"] if peer["id"] == peer_id))
 
     def remove_peer(self, token):
         """Removes the machine holding `token`, with its zones, and returns its entry; None when
@@ -353,17 +366,15 @@ class SettingsStore:
                 self.save_settings(settings)
             return removed
 
-    def set_ways(self, peer, *, side, methods, parts, corner, default=False):
-        """Writes one machine's side and zones, as the Crossing page shows them for it (core/ways.py);
-        `default` when the side is only the one the page shows for a machine not placed yet. Returns
-        whether its side moved, which the caller sends it as `arrangement`; SettingsError, writing
+    def set_ways(self, peer, *, side, methods, parts, corner):
+        """Writes one machine's side and zones, as the Crossing page shows them for it (core/ways.py).
+        Returns whether its side moved, which the caller sends it as `arrangement`; SettingsError, writing
         nothing, for a machine not in the list or zones that would clash with another's."""
         with self.lock:
             settings = copy.deepcopy(self.current())
             try:
                 moved = ways.edit(settings, peer, side=side, methods=methods, parts=parts, corner=corner,
-                                  kinds=ZONE_KINDS, corner_edge=lambda corner, _side: _corner_edge(corner), now=time.time(),
-                                  default=default)
+                                  kinds=ZONE_KINDS, corner_edge=lambda corner, _side: _corner_edge(corner), now=time.time())
             except KeyError:
                 raise SettingsError("that machine is no longer paired with this Mac") from None
             if moved:
@@ -372,6 +383,14 @@ class SettingsStore:
                 ways.settle(settings, peer, "this Mac")
             self.save_settings(settings)
             return moved
+
+    def share_side(self, side, thirds):
+        """Split one side's zones under the store lock, returning every machine whose zones changed."""
+        with self.lock:
+            settings = copy.deepcopy(self.current())
+            changed = ways.share(settings, side, thirds, kinds=ZONE_KINDS)
+            self.save_settings(settings)
+            return changed
 
     def set_hardware(self, peer, address):
         """Writes the hardware address learnt for a machine (wake-on-LAN); True when it changed."""
@@ -387,13 +406,14 @@ class SettingsStore:
             self.save_settings(settings)
             return True
 
-    def arrangement(self, peer, edge, set_at, by, way_back=None):
+    def arrangement(self, peer, edge, set_at, by, way_back=None, way_back_by=None):
         """A machine's `arrangement`, kept when it is newer than the side held for that machine, and
         its `way_back` whatever the side (core/ways.py). Returns (changed, notices), a sentence for each
         zone it turned off."""
         with self.lock:
             settings = copy.deepcopy(self.current())
-            changed, notices = ways.arrangement(settings, peer, edge, set_at, by, "this Mac", way_back)
+            changed, notices = ways.arrangement(settings, peer, edge, set_at, by, "this Mac", way_back,
+                                                 way_back_by=way_back_by)
             if changed:
                 self.save_settings(settings)
             return changed, notices
@@ -516,11 +536,11 @@ class SettingsStore:
 
     @staticmethod
     def _ensure_zones(settings):
-        """A machine paired before beta.5 has no zone at all (pairing made none): it gets its edge.
-        Run after a learnt id has renamed the migrated machine's zones, or that machine would look
-        bare and get a second edge."""
+        """Give old pairs their edge and the one unplaced desktop its shown side on every read and save.
+        Run after a learnt id has renamed migrated zones, or that machine would get a second edge."""
         if isinstance(settings["zones"], list) and all(isinstance(item, dict) for item in settings["peers"] + settings["zones"]):
             ways.ensure_zones(settings)
+            ways.default_side(settings)
 
     def _check(self, settings):
         if not is_machine_id(settings["machine_id"]):
@@ -552,6 +572,10 @@ class SettingsStore:
                 value = peer[name]
                 if isinstance(default, bool) != isinstance(value, bool) or not isinstance(value, type(default)):
                     raise SettingsError(f"peer {name} must be {type(default).__name__}")
+            if "way_back_by" in peer and not isinstance(peer["way_back_by"], str):
+                raise SettingsError("peer way_back_by must be str")
+            if not isinstance(peer["jump_key"], str) or (peer["jump_key"] and not ways.valid_jump_key(peer["jump_key"])):
+                raise SettingsError("peer jump_key must be an empty string or a recorded modifier chord")
             if peer["id"] == "":
                 empty += 1
                 if not peer["from_1_4"] or empty > 1:

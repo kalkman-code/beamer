@@ -132,6 +132,13 @@ class TakeFromHomeTests(OwnerCase):
                 self.assertFalse(self.o.away)
                 self.clock.now += owner.SENT_HOME_FOR
 
+    def test_a_refusal_naming_the_machine_in_the_way_says_it_when_the_input_comes_home(self):
+        self.o.go("B")
+        self.assertEqual(moved(self.o.refuse("B", {"route": self.o.route, "why": "owned", "other": "C"})).other, "C")
+        self.clock.now += owner.SENT_HOME_FOR
+        self.o.go("B")
+        self.assertIsNone(moved(self.o.refuse("B", {"route": self.o.route, "why": "owned"})).other)
+
     def test_a_machine_that_refused_a_take_is_not_taken_again_for_a_while(self):
         # The live check, 01-10-2026: every push at the laptop's edge took the rig again while the
         # Mac drove it, about 30 refusals and 30 notices in 20 seconds.
@@ -314,6 +321,13 @@ class SwitchTests(OwnerCase):
         self.assertEqual(moved(actions), Moved("C", "B", "switch", "left", 0.5))
         self.assertEqual(self.o.on, "C")
         self.assertEqual(self.o.reach_sent, ["B", "D"])
+
+    def test_a_hand_over_refused_names_the_machine_in_the_way(self):
+        # Opus review: an onward hand-over refused as owned came back as Unreachable without `other`.
+        self.take("B")
+        self.switch("B", "C")
+        actions = self.o.refuse("C", {"route": 2, "why": "owned", "other": "D"})
+        self.assertIn(Unreachable("C", "owned", "D"), actions)
 
     def test_a_refusal_from_the_next_machine_re_arms_the_one_left_leaving_it_out_for_three_seconds(self):
         self.take("B")

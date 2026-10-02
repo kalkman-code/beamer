@@ -193,9 +193,15 @@ class TakingTests(unittest.TestCase):
         self.sender.set_redirecting(True)
         self.rig.inbound(B, protocol.refuse_msg(1, "busy"))
         self.assertFalse(self.sender.redirecting)
-        self.assertEqual(self.rig.alerts, ["Mac is driving another machine"])
+        self.assertEqual(self.rig.alerts, ["Can't cross to Mac: it is driving another machine."])
         self.assertEqual(self.rig.redirects, [True, False])
         self.assertEqual(self.rig.arrivals, [])
+
+    def test_a_refusal_names_the_machine_this_pcs_input_is_on(self):
+        rig = Rig(entries=[harness.entry(B, "Mac", side="left"), harness.entry(C, "Rig", side="top")])
+        rig.sender.set_redirecting(True)
+        rig.inbound(B, protocol.refuse_msg(1, "busy", other=C))
+        self.assertEqual(rig.alerts, ["Can't cross to Mac: it is driving Rig."])
 
     def test_the_shortcut_home_reports_where_the_pointer_is_and_lets_go(self):
         self.sender.set_redirecting(True)
@@ -360,7 +366,14 @@ class OnwardTests(unittest.TestCase):
         self.switch(C)
         self.rig.inbound(C, protocol.refuse_msg(self.sender._owner.route, "owned"))
         self.assertEqual(self.sender.owner, B)
-        self.assertEqual(self.rig.alerts[-1], "Cannot switch — Other could not be reached")
+        self.assertEqual(self.rig.alerts[-1], "Can't cross to Other: another machine is driving it.")
+        # And the machine in the way, named when the refusal says which one.
+        self.sender._owner._left_out.clear()
+        self.rig.drop(C)
+        self.rig.bring_up(C)
+        self.switch(C)
+        self.rig.inbound(C, protocol.refuse_msg(self.sender._owner.route, "owned", other=B))
+        self.assertEqual(self.rig.alerts[-1], "Can't cross to Other: it is being driven from Mac.")
 
 
 class KeyTests(unittest.TestCase):
@@ -727,7 +740,10 @@ class ArrangementTests(unittest.TestCase):
         rig = Rig()
         self.assertTrue(rig.sender.send_arrangement(B, "left", 1790000001))
         message = rig.sent(B, "arrangement")[0]
-        self.assertEqual(message["data"], {"edge": "left", "set_at": 1790000001, "by": protocol.id_text(HERE)})
+        # way_back too, as every arrangement carries it (WIRE.md section 8).
+        self.assertEqual({key: message["data"][key] for key in ("edge", "set_at", "by")},
+                         {"edge": "left", "set_at": 1790000001, "by": protocol.id_text(HERE)})
+        self.assertIsInstance(message["data"]["way_back"], bool)
 
     def test_no_link_up_means_the_app_must_use_the_peers_own(self):
         rig = Rig(up=())

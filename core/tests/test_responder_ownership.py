@@ -39,9 +39,16 @@ class Case(unittest.TestCase):
         self.assertTrue(wait_for(lambda: self.machine.responder.owner == link.peer))
         return route
 
-    def refused(self, link, why, **fields):
+    def refused(self, link, why, other=None, **fields):
+        """`other`, when given, is the machine the refusal must name; the rest of the time it is not
+        checked, so the decision-order tests stay about the order."""
         route = link.take(**fields)
-        self.assertEqual(link.answer(route), (REFUSE, {"route": route, "why": why}))
+        kind, data = link.answer(route)
+        if other is not None:
+            self.assertEqual(data.get("other"), protocol.id_text(other))
+        self.assertEqual((kind, {key: value for key, value in data.items() if key != "other"}),
+                         (REFUSE, {"route": route, "why": why}))
+        return data
 
     def injected_from(self, count=None):
         return self.machine.injected()
@@ -103,6 +110,22 @@ class Taking(Case):
         self.machine.away = True
         self.refused(self.link(B), "busy")
         self.assertIsNone(self.machine.responder.owner)
+
+    def test_an_owned_refusal_names_the_owner_and_a_busy_one_the_machine_input_is_on(self):
+        b, c = self.link(B), self.link(C)
+        self.own(b)
+        self.refused(c, "owned", other=B)
+        b.let_go()
+        self.assertTrue(wait_for(lambda: self.machine.responder.owner is None))
+        # away() may say which machine this one's input is on; then busy names it.
+        self.machine.away = D
+        self.refused(c, "busy", other=D)
+        # Only a yes or no: busy, naming nothing.
+        self.machine.away = True
+        self.assertNotIn("other", self.refused(c, "busy"))
+        self.peer_entry(C)["allow_drive"] = False
+        self.machine.responder.peers_changed()
+        self.assertNotIn("other", self.refused(c, "not_allowed"))
 
     def test_the_answer_comes_before_the_pointer_is_placed(self):
         self.machine.desktop.slow = 1.0
@@ -302,6 +325,17 @@ class Ending(Case):
         self.assertEqual(b.expect(protocol.MSG_ACCEPTS), {"accepts": True})
         self.own(b)
 
+    def test_turning_in_use_off_releases_the_owner_and_closes_the_link(self):
+        b = self.link(B)
+        self.own(b)
+        self.hold(b)
+        self.peer_entry(B)["in_use"] = False
+        self.machine.responder.peers_changed()
+        self.assertTrue(wait_for(self.released))
+        self.assertTrue(b.closed.wait(2))
+        self.assertIsNone(self.machine.responder.owner)
+        self.assertTrue(wait_for(lambda: B not in self.machine.responder.links()))
+
     def test_the_forced_end_after_a_send_home(self):
         with mock.patch.object(receiver, "FORCED_END_SECONDS", 0.3), mock.patch.object(receiver, "SENT_HOME_SECONDS", 1.0):
             b = self.link(B)
@@ -495,6 +529,11 @@ class ZoneModels(unittest.TestCase):
         ]
         self.assertEqual([peer for peer, _ in self.models(zones, allowed=(B, D))], [])
         self.assertEqual([peer for peer, _ in self.models(zones)], [C])
+
+    def test_a_peers_zones_are_not_armed_when_it_is_not_in_use(self):
+        peers = [entry(B, "Bee", side="left", in_use=False)]
+        zones = [{"peer": protocol.id_text(B), "kind": "edge"}]
+        self.assertEqual(receiver.zone_models(zones, peers, {B}, 120), [])
 
     def test_a_corner_lands_at_the_end_nearest_it(self):
         self.assertEqual(receiver.corner_offset("top_right", "right"), 0.0)

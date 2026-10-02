@@ -45,9 +45,9 @@ def _button(text: str, role: str = "") -> QPushButton:
 
 
 class PeerRow(QWidget):
-    """One paired machine: its name and state, one sentence, the two direction switches and Remove."""
+    """One paired machine: its name and state, use switch, direction disclosure and Remove."""
 
-    def __init__(self, token: str, on_send: Callable, on_allow: Callable, on_remove: Callable) -> None:
+    def __init__(self, token: str, on_send: Callable, on_allow: Callable, on_in_use: Callable, on_remove: Callable) -> None:
         super().__init__()
         self.setProperty("vernier", "plain")
         self.token = token
@@ -71,6 +71,8 @@ class PeerRow(QWidget):
         column.addWidget(self.where)
         self.detail = widgets.label("", "note", wrap=True)
         column.addWidget(self.detail)
+        self.in_use = widgets.Switch("In use")
+        self.in_use.toggled.connect(lambda on: on_in_use(self.token, on))
         self.send = widgets.Switch("This PC drives it")
         self.allow = widgets.Switch("It drives this PC")
         for switch in (self.send, self.allow):
@@ -82,17 +84,26 @@ class PeerRow(QWidget):
         self.remove_button.clicked.connect(lambda: self._ask(True))
         controls = QHBoxLayout()
         controls.setSpacing(16)
-        switches = QVBoxLayout()
-        switches.setSpacing(2)
-        switches.addWidget(self.send)
-        switches.addWidget(self.allow)
+        directions = QVBoxLayout()
+        directions.setSpacing(2)
+        directions.addWidget(self.send)
+        directions.addWidget(self.allow)
+        self.direction_group = QWidget()
+        self.direction_group.setLayout(directions)
+        self.direction_group.setVisible(False)
+        self.directions = _button("Directions", "small")
+        self.directions.setCheckable(True)
+        self.directions.toggled.connect(self.direction_group.setVisible)
+        self.directions.toggled.connect(lambda on: self.directions.setText("Hide directions" if on else "Directions"))
         for switch in (self.send, self.allow):
             switch.setMaximumWidth(300)
-        controls.addLayout(switches)
+        controls.addWidget(self.in_use)
         controls.addStretch(1)
+        controls.addWidget(self.directions)
         controls.addWidget(self.remove_button, 0, Qt.AlignmentFlag.AlignBottom)
         self.controls = controls
         column.addLayout(controls)
+        column.addWidget(self.direction_group)
         self.confirm = _plain()
         sure = QVBoxLayout(self.confirm)
         sure.setContentsMargins(0, 0, 0, 0)
@@ -117,8 +128,9 @@ class PeerRow(QWidget):
     def _ask(self, asking: bool) -> None:
         self.confirm.setVisible(asking)
         self.remove_button.setVisible(not asking)
-        self.send.setVisible(not asking)
-        self.allow.setVisible(not asking)
+        self.in_use.setVisible(not asking)
+        self.directions.setVisible(not asking)
+        self.direction_group.setVisible(not asking and self.directions.isChecked())
 
     def refresh(self, entry: dict, label: str, state, where: str) -> None:
         self.led.set_tone(state.tone)
@@ -126,7 +138,8 @@ class PeerRow(QWidget):
                            (self.confirm_text, f"Remove {label}? {KEEP_NOTE}")):
             if item.text() != text:
                 item.setText(text)
-        for switch, value in ((self.send, bool(entry.get("send"))), (self.allow, bool(entry.get("allow_drive")))):
+        for switch, value in ((self.in_use, entry.get("in_use", True) is True),
+                              (self.send, bool(entry.get("send"))), (self.allow, bool(entry.get("allow_drive")))):
             if switch.isChecked() != value:
                 switch.blockSignals(True)
                 switch.setChecked(value)
@@ -138,9 +151,9 @@ class PeerRow(QWidget):
 class MachinesModule(widgets.Module):
     """The paired machines, one row each, and the button that opens the pairing sheet."""
 
-    def __init__(self, on_send: Callable, on_allow: Callable, on_remove: Callable, on_pair: Callable) -> None:
+    def __init__(self, on_send: Callable, on_allow: Callable, on_in_use: Callable, on_remove: Callable, on_pair: Callable) -> None:
         super().__init__("Machines")
-        self._callbacks = (on_send, on_allow, on_remove)
+        self._callbacks = (on_send, on_allow, on_in_use, on_remove)
         self.rows: dict = {}
         self.rows_layout = QVBoxLayout()
         self.rows_layout.setContentsMargins(0, 0, 0, 0)
@@ -433,4 +446,3 @@ class PairingSheet(widgets.Module):
     def clear_code(self) -> None:
         self.code.clear()
         self._refresh_pair_button()
-

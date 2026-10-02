@@ -38,7 +38,7 @@ class WindowsInput:
         self._logger = logger or LOGGER
         # A peer can change the arrangement too, and it reaches this Mac over whichever of the two
         # links is up: this one, or the Mac's own, which bridge.py handles. Both end at the same
-        # handler in the app, called with (peer, edge, set_at, by, way_back).
+        # handler in the app, called with (peer, edge, set_at, by, way_back, way_back_by).
         self._arrangement_callback = arrangement_callback
         self._lock = threading.RLock()
         self._running_for = None
@@ -57,7 +57,8 @@ class WindowsInput:
             clipboard=clipboard_mac,
             unlock=no_unlock,
             hardware=hardware_mac.hardware_address_towards,
-            away=lambda: controller.owner.away,
+            # The machine this Mac's input is on, as bytes, so a `busy` refusal can name it.
+            away=lambda: controller.owner.on and (protocol.read_id(controller.owner.on) or True),
             zones=controller.book.zones,
             notch_span=lambda: controller.notch_range,
             owner_callback=self._on_owner,
@@ -118,7 +119,7 @@ class WindowsInput:
     def _held(self):
         """What the responder arms and answers from: the peers' ids, tokens, sides and switches, and the zones."""
         book = self._controller.book
-        peers = tuple((p.get("id"), p.get("token"), p.get("side"), p.get("allow_drive")) for p in book.peers())
+        peers = tuple((p.get("id"), p.get("token"), p.get("side"), p.get("allow_drive"), p.get("in_use", True)) for p in book.peers())
         return peers, json.dumps(book.zones(), sort_keys=True)
 
     def stop(self) -> None:
@@ -144,7 +145,8 @@ class WindowsInput:
             return False
         author = protocol.read_id(by) or bytes(self._controller.identity()["id"])
         return self.server.send(ident, protocol.arrangement_v6(mac_edge, int(set_at), author,
-                                                               way_back=self._controller.way_back(peer)))
+                                                               way_back=self._controller.way_back(peer),
+                                                               way_back_by=protocol.read_id(self._controller.way_back_by(peer))))
 
     def send_settings(self, data, source=None) -> bool:
         """This Mac's settings state to every machine linked to it that keeps it and that this Mac
@@ -171,7 +173,8 @@ class WindowsInput:
         if entry.get("side") in crossing.EDGES:
             by = protocol.read_id(entry.get("side_by")) or bytes(self._controller.identity()["id"])
             messages.append(protocol.arrangement_v6(entry["side"], entry.get("side_set_at", 0), by,
-                                                    way_back=self._controller.way_back(text)))
+                                                    way_back=self._controller.way_back(text),
+                                                    way_back_by=protocol.read_id(self._controller.way_back_by(text))))
         caps = self.server.caps_of(peer) or frozenset()
         if "settings" in caps:
             messages += [m for m in self._controller.announce() if m.get("type") == protocol.MSG_SETTINGS]
@@ -183,8 +186,11 @@ class WindowsInput:
     def _on_arrangement(self, peer, read) -> None:
         if self._arrangement_callback is None:
             return
-        self._arrangement_callback(protocol.id_text(peer), read["edge"], read["set_at"], protocol.id_text(read["by"]),
-                                   read.get("way_back"))
+        args = (protocol.id_text(peer), read["edge"], read["set_at"], protocol.id_text(read["by"]),
+                read.get("way_back"))
+        if read.get("way_back_by"):
+            args += (protocol.id_text(read["way_back_by"]),)
+        self._arrangement_callback(*args)
 
     def _on_settings(self, peer, data) -> None:
         if self.settings_callback is not None:

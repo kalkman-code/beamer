@@ -132,6 +132,7 @@ class MigrationTests(Base):
             "hw": "02:1a:2b:3c:0d:4e",
             "send": True,
             "allow_drive": False,
+            "in_use": True,
             "side": "left",
             "side_set_at": 1790000000,
             "side_by": machine_id,
@@ -139,6 +140,7 @@ class MigrationTests(Base):
             "paired_at": 0,
             "linked": False,
             "from_1_4": True,
+            "jump_key": "",
         }])
         self.assertEqual(cfg.host, "192.0.2.20")
         self.assertEqual(cfg.port, 24820)

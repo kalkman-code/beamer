@@ -51,6 +51,18 @@ class OwnPortTests(unittest.TestCase):
         wire.sync(self.cfg)
         wire.server.start.assert_called_once_with(24820)
 
+    def test_switching_a_machine_out_of_use_rearms_the_listener(self):
+        wire = WindowsInput(self.controller)
+        self.addCleanup(wire.server.stop)
+        wire.server = mock.Mock(input_scale=None, listening=True)
+        wire._running_for = self.controller.own_port
+        wire._armed_for = wire._held()
+        settings = self.store.current()
+        settings["peers"][0]["in_use"] = False
+        self.store.save_settings(settings)
+        wire.sync(self.cfg)
+        wire.server.peers_changed.assert_called_once_with()
+
     def test_a_controller_built_from_a_config_alone_still_listens_where_it_dials(self):
         controller = WakingController(self.cfg, logger=logging.getLogger("t"), link_factory=FakeLink)
         self.assertEqual(controller.own_port, self.cfg.port)

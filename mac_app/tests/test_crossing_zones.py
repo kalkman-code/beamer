@@ -83,6 +83,13 @@ class EachZoneSaysItsMachine(unittest.TestCase):
         self.assertTrue(machine.armed)
         self.assertEqual(machine.peers, {B})
 
+    def test_a_machine_not_in_use_keeps_its_zones_but_does_not_arm_them(self):
+        machine = engine([peer(A, "right"), {**peer(B, "left"), "in_use": False}], [
+            {"peer": A, "kind": "edge"}, {"peer": B, "kind": "edge"},
+        ])
+        self.assertEqual(machine.peers, {A})
+        self.assertEqual(push(machine, LEFT_X, 500.0, -20, 0).crossed, False)
+
     def test_nothing_in_use_is_not_armed(self):
         machine = engine([peer(A, "right")], [{"peer": A, "kind": "edge", "off": True}])
         self.assertFalse(machine.armed)

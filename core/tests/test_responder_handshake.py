@@ -90,6 +90,17 @@ class TheLookup(Case):
         self.machine.settings.peer(TOKENS[B])["allow_drive"] = False
         self.assertFalse(self.initiator().handshake()["accepts"])
 
+    def test_in_use_off_refuses_the_handshake_and_on_accepts_it(self):
+        self.machine.settings.peer(TOKENS[B])["in_use"] = False
+        link = self.initiator()
+        with self.assertRaises(protocol.HelloRefused) as caught:
+            link.handshake()
+        self.assertEqual(caught.exception.error, protocol.ERROR_INVALID_HELLO)
+        self.assertTrue(wait_for(lambda: self.machine.responder.links() == set()))
+
+        self.machine.settings.peer(TOKENS[B])["in_use"] = True
+        self.assertEqual(self.initiator().handshake()["id"], HERE)
+
     def test_a_typed_token_is_never_matched_or_given_a_key_id(self):
         typed = "hunter2"
         self.machine.settings.data["peers"].append(entry("", "Typed", token=typed, from_1_4=True, linked=False))
@@ -414,7 +425,7 @@ class TheThreadCap(Case):
             self.assertTrue(wait_for(lambda: len(self.machine.responder._slots) == 1))
             second = self.raw()
             self.assertTrue(silent_close(second))
-            first.sendall(b"MY\x07" + os.urandom(56))
+            first.sendall(b"MY\x07")
             self.assertEqual(protocol._recv_exact(first, protocol.SHORT_REPLY_SIZE, time.monotonic() + 3)[:6], b"BEAMY\x06")
 
 

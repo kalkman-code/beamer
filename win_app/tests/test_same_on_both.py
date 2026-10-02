@@ -141,9 +141,13 @@ class SameOnBothTest(unittest.TestCase):
     def test_announcing_carries_a_chosen_arrangement_the_peers_it_may_send_to_and_the_settings(self):
         settings = app_config.load_settings(self.path)
         settings["peers"][0]["id"] = protocol.id_text(harness.B)
+        inactive = dict(settings["peers"][0], id=protocol.id_text(harness.C), token="inactive", in_use=False)
+        settings["peers"].append(inactive)
         app_config.write_settings(self.path, settings)
         self.peers = {harness.B: {"settings"}}
-        self.assertEqual([m["type"] for m in self.window._announce(harness.B)], ["paired", "settings"])
+        messages = self.window._announce(harness.B)
+        self.assertEqual([m["type"] for m in messages], ["paired", "settings"])
+        self.assertEqual(messages[0]["data"]["ids"], [])
         settings["peers"][0].update(side="left", side_set_at=500, side_by=self.window._config.machine_id)
         app_config.write_settings(self.path, settings)
         messages = self.window._announce(harness.B)

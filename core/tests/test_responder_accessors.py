@@ -3,7 +3,7 @@ them, and the capabilities a linked peer announced."""
 
 import unittest
 
-from core import protocol
+from core import protocol, receiver
 from core.tests.responder_harness import B, Initiator, Machine, entry, wait_for
 
 
@@ -24,6 +24,14 @@ class AccessorTests(unittest.TestCase):
         self.assertEqual(machine.settings.saves, saves)
         machine.book.store_paired("nobody", ids)
         self.assertEqual(machine.settings.saves, saves)
+
+    def test_the_book_does_not_admit_a_peer_that_is_not_in_use(self):
+        machine = Machine([entry(B, "Peer", in_use=False, linked=False)])
+        outcome, found = machine.book.admit(
+            protocol.key_id(machine.settings.peer(protocol.id_text(B))["token"]), machine.own, B, {"name": "Changed"}
+        )
+        self.assertEqual((outcome, found), (receiver.IN_USE_OFF, None))
+        self.assertFalse(machine.settings.peer(protocol.id_text(B))["linked"])
 
     def test_the_responder_gives_a_linked_peers_capabilities(self):
         machine = Machine([entry(B, "Peer")]).start()

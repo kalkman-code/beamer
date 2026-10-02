@@ -18,7 +18,8 @@ import media_keys
 import motion
 import theme
 from ignored_titles import is_modifier_release, recorded_entry
-from key_codes import KEY_NAME_TO_CODE, SPECIAL_KEY_NAMES, key_cap, key_title
+from key_codes import KEY_NAME_TO_CODE, PRINTABLE_KEY_FALLBACKS, SPECIAL_KEY_NAMES, key_cap, key_title
+from core import ways as core_ways
 
 
 def _autolayout(view):
@@ -1134,6 +1135,89 @@ class KeyRecorder:
         paint(self.view, "edge")
 
 
+class JumpKeyRecorder:
+    """Records a modifier chord for a peer-specific local jump key."""
+
+    HINT = "Click, then press a key combination"
+
+    def __init__(self, value="", on_change=None, on_arm=None):
+        self.value = value or ""
+        self.on_change = on_change
+        self.on_arm = on_arm
+        self.monitor = None
+        self.view = pressable(self._clicked, "edge", radius=theme.RADIUS["keycap"])
+        self.view.setAccessibilityLabel_("Jump straight here key, " + self._title())
+        face = box("ground", radius=theme.RADIUS["keycap"] - 1)
+        self.view.addSubview_(face)
+        pin(face, self.view, (1, 1, 3, 1))
+        self.key = Label(self._title(), theme.TYPE["keycap"], mono=True, tracking=-0.02)
+        squeeze(self.key.view)
+        self.hint = Label(self.HINT, theme.TYPE["small"], ink="ink_3", align=AppKit.NSTextAlignmentRight)
+        line = stack(vertical=False, spacing=10)
+        line.addArrangedSubview_(self.key.view)
+        line.addArrangedSubview_(self.hint.view)
+        hug(self.key.view, AppKit.NSLayoutPriorityDefaultLow)
+        face.addSubview_(line)
+        pin(line, face, (9, 12, 8, 12))
+
+    def _title(self):
+        if not self.value:
+            return "Choose a key combination"
+        names = {"ctrl": "Control", "alt": "Option", "shift": "Shift", "cmd": "Command"}
+        return " ".join(names.get(part, key_title(part)) for part in self.value.split("+"))
+
+    def set_value(self, value):
+        self.value = value or ""
+        self.key.set(self._title())
+        self.view.setAccessibilityLabel_("Jump straight here key, " + self._title())
+
+    def _clicked(self):
+        if self.monitor is not None:
+            self._stop()
+            return
+        self.key.set("Press a key combination…", ink="signal")
+        self.hint.set("Click again to cancel")
+        paint(self.view, "signal")
+        self.monitor = AppKit.NSEvent.addLocalMonitorForEventsMatchingMask_handler_(
+            AppKit.NSEventMaskKeyDown | AppKit.NSEventMaskFlagsChanged, self._recorded
+        )
+        if self.on_arm is not None:
+            self.on_arm(True)
+
+    def _recorded(self, event):
+        if event.type() != AppKit.NSEventTypeKeyDown:
+            return event
+        flags = int(event.modifierFlags())
+        modifiers = []
+        for name, flag in (("ctrl", AppKit.NSEventModifierFlagControl), ("alt", AppKit.NSEventModifierFlagOption),
+                           ("shift", AppKit.NSEventModifierFlagShift), ("cmd", AppKit.NSEventModifierFlagCommand)):
+            if flags & flag:
+                modifiers.append(name)
+        keycode = int(event.keyCode())
+        key = SPECIAL_KEY_NAMES.get(keycode) or PRINTABLE_KEY_FALLBACKS.get(keycode)
+        chord = core_ways.jump_chord(modifiers, key)
+        if chord is None:
+            return None
+        self._stop()
+        self.set_value(chord)
+        if self.on_change is not None:
+            self.on_change(chord)
+        return None
+
+    def cancel(self):
+        self._stop()
+
+    def _stop(self):
+        if self.monitor is not None:
+            AppKit.NSEvent.removeMonitor_(self.monitor)
+            self.monitor = None
+            if self.on_arm is not None:
+                self.on_arm(False)
+        self.key.set(self._title(), ink="ink")
+        self.hint.set(self.HINT)
+        paint(self.view, "edge")
+
+
 class IgnoredRecorder:
     """A keycap that records the next key, mouse button or media key as an entry to keep on this
     Mac while its input is on Windows. Clicking arms it; the left mouse button is never recorded,
@@ -1245,6 +1329,7 @@ class CodeBoxes:
         self.fields = []
         for index in range(digits):
             container, control = field(cls=_CentredField)
+            control.cell().setScrollable_(False)
             control.setFont_(theme.mono_font(theme.TYPE["keycap"]))
             control.setAlignment_(AppKit.NSTextAlignmentCenter)
             # A fixed box the digit centres in, rather than one that hugs the line and leaves the

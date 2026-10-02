@@ -262,7 +262,8 @@ class Unlock:
 def finish_unlock():
     for thread in threading.enumerate():
         if thread.name == "Beamer-v6-unlock":
-            thread.join(3)
+            if wait_for(lambda: thread.ident is not None):
+                thread.join(3)
 
 
 class LockScreen(Case):

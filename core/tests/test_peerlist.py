@@ -214,5 +214,26 @@ class SharingANameTests(unittest.TestCase):
         self.assertEqual(peerlist.sharing_a_name([]), [])
 
 
+class RefusalTextTests(unittest.TestCase):
+    """What a refused crossing says on either desktop, naming the machine in the way when the
+    refusal's `other` named one this machine knows (WIRE.md section 5)."""
+
+    def test_owned_and_busy_name_the_machine_in_the_way(self):
+        self.assertEqual(peerlist.refusal_text("owned", "Laptop-PC", "Desk-PC"),
+                         "Can't cross to Laptop-PC: it is being driven from Desk-PC.")
+        self.assertEqual(peerlist.refusal_text("busy", "Desk-PC", "Laptop-PC"),
+                         "Can't cross to Desk-PC: it is driving Laptop-PC.")
+
+    def test_with_no_machine_named_it_is_another_machine(self):
+        self.assertEqual(peerlist.refusal_text("owned", "Laptop-PC", ""),
+                         "Can't cross to Laptop-PC: another machine is driving it.")
+        self.assertEqual(peerlist.refusal_text("busy", "Desk-PC", None),
+                         "Can't cross to Desk-PC: it is driving another machine.")
+
+    def test_other_reasons_are_left_to_the_apps_own_words(self):
+        for why in ("not_allowed", "sent_home", "malformed", "refused", "no_answer", "link_lost"):
+            self.assertIsNone(peerlist.refusal_text(why, "Bee", "Sea"))
+
+
 if __name__ == "__main__":
     unittest.main()

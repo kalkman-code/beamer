@@ -7,6 +7,7 @@ import os
 import sys
 import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
@@ -15,6 +16,7 @@ from links_rig import B, C, Rig, edge_zone
 
 import app_config
 import pages_win
+import sender as sender_module
 from core import protocol
 from core import ways
 from core.tests import responder_harness as harness
@@ -91,6 +93,11 @@ class ShortcutMachineTests(unittest.TestCase):
         rig.sender.on_status(rig.links.key_of(rig.settings.data["peers"][1]), True, "Connected to Sea")
         self.assertTrue(rig.sender.connected)
         self.assertEqual(rig.sender.status, "Connected to Sea")
+
+    def test_the_status_does_not_name_a_machine_not_in_use(self):
+        rig = self.rig(up=(), b={"in_use": False})
+        rig.sender.on_status(rig.links.key_of(rig.settings.data["peers"][0]), False, "Bee is unreachable")
+        self.assertEqual(rig.sender.status, sender_module.NOT_CONNECTED_STATUS)
 
 
 class SetWaysTests(unittest.TestCase):
@@ -364,6 +371,55 @@ class WindowTests(unittest.TestCase):
 
 
 class CrossingPageTests(WindowTests):
+    def sharing_side(self):
+        settings = app_config.load_settings(self.path)
+        for peer in settings["peers"]:
+            peer.update(side="right", side_set_at=100 if peer["id"] == BT else 200, side_by=HIGH)
+        settings["zones"] = [{"peer": BT, "kind": "edge"}, {"peer": CT, "kind": "edge", "off": True}]
+        app_config.write_settings(self.path, settings)
+        self.window._pull_peer_fields()
+        self.window._choose_machine(CT)
+        return self.window
+
+    def test_the_share_panel_offers_thirds_below_the_side_and_hides_the_blocked_sentence(self):
+        window = self.sharing_side()
+        self.assertFalse(window.share_module.isHidden())
+        self.assertEqual([window.share_tiles[p].text() for p in ("start", "middle", "end")],
+                         ["Top\nBee", "Middle\nBee", "Bottom\nSea"])
+        self.assertTrue(window.blocked_note.isHidden())
+
+    def test_a_tile_cycles_its_machine_and_share_saves_and_tells_each_one(self):
+        window = self.sharing_side()
+        window.share_tiles["start"].click()
+        self.assertEqual(window.share_tiles["start"].text(), "Top\nSea")
+        window.share_button.click()
+        zones = {(zone["peer"], zone["kind"]): zone for zone in self.saved()["zones"]}
+        self.assertEqual(zones[(BT, "part")]["parts"], ["middle"])
+        self.assertEqual(zones[(CT, "part")]["parts"], ["start", "end"])
+        self.assertTrue(zones[(BT, "edge")].get("off"))
+        self.assertTrue(zones[(CT, "edge")].get("off"))
+        self.assertEqual({peer for peer, _data in self.arrangements()}, {B, C})
+
+    def test_turning_on_edge_keeps_it_off_and_focuses_the_share_button(self):
+        window = self.sharing_side()
+        # An offscreen window is never active, so the focus asked for is what can be checked.
+        with mock.patch.object(window.share_button, "setFocus") as focus:
+            window.way_boxes["edge"].setChecked(True)
+        self.assertFalse(window.way_boxes["edge"].isChecked())
+        self.assertFalse(window.share_module.isHidden())
+        self.assertTrue(window.blocked_note.isHidden())
+        focus.assert_called()
+
+    def test_turning_on_an_overlapping_part_keeps_it_off_and_focuses_the_share_button(self):
+        window = self.sharing_side()
+        # An offscreen window is never active, so the focus asked for is what can be checked.
+        with mock.patch.object(window.share_button, "setFocus") as focus:
+            window.way_boxes["part"].setChecked(True)
+        self.assertFalse(window.way_boxes["part"].isChecked())
+        self.assertFalse(window.share_module.isHidden())
+        self.assertTrue(window.blocked_note.isHidden())
+        focus.assert_called()
+
     def test_with_two_machines_paired_the_page_offers_a_choice_of_machine(self):
         window = self.window
         self.assertFalse(window.machine_row.isHidden())
@@ -406,15 +462,43 @@ class CrossingPageTests(WindowTests):
         self.window.way_boxes["corner"].setChecked(True)
         self.assertIs(self.arrangements()[-1][1]["way_back"], True)
 
+    def test_moving_one_machine_tells_every_machine_whose_way_back_it_changed(self):
+        settings = self.saved()
+        settings["peers"][0].update(side="left", side_set_at=100, side_by=HIGH)
+        settings["peers"][1].update(side="left", side_set_at=200, side_by=HIGH)
+        settings["zones"] = [{"peer": BT, "kind": "edge"}, {"peer": CT, "kind": "edge", "off": True}]
+        app_config.write_settings(self.path, settings)
+        self.window._pull_peer_fields()
+        self.assertEqual(ways.way_back_by(self.window._crossing_settings(), CT), BT)
+        self.window._choose_machine(BT)
+        self.window._set_arrangement("right")
+        self.assertCountEqual([peer for peer, _data in self.arrangements()], [B, C])
+
+    def test_removing_the_machine_in_the_way_tells_the_one_it_blocked(self):
+        settings = self.saved()
+        settings["peers"][0].update(side="left", side_set_at=100, side_by=HIGH)
+        settings["peers"][1].update(side="left", side_set_at=200, side_by=HIGH)
+        settings["zones"] = [{"peer": BT, "kind": "edge", "off": True}, {"peer": CT, "kind": "edge"}]
+        app_config.write_settings(self.path, settings)
+        self.window._pull_peer_fields()
+        self.assertEqual(ways.way_back_by(self.window._crossing_settings(), BT), CT)
+
+        self.window._remove_peer(harness.TOKENS[C])
+
+        told = [(peer, data) for peer, data in self.arrangements() if peer == B]
+        self.assertEqual(len(told), 1)
+        self.assertFalse(told[0][1]["way_back"])
+        self.assertNotIn("way_back_by", told[0][1])
+
     def test_an_arrangement_that_changed_something_is_answered_with_this_pcs_own(self):
         window = self.window
-        window.bridge.arrangement.emit(CT, "left", 500, HIGH, True)
+        window.bridge.arrangement.emit(CT, "left", 500, HIGH, True, None)
         (peer, data), = self.arrangements()
         self.assertEqual((peer, data["edge"], data["set_at"], data["by"], data["way_back"]), (C, "right", 500, HIGH, True))
         self.assertIs(self.peer(CT)["way_back"], True)
-        window.bridge.arrangement.emit(CT, "left", 500, HIGH, True)
+        window.bridge.arrangement.emit(CT, "left", 500, HIGH, True, None)
         self.assertEqual(len(self.arrangements()), 1)
-        window.bridge.arrangement.emit(CT, "left", 500, HIGH, False)
+        window.bridge.arrangement.emit(CT, "left", 500, HIGH, False, None)
         self.assertEqual(len(self.arrangements()), 2)
         self.assertIs(self.peer(CT)["way_back"], False)
 
@@ -432,7 +516,7 @@ class CrossingPageTests(WindowTests):
         self.window.sender.arrangement_callback(C, {**read, "set_at": 501, "way_back": True})
         self.assertEqual([args[4] for args in heard], [False, True])
 
-    def test_a_way_that_would_clash_is_refused_with_the_sentence_and_the_box_goes_back(self):
+    def test_a_way_with_a_share_offer_keeps_its_box_off_and_shows_the_panel(self):
         window = self.window
         window._choose_machine(CT)
         window._set_arrangement("left")
@@ -440,10 +524,11 @@ class CrossingPageTests(WindowTests):
         window.way_boxes["edge"].setChecked(True)
         self.assertFalse(window.way_boxes["edge"].isChecked())
         self.assertEqual(self.path.read_bytes(), before)
-        self.assertFalse(window.clash_note.isHidden())
-        self.assertIn("Bee and Sea would both lead from the left edge of this PC", window.clash_note.text())
+        self.assertFalse(window.share_module.isHidden())
+        self.assertIn("Bee already crosses from the left edge", window.share_sentence.text())
+        self.assertTrue(window.blocked_note.isHidden())
         window._choose_machine(BT)
-        self.assertTrue(window.clash_note.isHidden())
+        self.assertTrue(window.share_module.isHidden())
 
     def test_ways_written_here_reach_that_machines_zones_only(self):
         window = self.window
@@ -472,14 +557,15 @@ class CrossingPageTests(WindowTests):
         window._choose_machine(BT)
         self.assertTrue(window.missing_note.isHidden())
 
-    def test_a_machine_whose_side_another_holds_is_named_with_the_one_that_holds_it(self):
+    def test_a_machine_whose_side_another_holds_is_named_in_the_share_panel(self):
         window = self.window
         window._on_arrangement(CT, "right", 500, HIGH)
         window._choose_machine(CT)
-        self.assertFalse(window.blocked_note.isHidden())
-        self.assertIn("Sea has no way in: Bee already leads from the left edge of this PC", window.blocked_note.text())
-        window._choose_machine(BT)
+        self.assertFalse(window.share_module.isHidden())
+        self.assertIn("Bee already crosses from the left edge", window.share_sentence.text())
         self.assertTrue(window.blocked_note.isHidden())
+        window._choose_machine(BT)
+        self.assertTrue(window.share_module.isHidden())
 
     def test_a_machine_that_said_no_way_leads_back_is_named_until_it_says_one_does(self):
         window = self.window
@@ -489,6 +575,14 @@ class CrossingPageTests(WindowTests):
         self.assertIn("Bee has no way back to this machine", window.no_way_back_note.text())
         window._on_arrangement(BT, "right", 50, HIGH, True)
         self.assertTrue(window.no_way_back_note.isHidden())
+
+    def test_an_arrangement_names_the_machine_holding_the_way_back_side(self):
+        window = self.window
+        window._choose_machine(CT)
+        window._on_arrangement(CT, "right", 500, HIGH, False, BT)
+        sea = next(item for item in app_config.load_settings(self.path)["peers"] if item["id"] == CT)
+        self.assertEqual(sea["way_back_by"], BT)
+        self.assertIn("Bee on its right too", window.no_way_back_note.text())
 
     def test_an_arrangement_from_the_machine_not_shown_moves_only_its_side(self):
         window = self.window
@@ -578,10 +672,16 @@ class DiagramWidgetTests(unittest.TestCase):
         self.assertEqual(picture._unplaced, "Not placed yet: Dee")
         self.assertFalse(picture.grab().isNull())
 
-    def test_one_machine_with_no_side_is_drawn_on_the_right_as_before(self):
+    def test_one_machine_with_no_side_is_drawn_on_the_right_but_no_edge_lights_until_a_side_is_held(self):
+        # This PC's engine crosses no edge for a machine with no side, as the page's Not learned yet says.
         picture = diagram.ArrangementDiagram()
-        picture.set_machines([self.machine("b", "Bee", "", ["edge"], chosen=True)], "Right Ctrl", "hold", False)
+        picture.set_machines([self.machine("b", "Bee", "", ["edge", "part"], chosen=True)], "Right Ctrl", "hold", False)
         self.assertEqual(picture._unplaced, "")
+        self.assertEqual(diagram._drawn_side({"side": ""}, True), "right")
+        self.assertEqual(picture._marks[("edge", "b", "right")], 0.0)
+        self.assertEqual(picture._marks[("track", "b", "right")], 0.0)
+        self.assertEqual(picture._marks[("part", "b", "right", "middle")], 0.0)
+        picture.set_machines([self.machine("b", "Bee", "right", ["edge"], chosen=True)], "Right Ctrl", "hold", False)
         self.assertEqual(picture._marks[("edge", "b", "right")], 1.0)
 
 

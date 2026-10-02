@@ -35,6 +35,7 @@ from bridge_fakes import (  # noqa: F401  (re-exported)
     crossing_config,
     make_config,
     quiet_logger,
+    redirect_to,
     settle,
 )
 from fake_link import OTHER_ID, PEER_ID, FakeLink, bring_up
@@ -323,7 +324,7 @@ class ControllerTests(unittest.TestCase):
             FakeQuartz.kCGKeyboardEventAutorepeat: 0,
             "unicode": "a",
         }
-        self.controller.redirecting = True
+        redirect_to(self.controller)
         returned = self._tap(FakeQuartz.kCGEventKeyDown, event)
         self.assertIsNone(returned)
         self.assertEqual(
@@ -353,7 +354,7 @@ class ControllerTests(unittest.TestCase):
         }
         self.controller.outbound = queue.Queue(maxsize=1)
         self.controller.outbound.put_nowait({"full": True})
-        self.controller.redirecting = True
+        redirect_to(self.controller)
         returned = self._tap(FakeQuartz.kCGEventKeyDown, event)
         self.assertIs(returned, event)
         self.assertFalse(self.controller.redirecting)
@@ -388,6 +389,40 @@ class ControllerTests(unittest.TestCase):
         self.assertEqual(link.dropped, ["Windows stopped responding"])
         self.assertEqual(self.controller.connection_status, "Windows stopped responding")
         self.assertEqual(self.alerts, [("Beamer", "Input returned to this Mac")])
+
+    def test_jump_chord_for_the_current_peer_returns_input_home_and_is_swallowed(self):
+        link = bring_up(self.controller)
+        self.controller.book.data["peers"][0]["id"] = protocol.id_text(PEER_ID)
+        self.controller.book.data["peers"][0]["jump_key"] = "ctrl+shift+2"
+        self.assertTrue(self.controller.set_redirecting(True))
+        flags = FakeQuartz.kCGEventFlagMaskControl | FakeQuartz.kCGEventFlagMaskShift
+        down = {FakeQuartz.kCGKeyboardEventKeycode: 0x13, FakeQuartz.kCGKeyboardEventAutorepeat: 0, "flags": flags,
+                "unicode": "2"}
+        up = {FakeQuartz.kCGKeyboardEventKeycode: 0x13, FakeQuartz.kCGKeyboardEventAutorepeat: 0, "flags": flags,
+              "unicode": "2"}
+        self.assertIsNone(self._tap(FakeQuartz.kCGEventKeyDown, down))
+        self.assertFalse(self.controller.redirecting)
+        repeat = {**down, FakeQuartz.kCGKeyboardEventAutorepeat: 1}
+        self.assertIsNone(self._tap(FakeQuartz.kCGEventKeyDown, repeat))
+        self.assertFalse(self.controller.redirecting)
+        self.assertIsNone(self._tap(FakeQuartz.kCGEventKeyUp, up))
+        self.assertEqual(link.sent, [])
+
+    def test_a_key_repeating_when_its_modifiers_arrive_is_not_a_jump_and_nothing_jumps_while_recording(self):
+        bring_up(self.controller)
+        self.controller.book.data["peers"][0]["id"] = protocol.id_text(PEER_ID)
+        self.controller.book.data["peers"][0]["jump_key"] = "ctrl+shift+2"
+        flags = FakeQuartz.kCGEventFlagMaskControl | FakeQuartz.kCGEventFlagMaskShift
+        down = {FakeQuartz.kCGKeyboardEventKeycode: 0x13, FakeQuartz.kCGKeyboardEventAutorepeat: 0, "flags": flags,
+                "unicode": "2"}
+        self._tap(FakeQuartz.kCGEventKeyDown, {**down, FakeQuartz.kCGKeyboardEventAutorepeat: 1})
+        self.assertFalse(self.controller.redirecting)
+        self.controller.jump_recording = True
+        self._tap(FakeQuartz.kCGEventKeyDown, down)
+        self.assertFalse(self.controller.redirecting)
+        self.controller.jump_recording = False
+        self._tap(FakeQuartz.kCGEventKeyDown, down)
+        self.assertTrue(self.controller.redirecting)
 
     def test_a_failed_connection_while_idle_drops_the_link_without_an_alert(self):
         link = bring_up(self.controller)
@@ -510,7 +545,7 @@ class ControllerTests(unittest.TestCase):
         self.assertTrue(self.controller.redirecting)
 
     def test_worker_exception_forces_local(self):
-        self.controller.redirecting = True
+        redirect_to(self.controller)
 
         def fail():
             raise RuntimeError("synthetic failure")
@@ -603,7 +638,7 @@ class ControllerTests(unittest.TestCase):
 
     def test_set_redirecting_off_resets_mouse_accumulators(self):
         bring_up(self.controller)
-        self.controller.redirecting = True
+        redirect_to(self.controller)
         self.controller.translator._move_accum_x = 0.4
         self.controller.translator._move_accum_y = -0.4
         self.controller.set_redirecting(False)
@@ -851,7 +886,7 @@ class OverlayGestureTests(unittest.TestCase):
         self.assertTrue(self.controller.outbound.empty())
 
     def test_overlay_gesture_translator_exception_does_not_raise(self):
-        self.controller.redirecting = True
+        redirect_to(self.controller)
 
         def boom(event_type, ns_event):
             raise RuntimeError("synthetic overlay translation failure")
@@ -865,7 +900,7 @@ class OverlayGestureTests(unittest.TestCase):
         logger = logging.getLogger("kvm-bridge-tests.overlay-gesture-capture")
         logger.setLevel(logging.INFO)
         controller = make_controller(self.clock, logger=logger)
-        controller.redirecting = True
+        redirect_to(controller)
         with self.assertLogs(logger, level="INFO") as captured:
             controller.handle_overlay_gesture(MAGNIFY_TYPE, FakeGestureEvent(magnification=0.01))
             controller.handle_overlay_gesture(MAGNIFY_TYPE, FakeGestureEvent(magnification=0.01))
@@ -875,7 +910,7 @@ class OverlayGestureTests(unittest.TestCase):
         self.assertEqual(len(overlay_logs), 1)
 
     def test_overlay_gesture_swipe_translated_while_redirecting(self):
-        self.controller.redirecting = True
+        redirect_to(self.controller)
         self.controller.handle_overlay_gesture(SWIPE_TYPE, FakeGestureEvent(deltaX=1.0))
         drained = []
         while not self.controller.outbound.empty():
@@ -899,7 +934,7 @@ class MediaKeyWiringTests(unittest.TestCase):
 
     def test_play_pause_is_forwarded_and_swallowed(self):
         controller = self._controller(lambda event: (8, self._data1(16)))
-        controller.redirecting = True
+        redirect_to(controller)
         self.assertIsNone(
             controller._event_tap_callback(None, self.SYSDEFINED, object(), None)
         )
@@ -910,7 +945,7 @@ class MediaKeyWiringTests(unittest.TestCase):
 
     def test_volume_key_up_sends_keyup(self):
         controller = self._controller(lambda event: (8, self._data1(0, down=False)))
-        controller.redirecting = True
+        redirect_to(controller)
         controller._event_tap_callback(None, self.SYSDEFINED, object(), None)
         self.assertEqual(
             controller.outbound.get_nowait(),
@@ -920,7 +955,7 @@ class MediaKeyWiringTests(unittest.TestCase):
     def test_non_media_system_event_passes_through(self):
         # NX code 3 is brightness-up, which Windows has no equivalent for.
         controller = self._controller(lambda event: (8, self._data1(3)))
-        controller.redirecting = True
+        redirect_to(controller)
         raw_event = object()
         self.assertIs(
             controller._event_tap_callback(None, self.SYSDEFINED, raw_event, None),
@@ -949,7 +984,7 @@ class MediaKeyWiringTests(unittest.TestCase):
             raise RuntimeError("boom")
 
         controller = self._controller(converter)
-        controller.redirecting = True
+        redirect_to(controller)
         raw_event = object()
         self.assertIs(
             controller._event_tap_callback(None, self.SYSDEFINED, raw_event, None),
@@ -1011,7 +1046,7 @@ class GestureWiringTests(unittest.TestCase):
             raise RuntimeError("synthetic AppKit failure")
 
         controller = self._controller(converter)
-        controller.redirecting = True
+        redirect_to(controller)
         raw_event = object()
         returned = controller._event_tap_callback(None, SWIPE_TYPE, raw_event, None)
         self.assertIs(returned, raw_event)
@@ -1036,7 +1071,7 @@ class GestureWiringTests(unittest.TestCase):
 
     def test_swipe_while_redirecting_is_translated_and_swallowed(self):
         controller = self._controller(lambda event: FakeGestureEvent(deltaX=1.0))
-        controller.redirecting = True
+        redirect_to(controller)
         returned = controller._event_tap_callback(None, SWIPE_TYPE, object(), None)
         self.assertIsNone(returned)
         drained = []
@@ -1051,7 +1086,7 @@ class GestureWiringTests(unittest.TestCase):
             self.clock, logger=logger,
             gesture_event_converter=lambda event: FakeGestureEvent(magnification=0.01),
         )
-        controller.redirecting = True
+        redirect_to(controller)
         with self.assertLogs(logger, level="INFO") as captured:
             # 0.01 stays below the 0.05 zoom step both times, so no
             # keydown/scroll/keyup messages are emitted at all -- the log
@@ -1080,7 +1115,7 @@ class DockControlWiringTests(unittest.TestCase):
 
     def test_swipe_up_while_redirecting_becomes_one_gesture_message_and_is_swallowed(self):
         controller = self._controller(lambda event: self._ended(motion=2, progress=-0.4))
-        controller.redirecting = True
+        redirect_to(controller)
         returned = controller._event_tap_callback(None, DOCK_CONTROL_TYPE, object(), None)
         self.assertIsNone(returned)
         self.assertEqual(controller.outbound.get_nowait(), protocol.gesture_msg("swipe_up"))
@@ -1105,7 +1140,7 @@ class DockControlWiringTests(unittest.TestCase):
             raise RuntimeError("synthetic field failure")
 
         controller = self._controller(reader)
-        controller.redirecting = True
+        redirect_to(controller)
         self.assertIsNone(controller._event_tap_callback(None, DOCK_CONTROL_TYPE, object(), None))
         self.assertTrue(controller.outbound.empty())
         self.assertTrue(controller.redirecting)

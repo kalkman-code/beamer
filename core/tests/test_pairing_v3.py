@@ -482,7 +482,7 @@ class StoreTests(unittest.TestCase):
         host_entry = rig.host_book.entries[0]
         self.assertEqual(host_entry, {
             "id": b64(REQUESTER_ID), "name": "Requester Mac", "platform": "macos", "token": token,
-            "host": "192.168.77.5", "port": 24820, "hw": "", "send": True, "allow_drive": True,
+            "host": "192.168.77.5", "port": 24820, "hw": "", "send": True, "allow_drive": True, "in_use": True,
             "side": "", "side_set_at": 0, "side_by": "", "paired_with": [], "paired_at": 1_790_000_000,
             "linked": False, "from_1_4": False,
         })

@@ -50,6 +50,48 @@ class SettingsStoreTests(unittest.TestCase):
             self.assertTrue(loaded.allow_windows_to_drive)
             self.assertFalse(store.load().send_to_windows)
 
+    def test_in_use_defaults_on_round_trips_and_rejects_non_booleans(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = SettingsStore(Path(directory) / "settings.json")
+            store.save(self.valid_raw())
+            entry = store.current()["peers"][0]
+            self.assertTrue(entry["in_use"])
+            store.set_peer(entry["token"], in_use=False)
+            self.assertFalse(store.current()["peers"][0]["in_use"])
+            with self.assertRaises(SettingsError):
+                store.set_peer(entry["token"], in_use="no")
+
+    def test_jump_key_round_trips_and_rejects_non_strings(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "settings.json"
+            store = SettingsStore(path)
+            store.save(self.valid_raw())
+            settings = store.current()
+            settings["peers"][0]["jump_key"] = "ctrl+shift+2"
+            store.save_settings(settings)
+            self.assertEqual(SettingsStore(path).current()["peers"][0]["jump_key"], "ctrl+shift+2")
+            settings["peers"][0]["jump_key"] = []
+            with self.assertRaises(SettingsError):
+                store.save_settings(settings)
+
+    def test_an_old_peer_without_a_jump_key_defaults_to_none(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = SettingsStore(Path(directory) / "settings.json")
+            store.save(self.valid_raw())
+            self.assertIsNone(store.current()["peers"][0].get("jump_key") or None)
+
+    def test_trigger_clash_is_refused_without_changing_the_saved_value_and_can_be_cleared(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = SettingsStore(Path(directory) / "settings.json")
+            store.save(self.valid_raw())
+            peer = store.current()["peers"][0]
+            store.set_jump_key(peer["id"], "ctrl+shift+2", "alt_r")
+            with self.assertRaises(SettingsError):
+                store.set_jump_key(peer["id"], "ctrl+f9", "f9")
+            self.assertEqual(store.current()["peers"][0]["jump_key"], "ctrl+shift+2")
+            store.set_jump_key(peer["id"], "", "alt_r")
+            self.assertEqual(store.current()["peers"][0]["jump_key"], "")
+
     def test_the_full_screen_hold_defaults_on_and_round_trips(self):
         with tempfile.TemporaryDirectory() as directory:
             store = SettingsStore(Path(directory) / "settings.json")
@@ -316,4 +358,3 @@ class LegacyPortTests(unittest.TestCase):
     def test_both_ports_are_below_the_range_the_system_hands_out(self):
         self.assertLess(protocol.DEFAULT_PORT, 49152)
         self.assertLess(protocol.PAIRING_PORT, 49152)
-

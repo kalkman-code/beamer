@@ -174,6 +174,14 @@ class CrossingPageRulesTests(unittest.TestCase):
         self.assertEqual(pages.parts_phrase("top", []), "the middle of the top edge")
         self.assertEqual(pages.parts_phrase("top", ["sideways"]), "the middle of the top edge")
 
+    def test_a_shared_side_names_its_holder_and_uses_plural_when_needed(self):
+        self.assertEqual(pages.share_sentence(["Bee"], "right", "Oak"),
+                         "Bee already crosses from the right edge of this Mac. The thirds you pick go to Oak; "
+                         "the rest stay with Bee.")
+        self.assertEqual(pages.share_sentence(["Bee", "Sea"], "top", "Oak"),
+                         "Bee and Sea already cross from the top edge of this Mac. The thirds you pick go to Oak; "
+                         "the rest stay where they are.")
+
     def test_the_crossing_line_gives_the_first_reason_nothing_can_cross(self):
         line = pages.crossing_state_sentence
         self.assertTrue(line(False, False, False, True, False, None).startswith("Not paired yet"))
@@ -356,6 +364,10 @@ class SendItemsTest(unittest.TestCase):
         peers = [self.entry("A", "Bee"), self.entry("B", "Sea"), self.entry("C", "Oak", send=False)]
         self.assertEqual(pages.send_items(peers, None, False), [("A", "Send input to Bee"), ("B", "Send input to Sea")])
         self.assertEqual(pages.send_items(peers, "B", False), [("A", "Send input to Bee"), ("B", "Bring input back")])
+
+    def test_a_machine_not_in_use_has_no_send_item(self):
+        peers = [self.entry("A", "Bee"), self.entry("B", "Sea"), self.entry("C", "Oak", in_use=False)]
+        self.assertEqual(pages.send_items(peers, None, False), [("A", "Send input to Bee"), ("B", "Send input to Sea")])
 
     def test_a_nameless_machines_address_is_hidden_when_asked(self):
         peers = [self.entry("A", ""), self.entry("B", "Sea")]

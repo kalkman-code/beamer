@@ -146,6 +146,17 @@ def pairing_error_text(error: Exception, name: str) -> str:
     return f"Pairing failed: {reason}."
 
 
+def refusal_text(why: str, name: str, other: Optional[str]) -> Optional[str]:
+    """The alert for an `owned` or `busy` refusal, naming the machine in the way when known."""
+    if why == "owned":
+        return (f"Can't cross to {name}: it is being driven from {other}." if other else
+                f"Can't cross to {name}: another machine is driving it.")
+    if why == "busy":
+        return (f"Can't cross to {name}: it is driving {other}." if other else
+                f"Can't cross to {name}: it is driving another machine.")
+    return None
+
+
 def host_outcome_text(outcome: Optional[str], entry: Optional[dict]) -> str:
     """How the code on screen ended, said to the person at this machine (`PairingService.outcome`,
     with `entry` the machine that paired or, for `known`, the entry it was found to be); "" while
