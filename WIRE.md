@@ -135,10 +135,10 @@ Rules:
   it is not dialled, the responder never computes or matches its key id, and Overview asks the
   user to pair that machine again: "*name* was paired on Beamer 1.4. Pair the two again to link
   them on 1.5.0." A new pairing with that machine replaces it (section 6).
-- **Removing a peer** deletes its entry, token included, closes its links at once, and ends its
-  ownership if it holds it (section 4). The peer is told nothing; its next link's key id is
-  unknown here, so it is closed with nothing sent, and the peer says this machine closed the
-  connection (section 2).
+- **Removing a peer** resets a local Match design with selection to None, then deletes its entry
+  and token, closes its links, and ends its ownership if it holds it (section 4). Its next link's
+  key id is unknown here, so it is closed with nothing sent, and the peer says this machine closed
+  the connection (section 2).
 - **Turning `allow_drive` off** ends that peer's ownership at once. Turning `send` off lets go of
   that peer if this machine's input is on it, and closes the link this machine opened to it.
 - **Writes are atomic**: a new file beside the old, then a rename over it.
@@ -467,7 +467,8 @@ Capabilities say what a machine does with a message it receives:
 | `gestures` | it acts on `gesture` |
 | `media_keys` | it acts on the media key names (section 7) |
 | `text` | it types `text` |
-| `settings` | it keeps Same on all machines (`settings`) |
+| `settings` | it receives Same on all machines (`settings`) |
+| `design_sync` | with `settings`, it sends and receives direct Design states (`settings.data.design_sync`) and can be followed |
 
 A sender does not send a message its peer's capabilities do not cover. A receiver that gets one
 anyway drops it, and still acknowledges it when it carries a `seq`.
@@ -1058,7 +1059,9 @@ A key travels as `key`, a name, in `keydown` and `keyup`:
   point, with Shift applied: `"A"` with Shift down, `"a"` without. While Command, Control or Alt
   (not Shift) is held, it sends the key's own unshifted character from its layout instead, so
   Option-V on a Mac is `"v"` and not `"√"`, and a German keyboard's Command-Z is `"z"`. Numpad
-  keys send their character (`"1"`, `"+"`).
+  keys send their character (`"1"`, `"+"`). When Windows cannot compose a dead key and the next
+  character into one code point, it sends the visible sequence through `text` instead; a held base
+  key repeats its character as `text` and its physical key-up remains swallowed.
 - **`us`** is sent beside a character: the unshifted, lower-case character the same key position
   types on a US layout, for a receiver whose layout cannot type `key`. A key with no US
   character (on a JIS keyboard, say) sends none.
@@ -1090,23 +1093,24 @@ The machines fall in two families: the Mac (`macos`, `ios`), and the PC (`window
 `android`, and any unknown platform). Between two machines of the same family every key goes out
 as itself. Between the two families, the sender applies its user's saved style:
 
-| Physical key on the sender | Same family | Across, Semantic (the default) | Across, Positional |
-|---|---|---|---|
-| Mac Control | `ctrl` | `cmd` | `ctrl` |
-| Mac right Control | `ctrl_r` | `cmd` | `ctrl` |
-| Mac Command | `cmd` | `ctrl` | `cmd` |
-| Mac right Command | `cmd_r` | `ctrl` | `cmd` |
-| Mac Option | `alt` | `alt` | `alt` |
-| Mac right Option | `alt_r` | `alt` | `alt` |
-| PC Control | `ctrl` | `cmd` | `ctrl` |
-| PC right Control | `ctrl_r` | `cmd_r` | `ctrl_r` |
-| PC Windows or Super | `cmd` | `ctrl` | `cmd` |
-| PC right Windows or Super | `cmd_r` | `ctrl_r` | `cmd_r` |
-| PC Alt | `alt` | `alt` | `alt` |
-| PC right Alt or AltGr | `alt_r` | `alt_r` | `alt_r` |
+| Physical key on the sender | Same family | Across, Semantic (the default) | Across, Positional | Across, Mac keyboard layout (PC sender only) |
+|---|---|---|---|---|---|
+| Mac Control | `ctrl` | `cmd` | `ctrl` | — |
+| Mac right Control | `ctrl_r` | `cmd` | `ctrl` | — |
+| Mac Command | `cmd` | `ctrl` | `cmd` | — |
+| Mac right Command | `cmd_r` | `ctrl` | `cmd` | — |
+| Mac Option | `alt` | `alt` | `alt` | — |
+| Mac right Option | `alt_r` | `alt` | `alt` | — |
+| PC Control | `ctrl` | `cmd` | `ctrl` | `ctrl` |
+| PC right Control | `ctrl_r` | `cmd_r` | `ctrl_r` | `ctrl_r` |
+| PC Windows or Super | `cmd` | `ctrl` | `cmd` | `alt` |
+| PC right Windows or Super | `cmd_r` | `ctrl_r` | `cmd_r` | `alt_r` |
+| PC Alt | `alt` | `alt` | `alt` | `cmd` |
+| PC right Alt or AltGr | `alt_r` | `alt_r` | `alt_r` | `cmd_r` |
 
 - Semantic makes the everyday shortcuts line up: Command-C on a Mac arrives as Control-C on a PC,
-  and Control-C on a PC as Command-C on a Mac. Positional keeps each key in its place.
+  and Control-C on a PC as Command-C on a Mac. Positional keeps each key in its place. Mac keyboard
+  layout maps a PC keyboard's modifiers to the corresponding Mac keys by their positions.
 - The Mac's rows across families are 1.4.x's `DEFAULT_KEY_MAP` and `LEGACY_POSITIONAL_KEY_MAP`
   as they stand, sides folded. The PC's are Windows' capture names and 1.4.x's `POSITIONAL_SWAP`.
   Same family is new: the Mac as itself with its sides kept (the first design named the folded
@@ -1115,6 +1119,9 @@ as itself. Between the two families, the sender applies its user's saved style:
 - The saved style is the Mac's `key_map` (a style name, or a map a user wrote by hand, which
   applies across families only) and Windows' `modifier_style`. Both survive the migration. A
   Linux app keeps `modifier_style` as Windows does.
+- The PC keeps `modifier_style` locally; it is not sent to peers or shared by Same on all machines.
+  Key messages contain only the resulting key names, which older peers already understand. A
+  settings file without this field defaults to Semantic.
 - A Linux sender reads keys by evdev code: `KEY_LEFTCTRL` and `KEY_RIGHTCTRL` are PC Control,
   `KEY_LEFTMETA` and `KEY_RIGHTMETA` Windows or Super, `KEY_LEFTALT` Alt and `KEY_RIGHTALT` right
   Alt or AltGr. A Linux receiver presses the same codes for the same names.
@@ -1271,7 +1278,9 @@ every peer.
   made the change, or `""`. A sender always sends all three. A receiver reads a missing `by` as
   `""`, and also reads a `by` spelt in standard base64 with padding, as the desktops do; a
   message missing `on` or `set_at`, or with any of the three of the wrong type or not an id, is
-  malformed and ignored whole. `crossing` and `design` are objects, present only when `on` is
+  malformed and ignored whole. The receiver validates this envelope before reading `design_sync`,
+  so a malformed outer field drops the optional Design state with the rest of the message.
+  `crossing` and `design` are objects, present only when `on` is
   true; one that is absent or is not an object brings no values, and the message stands.
 - **Each value stands alone.** Unlike every other message, a value in `crossing` or `design`
   outside the table below, or one this receiver cannot hold (an effect it does not have), is
@@ -1305,6 +1314,40 @@ every peer.
   older or equal one is not sent on, so it stops. Turning it off travels the same way.
 - A change made here is stamped with the current time, and never lower than the stamp held plus
   one, so a change on a machine whose clock is behind still wins.
+
+**Follow a machine's design.** Each machine's Design page has **Match design with**: None, or one
+paired machine advertising both `settings` and `design_sync`. The selection is local; there is no
+group object and the selection is never sent. A machine that does not advertise `design_sync` is
+shown unavailable with “Needs beta.6 or later”.
+
+The optional `design_sync` member is independent of `on`. A capable machine sends its own current
+Design state to each directly linked capable peer after link-up and whenever its Design changes,
+even while Same on all machines is off. The state is:
+
+```json
+{"type":"settings","data":{"on":false,"set_at":1790000000,"by":"<b64>",
+  "design_sync":{"set_at":1790000001,"by":"<b64>","values":{
+    "glow_style":"glow","glow_colour":"signal","effect_length":"normal",
+    "effect_size":"medium","shortcut_arrival":true,"shortcut_arrival_style":"match"}}}}
+```
+
+`design_sync` is a complete independently stamped Design state. Its `set_at` and `by` use the
+newer-wins ordering and clock bounds above. Values are validated individually; unsupported keys or
+values are ignored. Missing `effect_size` means `"medium"`; its wire type is string and allowed
+values are `"small"`, `"medium"` and `"large"`. Same on all machines has precedence: the follow
+selection stays set but does not apply while Same is on. A newer state from the selected machine
+applies to this machine's Design only when its stamp is newer than this machine's own Design stamp.
+The follower keeps the leader's `set_at` and `by`, so an announcement carries the same stamp through
+a chain (C follows B, B follows A) and both sides of a mutual follow converge on the newest state
+when their initial announcements cross in flight. If applying a state leaves every Design value
+identical, it is not a change and nothing is announced; the newer stamp is still kept locally, so an
+older state cannot replace it.
+
+Editing any Design control on a follower turns following off and the page says so. Turning off
+Same on all machines resumes following from the selected machine's latest received state. Removing
+or unpairing the selected machine resets the selection to None. An offline followed machine leaves
+the last look in place; the next link-up sends its current state and catches the follower up.
+Older peers ignore the optional field. A peer that does not send it cannot be followed.
 
 ## Versions
 
@@ -1342,6 +1385,8 @@ one against the code and against the primitives written out by hand.
 - `ack` carries `held_us`, and the responder acknowledges a lone event at once.
 - Each initiator counts `seq` from 1 on every link; version 5's Mac carried it across reconnects.
 - New messages: `accept`, `accepts`, `refuse`, `paired`, `text`.
+- `settings` gains the optional `design_sync` member for per-machine Design matches; older betas
+  ignore it, while 1.5 keeps it separate from the existing `on` switch.
 
 ## Changes from the first design
 
@@ -1363,10 +1408,13 @@ one against the code and against the primitives written out by hand.
   the keys. Version 6 puts a per-pair key id there instead, with the ids sealed in `hello` and
   `welcome`, and adds forward secrecy (decided 1 and 2).
 - **Pairing by QR** carries a second secret (decided 7).
+- **Design matching** is a local choice to follow one machine directly. Applying a newer state
+  republishes the local result so chains carry on; identical values publish nothing, so mutual
+  follows converge without forwarding received state (decided 8).
 
 ## Decided
 
-Decided on 30-09-2026, and 6 amended on 01-10-2026. The text above already follows these.
+Decided on 30-09-2026, 6 on 01-10-2026, and 8 on 02-10-2026. The text above already follows these.
 
 1. **A per-pair key id in the preamble, not the machine id.** The first 16 bytes of
    `HKDF-SHA-256(token, salt "beamer-link-v6", info "beamer-key-id")`; the machine ids travel in
@@ -1381,6 +1429,10 @@ Decided on 30-09-2026, and 6 amended on 01-10-2026. The text above already follo
    (sections 1 and 2).
 7. **The QR's extra secret.** 16 random bytes per code in the QR as `k`; `qr: 1` in
    `pair_start` makes the password the code followed by those bytes (section 6).
+8. **Follow a machine's Design directly.** A local selection names at most one paired machine and
+   never goes on the wire. Machines send their own stamped Design to direct capable peers; a
+   follower that changes applies and announces its own resulting state. Identical values announce
+   nothing, so a mutual follow converges. Same on all machines takes precedence (section 10).
 
 ## Open questions
 

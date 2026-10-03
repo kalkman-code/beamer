@@ -24,6 +24,7 @@ RADIUS = tokens.RADIUS
 TRACKING = tokens.TRACKING
 MODULE_PADDING = tokens.MODULE_PADDING
 RACK_GAP = tokens.RACK_GAP
+PAGE_CONTENT_WIDTH = tokens.PAGE_CONTENT_WIDTH
 MIN_WINDOW = tokens.MIN_WINDOW["mac"]
 
 # Derived here rather than added to the shared tokens: the mock's negative tracking on the large
@@ -245,7 +246,7 @@ def appearance_named(dark: bool):
     return AppKit.NSAppearance.appearanceNamed_(AppKit.NSAppearanceNameDarkAqua if dark else AppKit.NSAppearanceNameAqua)
 
 # The longest a line of running text may get before it wraps, whatever the window width.
-READING_WIDTH = 560.0
+READING_WIDTH = tokens.READING_WIDTH
 
 
 class AppearanceWatch(AppKit.NSObject):

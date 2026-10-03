@@ -551,9 +551,9 @@ def _played(view, still_at):
     return still_at if since is None else still_at + max(0.0, time.monotonic() - since)
 
 
-def effect_still(effect_id, colour, logger, height=84, place=lambda: "edge", pace=lambda: 1.0):
-    """A tile's still frame of `effect_id`, in whatever colour `colour()` names, at the place
-    `place()` names and the length `pace()` gives, when it draws."""
+def effect_still(effect_id, colour, logger, height=84, place=lambda: "edge", pace=lambda: 1.0,
+                 effect_size=lambda: "medium"):
+    """A tile's still frame of `effect_id`, in the selected colour, place, length and size."""
     view = effects_overlay.EffectsCanvas.alloc().initWithFrame_(AppKit.NSMakeRect(0, 0, 1, 1))
     view.setTranslatesAutoresizingMaskIntoConstraints_(False)
     view.heightAnchor().constraintEqualToConstant_(height).setActive_(True)
@@ -570,7 +570,7 @@ def effect_still(effect_id, colour, logger, height=84, place=lambda: "edge", pac
         dark = theme.is_dark()
         where = place()
         scene = effects.preview_scene(fx, _played(view, STILL_AT_S), where, effects_overlay.palette(colour()), dark=dark,
-                                      pace=pace())
+                                      pace=pace(), effect_size=effect_size())
         # A small pointer, so the effect rather than the arrow is what a tile shows.
         effects_overlay.draw_scene(Quartz, ctx, scene, width, height, where, dark, crop=STILL_CROPS[where], pointer=11.0)
 
@@ -578,7 +578,7 @@ def effect_still(effect_id, colour, logger, height=84, place=lambda: "edge", pac
     return view
 
 
-def switch_still(fx, colour, logger, height=84, pace=lambda: 1.0):
+def switch_still(fx, colour, logger, height=84, pace=lambda: 1.0, effect_size=lambda: "medium"):
     """A tile's still frame of what a switch plays: `fx()` is the Effect, asked when it draws, since
     Same as crossing follows the crossing style."""
     view = effect_still(None, colour, logger, height)
@@ -586,7 +586,7 @@ def switch_still(fx, colour, logger, height=84, pace=lambda: 1.0):
     def paint(ctx, width, height):
         dark = theme.is_dark()
         scene = effects.preview_switch_scene(fx(), _played(view, SWITCH_STILL_AT_S), effects_overlay.palette(colour()),
-                                             dark=dark, pace=pace())
+                                             dark=dark, pace=pace(), effect_size=effect_size())
         effects_overlay.draw_scene(Quartz, ctx, scene, width, height, "switch", dark, crop=SWITCH_STILL_CROP, pointer=11.0)
 
     view.painter = paint

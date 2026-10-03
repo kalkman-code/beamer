@@ -21,6 +21,22 @@ def target_of(message):
     return protocol.read_id(message["data"]["target"])
 
 
+class DeadKeyRoutingTests(unittest.TestCase):
+    def setUp(self):
+        self.rig = Rig()
+        self.sender = self.rig.sender
+
+    def test_a_dead_key_is_swallowed_only_while_its_peer_is_live(self):
+        self.sender.set_redirecting(True)
+        sent = list(self.rig.sent(B))
+        self.assertTrue(self.sender.on_dead_key())
+        self.assertEqual(self.rig.sent(B), sent)
+
+        self.rig.links.up_set.discard(B)
+        self.assertFalse(self.sender.on_dead_key())
+        self.assertFalse(self.sender.redirecting)
+
+
 class EdgeTests(unittest.TestCase):
     """The outward crossing: the zone's model, the gate and the pin, which is everything the hook
     thread does per mouse move."""
@@ -154,6 +170,38 @@ class TakingTests(unittest.TestCase):
         kinds = [message["type"] for message in self.rig.sent(B)]
         self.assertEqual(kinds, ["focus", "clipboard", "keydown"])
         self.assertEqual(self.rig.sent(B, "clipboard")[0]["data"]["text"], "here")
+
+    def test_noncomposable_dead_key_sequence_is_sent_as_text(self):
+        self.sender.set_redirecting(True)
+        self.assertTrue(self.sender.on_text("§a", 0x41))
+        self.assertEqual(self.rig.sent(B, protocol.MSG_TEXT)[0]["data"]["text"], "§a")
+
+    def test_noncomposable_dead_key_text_releases_and_restores_remote_modifiers(self):
+        self.sender.set_redirecting(True)
+        self.rig.flush()
+        self.rig.links.sent.clear()
+        self.assertTrue(self.sender.on_key("shift", True, 0x10))
+
+        self.assertTrue(self.sender.on_text("§A", 0x41))
+
+        self.assertEqual(
+            [message["type"] for message in self.rig.sent(B)],
+            [protocol.MSG_KEYDOWN, protocol.MSG_KEYUP, protocol.MSG_TEXT, protocol.MSG_KEYDOWN],
+        )
+
+    def test_temporary_text_release_keeps_the_held_modifier_wire_name_if_style_changes(self):
+        self.sender.set_redirecting(True)
+        self.rig.accept_take()
+        self.sender.on_key("cmd", True, 0xA2)
+        self.rig.flush()
+        original = self.rig.sent(B, protocol.MSG_KEYDOWN)[0]["data"]["key"]
+        physical = self.sender._keys_down[0xA2]
+
+        released = self.sender._key_message(B, {"type": protocol.MSG_KEYUP, "data": dict(physical)}, preserve=True)
+        self.sender.update_config(make_config(modifier_style="positional"))
+        restored = self.sender._key_message(B, {"type": protocol.MSG_KEYDOWN, "data": dict(physical)})
+
+        self.assertEqual((released["data"]["key"], restored["data"]["key"]), (original, original))
 
     def test_an_image_too_large_to_decode_is_not_sent_but_the_text_is(self):
         for image, sent in ((pngs.png(), True), (pngs.png(16384, 16384), False)):
@@ -321,11 +369,58 @@ class OnwardTests(unittest.TestCase):
         self.rig.inbound(C, protocol.accept_msg(self.sender._owner.route))
         self.assertEqual([m["data"]["key"] for m in self.rig.sent(C, "keydown")], ["a"])
 
+    def test_text_during_chained_handover_brackets_a_modifier_waiting_to_be_replayed(self):
+        self.switch(C)
+        self.assertTrue(self.sender.on_key("shift", True, 0x10))
+        self.assertTrue(self.sender.on_text("A", 0x41))
+
+        self.rig.inbound(C, protocol.accept_msg(self.sender._owner.route))
+
+        self.assertEqual(
+            [message["type"] for message in self.rig.sent(C) if message["type"] in protocol.INPUT_TYPES],
+            [protocol.MSG_KEYDOWN, protocol.MSG_KEYUP, protocol.MSG_TEXT, protocol.MSG_KEYDOWN],
+        )
+
+    def test_text_replayed_after_a_refused_handover_brackets_the_current_machines_modifier(self):
+        self.sender.on_key("shift", True, 0x10)
+        self.rig.flush()
+        self.switch(C)
+        self.assertTrue(self.sender.on_text("^x", 0x58))
+
+        self.rig.inbound(C, protocol.refuse_msg(self.sender._owner.route, "owned"))
+
+        self.assertEqual(
+            [message["type"] for message in self.rig.sent(B) if message["type"] in protocol.INPUT_TYPES],
+            [protocol.MSG_KEYDOWN, protocol.MSG_KEYUP, protocol.MSG_TEXT, protocol.MSG_KEYDOWN],
+        )
+
+    def test_text_replay_keeps_a_modifier_bracket_when_the_key_repeats_during_handover(self):
+        self.sender.on_key("shift", True, 0x10)
+        self.rig.flush()
+        self.switch(C)
+        self.assertTrue(self.sender.on_text("^x", 0x58))
+        self.sender.on_key("shift", True, 0x10)
+
+        self.rig.inbound(C, protocol.refuse_msg(self.sender._owner.route, "owned"))
+
+        self.assertEqual(
+            [message["type"] for message in self.rig.sent(B) if message["type"] in protocol.INPUT_TYPES],
+            [protocol.MSG_KEYDOWN, protocol.MSG_KEYUP, protocol.MSG_TEXT, protocol.MSG_KEYDOWN, protocol.MSG_KEYDOWN],
+        )
+
     def test_a_switch_home_lands_the_pointer_and_reports_the_arrival(self):
         self.switch(HERE, edge="left", offset=0.5)
         self.assertFalse(self.sender.redirecting)
         self.assertEqual(self.rig.desktop.placed, [(0, 540)])
         self.assertEqual(self.rig.arrivals, [("left", 0, 540)])
+
+    def test_the_log_names_the_edge_input_lands_at_both_ways(self):
+        with self.assertLogs(sender.LOGGER, "INFO") as said:
+            self.switch(C, edge="right", offset=0.25)
+            self.rig.inbound(C, protocol.accept_msg(self.sender._owner.route))
+            self.rig.inbound(C, protocol.switch_v6(self.sender._owner.route, HERE, edge="left", offset=0.5))
+        self.assertTrue(any("input is on Other, at its right edge" in line for line in said.output), said.output)
+        self.assertTrue(any("input returned to this PC (switch), at its left edge" in line for line in said.output), said.output)
 
     def test_a_switch_home_with_no_position_reports_where_the_pointer_is(self):
         self.switch(HERE)
@@ -405,6 +500,18 @@ class KeyTests(unittest.TestCase):
         self.sender.on_key("cmd", True, 0xA2)
         self.sender.on_key("ctrl", True, 0x5B)
         self.assertEqual(self.keys(), [("keydown", "ctrl"), ("keydown", "cmd")])
+
+    def test_mac_layout_sends_both_sides_of_each_modifier_to_the_mac_key(self):
+        self.sender.update_config(make_config(modifier_style="mac_layout"))
+        for name, vk in (("cmd", 0xA2), ("cmd_r", 0xA3), ("ctrl", 0x5B), ("ctrl_r", 0x5C),
+                         ("alt", 0xA4), ("alt_r", 0xA5)):
+            self.sender.on_key(name, True, vk)
+            self.sender.on_key(name, False, vk)
+        self.assertEqual(
+            self.keys(),
+            [(kind, key) for key in ("ctrl", "ctrl_r", "alt", "alt_r", "cmd", "cmd_r")
+             for kind in ("keydown", "keyup")],
+        )
 
     def test_to_another_pc_every_key_goes_as_itself(self):
         rig = Rig(entries=[harness.entry(B, "Other PC", platform="windows", side="left")])

@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import copy
 import ctypes
+import math
 import sys
 import time
 
@@ -287,6 +288,8 @@ class EdgeGlow(QWidget):
         self._part = None
         self._style = "glow"
         self._colour = "signal"
+        self._size = "medium"
+        self._band = float(BAND_PX)
         self._state = GlowState()
         self._dark = True
         self._updated_at = 0.0
@@ -295,9 +298,10 @@ class EdgeGlow(QWidget):
         self._timer.setInterval(16)
         self._timer.timeout.connect(self._tick)
 
-    def configure(self, style: str, colour: str, length: str = "normal") -> None:
+    def configure(self, style: str, colour: str, length: str = "normal", size: str = "medium") -> None:
         self._style = style
         self._colour = colour
+        self._size = size
         self._state.pace = effects.pace(length)
 
     def set_pressure(self, edge: str, pressure: float, crossed: bool, part=None) -> None:
@@ -329,19 +333,21 @@ class EdgeGlow(QWidget):
         cursor = QCursor.pos()
         owner = next((r for r in rects if r.x <= cursor.x() < r.x + r.width and r.y <= cursor.y() < r.y + r.height),
                      None) or crossing.owning_monitor(rects, self._edge)
+        self._band = effects.edge_depth(owner.width, owner.height, self._size)
         if self._part in crossing.CORNERS:
             box = corner_of_monitor(owner, self._part, min(CORNER_ARM_PX, owner.width, owner.height))
             self.setGeometry(QRect(box.x, box.y, box.width, box.height))
             return
         owner = part_of_monitor(owner, self._edge, self._part)
+        band = math.ceil(self._band)
         if self._edge == "left":
-            self.setGeometry(QRect(owner.x, owner.y, BAND_PX, owner.height))
+            self.setGeometry(QRect(owner.x, owner.y, band, owner.height))
         elif self._edge == "right":
-            self.setGeometry(QRect(owner.right - BAND_PX + 1, owner.y, BAND_PX, owner.height))
+            self.setGeometry(QRect(owner.right - band + 1, owner.y, band, owner.height))
         elif self._edge == "top":
-            self.setGeometry(QRect(owner.x, owner.y, owner.width, BAND_PX))
+            self.setGeometry(QRect(owner.x, owner.y, owner.width, band))
         else:
-            self.setGeometry(QRect(owner.x, owner.bottom - BAND_PX + 1, owner.width, BAND_PX))
+            self.setGeometry(QRect(owner.x, owner.bottom - band + 1, owner.width, band))
 
     def _tick(self) -> None:
         now = time.monotonic()
@@ -359,9 +365,11 @@ class EdgeGlow(QWidget):
     def paintEvent(self, _event) -> None:
         painter = QPainter(self)
         if self._part in crossing.CORNERS:
-            paint_corner(painter, self.rect(), self._part, self._style, self._colour, self._state, dark=self._dark)
+            paint_corner(painter, self.rect(), self._part, self._style, self._colour, self._state,
+                         band=self._band, dark=self._dark)
         else:
-            paint(painter, self.rect(), self._edge, self._style, self._colour, self._state, dark=self._dark,
+            paint(painter, self.rect(), self._edge, self._style, self._colour, self._state,
+                  band=self._band, dark=self._dark,
                   taper=self._part in crossing.PARTS)
         painter.end()
 

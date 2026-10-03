@@ -8,7 +8,7 @@ from typing import Mapping, Optional, Union
 
 MAC_PLATFORMS = frozenset({"macos", "ios"})
 
-STYLES = ("semantic", "positional")
+STYLES = ("semantic", "positional", "mac_layout")
 
 # Across families, Semantic: the everyday shortcuts line up (Command-C arrives as Control-C).
 # 1.4.x's DEFAULT_KEY_MAP on the Mac and the Windows capture names on Windows.
@@ -16,12 +16,19 @@ _MAC_SEMANTIC = {"ctrl": "cmd", "ctrl_r": "cmd", "cmd": "ctrl", "cmd_r": "ctrl",
 _MAC_POSITIONAL = {"ctrl": "ctrl", "ctrl_r": "ctrl", "cmd": "cmd", "cmd_r": "cmd", "alt": "alt", "alt_r": "alt"}
 _PC_SEMANTIC = {"ctrl": "cmd", "ctrl_r": "cmd_r", "cmd": "ctrl", "cmd_r": "ctrl_r"}
 _PC_POSITIONAL: dict = {}
+_PC_MAC_LAYOUT = {
+    "ctrl": "ctrl", "ctrl_r": "ctrl_r",
+    "cmd": "alt", "cmd_r": "alt_r",
+    "alt": "cmd", "alt_r": "cmd_r",
+}
 
 _ACROSS = {
     (True, "semantic"): _MAC_SEMANTIC,
     (True, "positional"): _MAC_POSITIONAL,
+    (True, "mac_layout"): _MAC_SEMANTIC,
     (False, "semantic"): _PC_SEMANTIC,
     (False, "positional"): _PC_POSITIONAL,
+    (False, "mac_layout"): _PC_MAC_LAYOUT,
 }
 
 

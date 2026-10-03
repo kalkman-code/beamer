@@ -23,6 +23,7 @@ from PyObjCTools import AppHelper
 import crossing
 import desktop_mac
 from kvm_bridge_app import TrayApp
+from core import effects
 
 
 def _feel(**overrides):
@@ -333,7 +334,7 @@ class MenuBarArmTest(unittest.TestCase):
     def test_a_top_corners_arm_fills_the_menu_bar_as_the_side_arm_fills_its_band(self):
         glow = self._glow("glow", (1720.0, 0.0, 8.0, 8.0), "right")
         self._draw(glow, 37.0)
-        side = 2.0 + glow.BAND_MAX
+        side = effects.edge_depth(1728, 1117, "medium")
         self.assertAlmostEqual(glow.fill.frame().size.height, 37.0)
         self.assertAlmostEqual(glow.side.frame().size.width, side)
         # Still hung from the top of the screen.

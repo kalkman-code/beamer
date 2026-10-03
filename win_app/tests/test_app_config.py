@@ -73,6 +73,8 @@ class EdgeGlowConfigTests(unittest.TestCase):
         self.assertEqual((config.glow_style, config.glow_colour), ("glow", "ember"))
         config = config_from_dict({**BASE, "glow_style": "discharge", "glow_colour": "sunset"})
         self.assertEqual((config.glow_style, config.glow_colour), ("discharge", "sunset"))
+        config = config_from_dict({**BASE, "glow_style": "aperture", "glow_colour": "marbled"})
+        self.assertEqual((config.glow_style, config.glow_colour), ("aperture", "marbled"))
 
     def test_a_colour_resolves_to_todays_palette_else_its_pack(self):
         from core import effects
@@ -88,6 +90,13 @@ class EdgeGlowConfigTests(unittest.TestCase):
         self.assertEqual(config_to_dict(config)["effect_length"], "long")
         with self.assertRaises(ConfigError):
             config_from_dict({**BASE, "effect_length": "forever"})
+
+    def test_effect_size_defaults_to_medium_and_round_trips(self):
+        self.assertEqual(config_from_dict(dict(BASE)).effect_size, "medium")
+        config = config_from_dict({**BASE, "effect_size": "large"})
+        self.assertEqual(config_to_dict(config)["effect_size"], "large")
+        with self.assertRaises(ConfigError):
+            config_from_dict({**BASE, "effect_size": "huge"})
 
     def test_a_saved_warp_choice_reads_as_its_stand_in(self):
         # Warp is offered nowhere for now; a PC that chose it keeps working.

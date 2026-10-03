@@ -309,7 +309,7 @@ class LengthTests(unittest.TestCase):
             lasted[length] = t
         self.assertLess(lasted["short"], lasted["normal"])
         self.assertLess(lasted["normal"], lasted["long"])
-        self.assertAlmostEqual(lasted["long"] / lasted["normal"], 1.5, delta=0.1)
+        self.assertAlmostEqual(lasted["long"] / lasted["normal"], 2.0, delta=0.1)
 
     def test_the_push_follows_the_hand_whatever_the_length(self):
         fx = effects.effect("flint")

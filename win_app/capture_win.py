@@ -44,7 +44,8 @@ import logging
 import sys
 import threading
 import time
-from typing import Callable, Dict, List, Optional, Set, Tuple
+import unicodedata
+from typing import Callable, Dict, List, Optional, Set, Tuple, Union
 
 from input_injector import INJECTED_MARK, SCAN_TO_US
 
@@ -274,28 +275,70 @@ class KeyboardState:
     """The keyboard bytes ToUnicodeEx is asked to translate against: shift and
     caps lock as they really are, every other modifier cleared. Held as a
     plain dict of virtual key to byte so the translation is testable without
-    Windows."""
+    Windows. Dead accents stay here in software, never in Windows' keyboard state."""
 
     def __init__(self) -> None:
         self.shift_down = False
         self.caps_lock = False
+        self.pending_dead_key: Optional[str] = None
 
     def bytes_for(self) -> Dict[int, int]:
         state = {VK_SHIFT: 0x80 if self.shift_down else 0x00, VK_CAPITAL: 0x01 if self.caps_lock else 0x00}
         return state
 
 
-def key_name(vk: int, scan: int, state: KeyboardState, translate: Callable[[int, int, Dict[int, int]], Optional[str]]) -> Optional[str]:
+class DeadKey:
+    def __init__(self, character: str) -> None:
+        self.character = character
+
+
+class TextInput:
+    def __init__(self, text: str) -> None:
+        self.text = text
+
+
+def _compose_dead_key(dead_key: str, character: str) -> Union[str, TextInput]:
+    name = unicodedata.name(dead_key, "")
+    if name.startswith("MODIFIER LETTER "):
+        name = name[len("MODIFIER LETTER "):]
+    try:
+        combining = unicodedata.lookup("COMBINING " + name)
+    except KeyError:
+        return TextInput(dead_key + character)
+    composed = unicodedata.normalize("NFC", character + combining)
+    return composed if len(composed) == 1 else TextInput(dead_key + character)
+
+
+def key_name(
+    vk: int,
+    scan: int,
+    state: KeyboardState,
+    translate: Callable[[int, int, Dict[int, int]], Optional[Union[str, DeadKey]]],
+    down: bool = True,
+) -> Optional[Union[str, DeadKey, TextInput]]:
     """The wire name for one key press: a named key where there is one, else
-    the character it types with only shift and caps lock applied, else None
-    when the layout produces nothing usable (a dead key, or a key with no
-    character at all)."""
+    the character it types with only shift and caps lock applied. A dead key
+    waits for the next printable character; a key with no usable character is
+    ignored."""
     named = VK_TO_NAME.get(vk)
     if named is not None:
+        if state.pending_dead_key and named == "space":
+            character, state.pending_dead_key = state.pending_dead_key, None
+            return character
+        if state.pending_dead_key and named not in MODIFIER_NAMES:
+            state.pending_dead_key = None
         return named
     character = translate(vk, scan, state.bytes_for())
+    if isinstance(character, DeadKey):
+        if down:
+            state.pending_dead_key = character.character
+        return DeadKey(character.character)
     if not character or not character.isprintable():
+        state.pending_dead_key = None
         return None
+    if down and state.pending_dead_key:
+        character = _compose_dead_key(state.pending_dead_key, character)
+        state.pending_dead_key = None
     return character
 
 
@@ -409,6 +452,8 @@ class Hooks:
         self._thread_id: Optional[int] = None
         self._ready = threading.Event()
         self._state = KeyboardState()
+        self._dead_keys_swallowed: Set[int] = set()
+        self._text_keyups_swallowed: Set[int] = set()
         self._failure: Optional[BaseException] = None
         self._handles: List[int] = []
         # Kept alive for as long as the hooks are installed: a callback that
@@ -444,6 +489,10 @@ class Hooks:
             thread.join(timeout=2.0)
             if thread.is_alive():
                 LOGGER.error("The hook thread did not stop within two seconds")
+            else:
+                self._text_keyups_swallowed.clear()
+        else:
+            self._text_keyups_swallowed.clear()
         self._thread = None
         self._thread_id = None
 
@@ -496,6 +545,7 @@ class Hooks:
             # a freed callback on its first WM_INPUT.
             _unregister_window_class(module)
             self._callbacks = []
+            self._text_keyups_swallowed.clear()
 
     def _window_proc(self, hwnd, message, wparam, lparam):
         if message == WM_INPUT:
@@ -521,7 +571,30 @@ class Hooks:
                 self._state.shift_down = down
             elif data.vkCode == VK_CAPITAL and down:
                 self._state.caps_lock = not self._state.caps_lock
-            name = key_name(data.vkCode, data.scanCode, self._state, _to_unicode)
+            if data.vkCode in self._text_keyups_swallowed:
+                if not down:
+                    self._text_keyups_swallowed.discard(data.vkCode)
+                else:
+                    repeated = key_name(data.vkCode, data.scanCode, self._state, _to_unicode, True)
+                    if isinstance(repeated, str) and len(repeated) == 1:
+                        self._on_key(TextInput(repeated), True, data.vkCode, None)
+                return 1
+            name = key_name(data.vkCode, data.scanCode, self._state, _to_unicode, down)
+            if isinstance(name, TextInput):
+                if down and self._on_key(name, down, data.vkCode, None):
+                    self._text_keyups_swallowed.add(data.vkCode)
+                    return 1
+                return user32.CallNextHookEx(None, code, wparam, lparam)
+            if isinstance(name, DeadKey):
+                if not down and data.vkCode in self._dead_keys_swallowed:
+                    self._dead_keys_swallowed.discard(data.vkCode)
+                    return 1
+                if down and self._on_key(name, down, data.vkCode, None):
+                    self._dead_keys_swallowed.add(data.vkCode)
+                    return 1
+                if down:
+                    self._state.pending_dead_key = None
+                return user32.CallNextHookEx(None, code, wparam, lparam)
             if name is None:
                 return user32.CallNextHookEx(None, code, wparam, lparam)
             us = None if data.flags & LLKHF_EXTENDED else SCAN_TO_US.get(data.scanCode)
@@ -773,13 +846,12 @@ def hand_motion(flags: int, last_x: int, last_y: int, extra_information: int) ->
     return last_x, last_y
 
 
-def _to_unicode(vk: int, scan: int, state: Dict[int, int]) -> Optional[str]:
+def _to_unicode(vk: int, scan: int, state: Dict[int, int]) -> Optional[Union[str, DeadKey]]:
     """The character `vk` types under `state`, or None. Called with the
     non-shift modifiers already cleared, so a chord yields its plain key.
 
     ToUnicodeEx is asked not to change the keyboard state (the 1<<2 flag):
-    without it, translating a dead key here would eat the accent the user is
-    actually typing on this PC.
+    the dead accent is tracked in KeyboardState instead.
     """
     if user32 is None:
         raise RuntimeError("ToUnicodeEx is only available on Windows")
@@ -789,6 +861,8 @@ def _to_unicode(vk: int, scan: int, state: Dict[int, int]) -> Optional[str]:
     buffer = ctypes.create_unicode_buffer(8)
     layout = user32.GetKeyboardLayout(0)
     count = user32.ToUnicodeEx(vk, scan, key_state, buffer, len(buffer), 1 << 2, layout)
-    if count <= 0:
+    if count < 0:
+        return DeadKey(buffer.value[:abs(count)]) if buffer.value else None
+    if count == 0:
         return None
     return buffer.value[:count]

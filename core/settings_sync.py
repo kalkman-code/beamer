@@ -38,7 +38,7 @@ LENGTHS = tuple(value for value, _name in effects.LENGTHS)
 NOT_TRIGGERS = ("browser_back", "browser_forward", "backspace", "tab", "enter", "esc", "space", "print_screen")
 
 CROSSING_KEYS = ("resistance_px", "block_while_dragging", "shortcut", "trigger_key", "trigger_style", "double_tap_ms")
-DESIGN_KEYS = ("glow_style", "glow_colour", "effect_length", "shortcut_arrival", "shortcut_arrival_style")
+DESIGN_KEYS = ("glow_style", "glow_colour", "effect_length", "effect_size", "shortcut_arrival", "shortcut_arrival_style")
 
 MAX_STAMP = 2 ** 53 - 2
 DAY = 24 * 60 * 60
@@ -49,6 +49,7 @@ PC_FIELDS = {
     "resistance_px": "crossing_resistance_px", "block_while_dragging": "block_while_dragging",
     "trigger_key": "trigger_key", "trigger_style": "trigger_style", "double_tap_ms": "double_tap_ms",
     "glow_style": "glow_style", "glow_colour": "glow_colour", "effect_length": "effect_length",
+    "effect_size": "effect_size",
     "shortcut_arrival": "shortcut_arrival", "shortcut_arrival_style": "shortcut_arrival_style",
 }
 # The Mac keeps the shortcut's key at the top of its settings and the rest in `crossing`.
@@ -76,30 +77,99 @@ def _valid(key, value, trigger_keys):
         return value in GLOW_COLOURS
     if key == "effect_length":
         return value in LENGTHS
+    if key == "effect_size":
+        return value in tuple(size for size, _name in effects.SIZES)
     if key == "shortcut_arrival_style":
         return value in effects.SWITCH_STYLES
     return False
 
 
-def message_data(on, set_at, values=None, by=""):
+def message_data(on, set_at, values=None, by="", design_state=None):
     """What a `settings` message carries: whether it is on, when that or a shared value last
     changed and by which machine (`by`, its id as base64), and while on, the values."""
     data = {"on": bool(on), "set_at": int(set_at), "by": by}
     if on and values is not None:
         data["crossing"] = {key: values[key] for key in CROSSING_KEYS if key in values}
         data["design"] = {key: values[key] for key in DESIGN_KEYS if key in values}
+    if design_state is not None:
+        data["design_sync"] = design_state
     return data
 
 
-def read(data, trigger_keys):
+def read_design_state(data, trigger_keys, now=None):
+    """A directly advertised local Design state from a settings message, or None if absent or
+    invalid. Each supported value stands alone, as for Same on all machines. The outer settings
+    envelope is validated first, so a valid optional member cannot rescue a malformed message."""
+    if not _valid_envelope(data, now):
+        return None
+    state = data.get("design_sync")
+    if not isinstance(state, dict) or type(state.get("set_at")) is not int:
+        return None
+    by = state.get("by", "")
+    if _id(by) is None:
+        return None
+    set_at = state["set_at"]
+    if set_at < 0 or set_at > MAX_STAMP or set_at > (time.time() if now is None else now) + DAY:
+        return None
+    values = state.get("values")
+    if not isinstance(values, dict):
+        return None
+    accepted = {key: values[key] for key in DESIGN_KEYS
+                if key in values and _valid(key, values[key], trigger_keys)}
+    if "effect_size" not in values:
+        accepted["effect_size"] = "medium"
+    return {"set_at": set_at, "by": by, "values": accepted}
+
+
+def design_arrived(state, set_at_here, by_here=""):
+    """Whether a validated Design state is newer than the one this machine currently holds."""
+    if not isinstance(state, dict):
+        return False
+    by = _id(state.get("by", ""))
+    if by is None:
+        return False
+    held_by = _id(by_here) or b""
+    set_at = state.get("set_at")
+    return type(set_at) is int and (set_at > int(set_at_here or 0) or
+                                    (set_at == int(set_at_here or 0) and by > held_by))
+
+
+def followed_design(current, state, source, follower, same_on, set_at_here, by_here):
+    """A newer direct state to apply locally, or None. Its stamp remains the leader's so every
+    follower in a chain carries the same newest state; identical values need no announcement."""
+    if (state is None or source != follower or same_on
+            or not design_arrived(state, set_at_here, by_here)):
+        return None
+    values = dict(current)
+    for key in DESIGN_KEYS:
+        if key in state["values"]:
+            values[key] = state["values"][key]
+    changed = any(current.get(key) != values.get(key) for key in DESIGN_KEYS)
+    if not changed:
+        return {"changed": False, "values": values, "set_at": state["set_at"], "by": state["by"]}
+    return {"changed": True, "values": values, "set_at": state["set_at"], "by": state["by"]}
+
+
+def design_change_stamp(current, incoming, set_at_here, source_state, own_id, now=None):
+    """A Same-on Design change announced as this machine's direct state, or None if unchanged."""
+    if not isinstance(current, dict) or not isinstance(incoming, dict):
+        return None
+    if not any(current.get(key) != incoming.get(key) for key in DESIGN_KEYS):
+        return None
+    held = int(set_at_here or 0)
+    if isinstance(source_state, dict) and type(source_state.get("set_at")) is int:
+        held = max(held, source_state["set_at"])
+    stamp = next_stamp(held, time.time() if now is None else now)
+    return {"set_at": stamp, "by": own_id}
+
+
+def read(data, trigger_keys, now=None):
     """(on, set_at, values) from a `settings` message's data, or None when it is not one. A value
     this end cannot hold -- a key it does not have, an effect it does not know, a zone -- is left
     out rather than failing the rest. Never raises: a malformed message must not take a link down."""
-    if not isinstance(data, dict) or not isinstance(data.get("on"), bool):
+    if not _valid_envelope(data, now):
         return None
-    set_at = data.get("set_at")
-    if type(set_at) is not int:
-        return None
+    set_at = data["set_at"]
     values = {}
     for group, keys in (("crossing", CROSSING_KEYS), ("design", DESIGN_KEYS)):
         section = data.get(group)
@@ -130,6 +200,16 @@ def _id(text):
     return ident if len(ident) == MACHINE_ID_SIZE else None
 
 
+def _valid_envelope(data, now=None):
+    if not isinstance(data, dict) or not isinstance(data.get("on"), bool):
+        return False
+    set_at = data.get("set_at")
+    if type(set_at) is not int or _id(data.get("by", "")) is None:
+        return False
+    return (0 <= set_at <= MAX_STAMP
+            and set_at <= (time.time() if now is None else now) + DAY)
+
+
 def next_stamp(held, now):
     """The stamp for a change made here: now, or one past the stamp held if that is not older.
     Two changes in one second would otherwise tie and the second be ignored at the other end, and
@@ -145,7 +225,7 @@ def arrived(data, set_at_here, trigger_keys, by_here="", now=None):
     Newer is a higher stamp, or the same stamp and the larger `by` as bytes; `by_here` is the id
     that made the change this end holds. Equal in both is the copy that arrives over a second
     link, and changes nothing, so a state sent on never comes back round."""
-    read_back = read(data, trigger_keys)
+    read_back = read(data, trigger_keys, now)
     by = _id(data.get("by", "")) if read_back is not None else None
     if read_back is None or by is None:
         return None
@@ -181,6 +261,7 @@ def mac_values(raw):
     crossing = raw.get("crossing", {})
     values = {key: raw[key] if key in MAC_TOP_LEVEL else crossing.get(key)
               for key in CROSSING_KEYS + DESIGN_KEYS if key != "shortcut"}
+    values["effect_size"] = crossing.get("effect_size", "medium")
     values["shortcut"] = "shortcut" in crossing.get("methods", [])
     return _in_order(values)
 
@@ -204,6 +285,7 @@ def apply_mac(raw, values):
 def pc_values(config):
     """The shared values in the PC's Config."""
     values = {key: getattr(config, field) for key, field in PC_FIELDS.items()}
+    values["effect_size"] = getattr(config, "effect_size", "medium")
     values["shortcut"] = "shortcut" in config.crossing_methods
     return _in_order(values)
 

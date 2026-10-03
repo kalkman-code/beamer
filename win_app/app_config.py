@@ -52,7 +52,7 @@ TRIGGER_VKS = {
 }
 TRIGGER_KEYS = {name: capture_win.VK_TITLES[vk] for name, vk in TRIGGER_VKS.items()}
 UNRECORDABLE_TRIGGER_VKS = capture_win.UNRECORDABLE_TRIGGER_VKS
-MODIFIER_STYLES = ("semantic", "positional")
+MODIFIER_STYLES = ("semantic", "positional", "mac_layout")
 
 
 def palette_colours(colour: str) -> tuple:
@@ -95,6 +95,7 @@ class Config:
     shortcut_arrival_style: str = "match"
     # How long an effect takes to play through once the pointer crosses: see effects.LENGTHS.
     effect_length: str = "normal"
+    effect_size: str = "medium"
     # The Mac's name from the last pairing, for the window to say who this PC is paired with.
     paired_with: str = ""
     # Whether each machine may take the other's input. Two plain switches: the
@@ -110,6 +111,9 @@ class Config:
     same_set_at: int = 0
     # The machine that made that last change, its id as base64: the larger id wins a tie.
     same_by: str = ""
+    design_set_at: int = 0
+    design_by: str = ""
+    design_follow_peer: str = ""
     # How the Mac's pointer and scroll feel on this PC; see receiver.InputScale.
     pointer_speed: float = 1.0
     scroll_speed: float = 1.0
@@ -132,7 +136,7 @@ class Config:
     # A push against the edge with a button held is a drag, not a crossing, as on the Mac.
     block_while_dragging: bool = True
     # A full-screen app in front holds this PC's edges. This PC's own choice, never shared.
-    hold_full_screen: bool = True
+    hold_full_screen: bool = False
     # The Mac's address is learned, never typed: it is the peer address the
     # Mac's own link arrives from.
     mac_host: str = ""
@@ -272,6 +276,9 @@ def validate_config(config: Config) -> None:
     lengths = tuple(value for value, _name in effects.LENGTHS)
     if config.effect_length not in lengths:
         raise ConfigError(f"effect_length must be one of: {', '.join(lengths)}")
+    sizes = tuple(value for value, _name in effects.SIZES)
+    if config.effect_size not in sizes:
+        raise ConfigError(f"effect_size must be one of: {', '.join(sizes)}")
     if not isinstance(config.paired_with, str):
         raise ConfigError("paired_with must be text")
     if not isinstance(config.send_to_mac, bool):
@@ -313,6 +320,7 @@ def config_from_dict(raw: dict) -> Config:
             shortcut_arrival=raw.get("shortcut_arrival", True),
             shortcut_arrival_style=switch_style,
             effect_length=raw.get("effect_length", "normal"),
+            effect_size=raw.get("effect_size", "medium"),
             paired_with=raw.get("paired_with", "") or "",
             allow_mac_to_drive=raw.get("allow_mac_to_drive", True),
             check_updates=raw.get("check_updates", True),
@@ -320,6 +328,9 @@ def config_from_dict(raw: dict) -> Config:
             same_on_both=raw.get("same_on_both", False),
             same_set_at=_stamp(raw.get("same_set_at", 0)),
             same_by=raw.get("same_by", "") or "",
+            design_set_at=_stamp(raw.get("design_set_at", 0)),
+            design_by=raw.get("design_by", "") or "",
+            design_follow_peer=raw.get("design_follow_peer", "") or "",
             pointer_speed=raw.get("pointer_speed", 1.0),
             scroll_speed=raw.get("scroll_speed", 1.0),
             reverse_scroll=raw.get("reverse_scroll", False),
@@ -333,7 +344,7 @@ def config_from_dict(raw: dict) -> Config:
             double_tap_ms=int(raw.get("double_tap_ms", 300)),
             modifier_style=raw.get("modifier_style", "semantic"),
             block_while_dragging=raw.get("block_while_dragging", True),
-            hold_full_screen=raw.get("hold_full_screen", True),
+            hold_full_screen=raw.get("hold_full_screen", False),
             mac_hardware_address=raw.get("mac_hardware_address", "") or "",
             mac_host=raw.get("mac_host", "") or "",
             mac_return_edge=raw.get("mac_return_edge", "") or "",
@@ -378,6 +389,7 @@ def config_to_dict(config: Config) -> dict:
         "shortcut_arrival": config.shortcut_arrival,
         "shortcut_arrival_style": config.shortcut_arrival_style,
         "effect_length": config.effect_length,
+        "effect_size": config.effect_size,
         "paired_with": config.paired_with,
         "allow_mac_to_drive": config.allow_mac_to_drive,
         "check_updates": config.check_updates,
@@ -385,6 +397,9 @@ def config_to_dict(config: Config) -> dict:
         "same_on_both": config.same_on_both,
         "same_set_at": int(config.same_set_at),
         "same_by": config.same_by,
+        "design_set_at": int(config.design_set_at),
+        "design_by": config.design_by,
+        "design_follow_peer": config.design_follow_peer,
         "pointer_speed": config.pointer_speed,
         "scroll_speed": config.scroll_speed,
         "reverse_scroll": config.reverse_scroll,

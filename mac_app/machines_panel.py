@@ -74,7 +74,7 @@ class MachinesPanel:
         self.empty = widgets.note("No machines paired yet.")
         module.add(self.empty.view)
         line = widgets.stack(vertical=False, spacing=10)
-        self.list_note = widgets.note("Beamer connects to each machine on its own whenever both are running.")
+        self.list_note = widgets.note("Beamer connects to each machine on its own whenever both are running.", reading=False)
         line.addArrangedSubview_(self.list_note.view)
         self.pair_button = widgets.action_button("Pair a machine", self._toggle_sheet, scale="small")
         line.addArrangedSubview_(self.pair_button.view)
@@ -342,7 +342,7 @@ class MachinesPanel:
         if self.removing != row.token:
             return self._chip("Remove", lambda t=row.token: self._ask_to_remove(t), f"Remove {label}", (row.token, "remove"))
         line = widgets.stack(vertical=False, spacing=8)
-        words = widgets.note(f"Remove {label}? It stays paired on that machine until you remove this one there too.", ink="ink")
+        words = widgets.note(f"Remove {label}? It stays paired on that machine until you remove this one there too.", ink="ink", reading=False)
         line.addArrangedSubview_(words.view)
         line.addArrangedSubview_(self._chip("Remove", lambda t=row.token: self._remove(t), f"Confirm removing {label}", (row.token, "confirm")))
         line.addArrangedSubview_(self._chip("Keep", self._keep, f"Keep {label}", (row.token, "keep")))

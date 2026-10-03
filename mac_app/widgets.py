@@ -38,12 +38,38 @@ def stack(vertical: bool = True, spacing: float = 10.0):
     return view
 
 
+def _width_cap(view):
+    for c in view.constraints():
+        if (
+            c.firstItem() == view
+            and c.secondItem() is None
+            and c.firstAttribute() == AppKit.NSLayoutAttributeWidth
+            and c.relation() == AppKit.NSLayoutRelationLessThanOrEqual
+        ):
+            return c.constant()
+    return None
+
+
 def add(parent, view, full_width: bool = True):
     """Adds an arranged subview, stretched to the stack's width. NSStackView aligns its children
-    but does not stretch them, and a control that stops short of the module edge is the giveaway."""
+    but does not stretch them, and a control that stops short of the module edge is the giveaway.
+    A child with its own maximum width (a note at the reading width) is as wide as the stack up to
+    that maximum. Tied to the stack outright, it fixed its whole column at that width, and through
+    the column the window: on 1.5.0 the window could not be made wider than 773 to 837 pt."""
     parent.addArrangedSubview_(view)
-    if full_width:
+    if not full_width:
+        return view
+    cap = _width_cap(view)
+    if cap is None:
         view.widthAnchor().constraintEqualToAnchor_(parent.widthAnchor()).setActive_(True)
+        return view
+    view.widthAnchor().constraintLessThanOrEqualToAnchor_(parent.widthAnchor()).setActive_(True)
+    # Towards the cap rather than the stack, so the pull never grows with the column. Above the
+    # label's own hugging (251), so it fills to the cap; below NSStackView's equal sizing (260),
+    # so it cannot unbalance Pairing's two halves.
+    reach = view.widthAnchor().constraintEqualToConstant_(cap)
+    reach.setPriority_(255)
+    reach.setActive_(True)
     return view
 
 
@@ -130,9 +156,9 @@ class Label:
             squeeze(self.view)
         self._render()
 
-    def set(self, text=None, ink=None, size=None, weight=None):
+    def set(self, text=None, ink=None, size=None, weight=None, mono=None):
         changed = False
-        for name, value in (("text", text), ("ink", ink), ("size", size), ("weight", weight)):
+        for name, value in (("text", text), ("ink", ink), ("size", size), ("weight", weight), ("mono", mono)):
             if value is not None and value != getattr(self, name):
                 setattr(self, name, value)
                 changed = True
@@ -153,9 +179,12 @@ def eyebrow(text, ink="ink_3"):
     return Label(text, theme.TYPE["eyebrow"], 700, ink, tracking=theme.TRACKING["eyebrow"], upper=True).view
 
 
-def note(text="", ink="ink_2", align=None):
+def note(text="", ink="ink_2", align=None, reading=True):
+    """`reading=False` for a note beside a control in a row: capped there, nothing could take the
+    row's spare width, and the row, its module and the page column stopped at note plus control."""
     label = Label(text, theme.TYPE["note"], ink=ink, wrap=True, align=align)
-    label.view.widthAnchor().constraintLessThanOrEqualToConstant_(theme.READING_WIDTH).setActive_(True)
+    if reading:
+        label.view.widthAnchor().constraintLessThanOrEqualToConstant_(theme.READING_WIDTH).setActive_(True)
     return label
 
 
@@ -1150,15 +1179,24 @@ class JumpKeyRecorder:
         face = box("ground", radius=theme.RADIUS["keycap"] - 1)
         self.view.addSubview_(face)
         pin(face, self.view, (1, 1, 3, 1))
-        self.key = Label(self._title(), theme.TYPE["keycap"], mono=True, tracking=-0.02)
+        self.key = Label(self._title(), theme.TYPE["body"], ink="ink_3")
         squeeze(self.key.view)
-        self.hint = Label(self.HINT, theme.TYPE["small"], ink="ink_3", align=AppKit.NSTextAlignmentRight)
-        line = stack(vertical=False, spacing=10)
-        line.addArrangedSubview_(self.key.view)
-        line.addArrangedSubview_(self.hint.view)
-        hug(self.key.view, AppKit.NSLayoutPriorityDefaultLow)
+        self.hint = Label(self.HINT, theme.TYPE["small"], ink="ink_3", align=AppKit.NSTextAlignmentLeft)
+        self.line = stack(spacing=5)
+        self.line.addArrangedSubview_(self.key.view)
+        self.line.addArrangedSubview_(self.hint.view)
+        line = self.line
         face.addSubview_(line)
-        pin(line, face, (9, 12, 8, 12))
+        pin(line, face, (7, 12, 7, 12))
+
+    def _show_title(self, ink=None):
+        has_value = bool(self.value)
+        self.key.set(
+            self._title(),
+            size=theme.TYPE["keycap"] if has_value else theme.TYPE["body"],
+            ink=ink or ("ink" if has_value else "ink_3"),
+            mono=has_value,
+        )
 
     def _title(self):
         if not self.value:
@@ -1168,14 +1206,14 @@ class JumpKeyRecorder:
 
     def set_value(self, value):
         self.value = value or ""
-        self.key.set(self._title())
+        self._show_title()
         self.view.setAccessibilityLabel_("Jump straight here key, " + self._title())
 
     def _clicked(self):
         if self.monitor is not None:
             self._stop()
             return
-        self.key.set("Press a key combination…", ink="signal")
+        self.key.set("Press a key combination…", size=theme.TYPE["body"], ink="signal", mono=False)
         self.hint.set("Click again to cancel")
         paint(self.view, "signal")
         self.monitor = AppKit.NSEvent.addLocalMonitorForEventsMatchingMask_handler_(
@@ -1213,7 +1251,7 @@ class JumpKeyRecorder:
             self.monitor = None
             if self.on_arm is not None:
                 self.on_arm(False)
-        self.key.set(self._title(), ink="ink")
+        self._show_title()
         self.hint.set(self.HINT)
         paint(self.view, "edge")
 

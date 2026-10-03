@@ -258,6 +258,7 @@ class PairingSheet(widgets.Module):
         row.setSpacing(18)
         self.code_label = widgets.label("", "code")
         self.code_label.setFont(theme.mono_font(theme.PAIRING_CODE))
+        self.code_label.setAlignment(Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignVCenter)
         self.code_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByKeyboard
                                                 | Qt.TextInteractionFlag.TextSelectableByMouse)
         self.code_label.setFocusPolicy(Qt.FocusPolicy.StrongFocus)

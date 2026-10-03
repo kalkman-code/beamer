@@ -603,7 +603,7 @@ class RealEffectIntegrationTest(unittest.TestCase):
         drew_something = False
         checked_any = False
         for effect_id in effects.EFFECT_IDS:
-            module_name = _MODULE_FOR_EFFECT[effect_id]
+            module_name = "fx_light" if effect_id == "aperture" else _MODULE_FOR_EFFECT[effect_id]
             with self.subTest(effect=effect_id, module=module_name):
                 try:
                     importlib.import_module(f"core.{module_name}")

@@ -468,7 +468,7 @@ def _wire_md_rows():
     rows = {}
     for line in section.splitlines():
         cells = [cell.strip().strip("`") for cell in line.strip().strip("|").split("|")]
-        if len(cells) == 4 and cells[0] not in ("Physical key on the sender", "---"):
+        if len(cells) == 5 and cells[0] not in ("Physical key on the sender", "---"):
             rows[cells[0]] = tuple(cells[1:])
     return rows
 
@@ -482,6 +482,8 @@ class KeyTableTests(unittest.TestCase):
                 self.assertEqual(keytable.wire_name(row["physical"], own, own, "semantic"), row["same_family"])
                 self.assertEqual(keytable.wire_name(row["physical"], own, peer, "semantic"), row["across_semantic"])
                 self.assertEqual(keytable.wire_name(row["physical"], own, peer, "positional"), row["across_positional"])
+                if row["sender"] == "pc":
+                    self.assertEqual(keytable.wire_name(row["physical"], own, peer, "mac_layout"), row["across_mac_layout"])
 
     def test_the_rows_are_section_7s_table(self):
         table = _wire_md_rows()
@@ -489,7 +491,10 @@ class KeyTableTests(unittest.TestCase):
         self.assertEqual({row["key"] for row in V6["key_table"]["rows"]}, set(table))
         for row in V6["key_table"]["rows"]:
             with self.subTest(key=row["key"]):
-                self.assertEqual((row["same_family"], row["across_semantic"], row["across_positional"]), table[row["key"]])
+                self.assertEqual(
+                    (row["same_family"], row["across_semantic"], row["across_positional"], row["across_mac_layout"]),
+                    table[row["key"]],
+                )
 
     def test_the_families_names_and_evdev_codes(self):
         data = V6["key_table"]

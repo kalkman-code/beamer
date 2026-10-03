@@ -84,6 +84,9 @@ class Config:
     # Who made the change the stamp above is for, as a machine id: the tie-break between two ends
     # that changed it in the same second (WIRE.md section 10).
     same_by: str = ""
+    design_set_at: int = 0
+    design_by: str = ""
+    design_follow_peer: str = ""
     # How the PC's pointer and scroll feel on this Mac; see receiver.InputScale.
     pointer_speed: float = 1.0
     scroll_speed: float = 1.0
@@ -176,6 +179,9 @@ def parse_config(raw: dict) -> Config:
         same_on_both=raw.get("same_on_both", False) is True,
         same_set_at=_stamp(raw.get("same_set_at", 0)),
         same_by=str(raw.get("same_by", "") or ""),
+        design_set_at=_stamp(raw.get("design_set_at", 0)),
+        design_by=str(raw.get("design_by", "") or ""),
+        design_follow_peer=str(raw.get("design_follow_peer", "") or ""),
         pointer_speed=raw.get("pointer_speed", 1.0),
         scroll_speed=raw.get("scroll_speed", 1.0),
         reverse_scroll=raw.get("reverse_scroll", False),

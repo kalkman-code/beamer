@@ -45,6 +45,7 @@ class SameOnBothTests(unittest.TestCase):
         path = Path(self.directory.name) / "config.json"
         raw = settings_store.config_to_raw(settings_store.editable_default_config())
         raw.update(host="192.0.2.20", auth_token=PAIRED_TOKEN)
+        raw["crossing"]["hold_full_screen"] = True
         raw["crossing"]["methods"] = ["shortcut", "edge", "notch"]
         path.write_text(json.dumps(raw))
         self.store = settings_store.SettingsStore(path)
@@ -64,6 +65,167 @@ class SameOnBothTests(unittest.TestCase):
         self.assertFalse(self.window.same_switch.value)
         self.assertEqual(self.window.scope_labels["design"].text, pages.SCOPE["design"])
         self.assertTrue(all(note.view.isHidden() for note in self.window.own_notes))
+
+    def test_full_screen_hold_switch_names_this_macs_edges(self):
+        self.assertEqual(self.window.hold_box.words.text, "Hold this Mac's edges while an app on it is full screen")
+    def test_this_machines_design_state_is_sent_even_when_same_is_off(self):
+        data = self.window.same_state()
+
+        self.assertFalse(data["on"])
+        self.assertEqual(set(data["design_sync"]["values"]), set(settings_sync.DESIGN_KEYS))
+        self.assertEqual(data["design_sync"]["values"]["effect_size"], "medium")
+
+    def test_a_followed_machine_changes_this_design_and_this_mac_announces_its_own_state(self):
+        raw = settings_store.config_to_raw(self.window.controller.cfg)
+        raw["design_follow_peer"] = PEER
+        self.window.controller.apply_settings(self.store.save(raw))
+        received = settings_sync.message_data(
+            False, 50, by=PEER,
+            design_state={"set_at": 100, "by": PEER,
+                          "values": {"effect_length": "long", "effect_size": "large"}},
+        )
+
+        self.window.apply_same(received, peer=PEER)
+
+        self.assertEqual(self.window.controller.cfg.crossing["effect_length"], "long")
+        self.assertEqual(self.window.size_select.value, "large")
+        self.assertEqual((self.window.controller.cfg.design_set_at, self.window.controller.cfg.design_by),
+                         (100, PEER))
+        self.assertTrue(self.sent)
+        self.assertEqual(self.sent[-1]["design_sync"]["values"]["effect_length"], "long")
+        self.assertEqual((self.sent[-1]["design_sync"]["set_at"], self.sent[-1]["design_sync"]["by"]),
+                         (100, PEER))
+
+    def test_a_design_state_in_a_malformed_settings_envelope_is_dropped_whole(self):
+        raw = settings_store.config_to_raw(self.window.controller.cfg)
+        raw["design_follow_peer"] = PEER
+        self.window.controller.apply_settings(self.store.save(raw))
+        state = {"set_at": 100, "by": PEER, "values": {"effect_length": "long"}}
+
+        for outer in ({"on": "no"}, {"set_at": True}, {"by": "not an id"}):
+            data = settings_sync.message_data(False, 50, by=PEER, design_state=state)
+            data.update(outer)
+            self.window.apply_same(data, peer=PEER)
+
+        self.assertEqual(self.window.controller.cfg.crossing["effect_length"], "normal")
+        self.assertNotIn(PEER, self.window._design_states)
+        self.assertEqual(self.sent, [])
+
+    def test_follow_accepts_the_leaders_next_change_after_this_mac_reannounces(self):
+        raw = settings_store.config_to_raw(self.window.controller.cfg)
+        raw["design_follow_peer"] = PEER
+        raw["design_set_at"] = 50
+        raw["design_by"] = PEER
+        self.window.controller.apply_settings(self.store.save(raw))
+
+        self.window._receive_design(settings_sync.message_data(
+            False, 50, by=PEER,
+            design_state={"set_at": 100, "by": PEER, "values": {"effect_length": "long"}},
+        ), PEER)
+        self.window._receive_design(settings_sync.message_data(
+            False, 51, by=PEER,
+            design_state={"set_at": 101, "by": PEER, "values": {"effect_length": "short"}},
+        ), PEER)
+
+        self.assertEqual(self.window.controller.cfg.crossing["effect_length"], "short")
+        self.assertEqual((self.window.controller.cfg.design_set_at, self.window.controller.cfg.design_by),
+                         (101, PEER))
+        self.assertEqual(self.sent[-1]["design_sync"]["values"]["effect_length"], "short")
+        self.assertEqual((self.sent[-1]["design_sync"]["set_at"], self.sent[-1]["design_sync"]["by"]),
+                         (101, PEER))
+
+    def test_same_on_design_change_is_announced_with_a_new_local_design_stamp(self):
+        raw = settings_store.config_to_raw(self.window.controller.cfg)
+        raw["same_on_both"] = True
+        raw["same_set_at"] = 10
+        raw["same_by"] = PEER
+        raw["design_set_at"] = 20
+        raw["design_by"] = self.window.own_id()
+        raw["crossing"]["effect_length"] = "short"
+        self.window.controller.apply_settings(self.store.save(raw))
+        incoming = settings_sync.message_data(
+            True, 11, values={"effect_length": "long"}, by=HIGH,
+            design_state={"set_at": 100, "by": HIGH, "values": {"effect_length": "long"}},
+        )
+
+        self.window.apply_same(incoming, peer=HIGH)
+
+        cfg = self.window.controller.cfg
+        self.assertEqual(cfg.crossing["effect_length"], "long")
+        self.assertGreater(cfg.design_set_at, 100)
+        self.assertEqual(cfg.design_by, self.window.own_id())
+        self.assertEqual(self.sent[-1]["design_sync"]["set_at"], cfg.design_set_at)
+        self.assertNotEqual(self.sent[-1]["design_sync"]["by"], HIGH)
+
+    def test_same_off_from_another_machine_resumes_the_cached_followed_design(self):
+        raw = settings_store.config_to_raw(self.window.controller.cfg)
+        raw["same_on_both"] = True
+        raw["same_set_at"] = 10
+        raw["same_by"] = HIGH
+        raw["design_follow_peer"] = PEER
+        raw["crossing"]["effect_length"] = "short"
+        self.window.controller.apply_settings(self.store.save(raw))
+        self.window._design_states[PEER] = {
+            "set_at": 100, "by": PEER, "values": {"effect_length": "long"},
+        }
+        incoming = settings_sync.message_data(False, 11, by=HIGH)
+
+        self.window.apply_same(incoming, peer=HIGH)
+
+        self.assertEqual(self.window.controller.cfg.crossing["effect_length"], "long")
+        self.assertEqual(self.sent[-1]["design_sync"]["values"]["effect_length"], "long")
+        self.assertEqual((self.sent[-1]["design_sync"]["set_at"], self.sent[-1]["design_sync"]["by"]),
+                         (100, PEER))
+
+    def test_same_on_all_machines_takes_precedence_without_clearing_following(self):
+        raw = settings_store.config_to_raw(self.window.controller.cfg)
+        raw.update(design_follow_peer=PEER, same_on_both=True, same_set_at=100)
+        self.window.controller.apply_settings(self.store.save(raw))
+        received = settings_sync.message_data(
+            True, 101, settings_sync.mac_values(raw), by=PEER,
+            design_state={"set_at": 202, "by": PEER, "values": {"effect_length": "long"}},
+        )
+
+        self.window.apply_same(received, peer=PEER)
+
+        self.assertEqual(self.window.controller.cfg.crossing["effect_length"], "normal")
+        self.assertEqual(self.window.controller.cfg.design_follow_peer, PEER)
+
+    def test_editing_a_design_control_turns_following_off_and_announces_the_edit(self):
+        raw = settings_store.config_to_raw(self.window.controller.cfg)
+        raw["design_follow_peer"] = PEER
+        self.window.controller.apply_settings(self.store.save(raw))
+        self.sent.clear()
+        self.window.length_select.value = "short"
+
+        self.window._apply_settings()
+
+        self.assertEqual(self.window.controller.cfg.design_follow_peer, "")
+        self.assertEqual(self.sent[-1]["design_sync"]["values"]["effect_length"], "short")
+
+    def test_removing_the_followed_machine_resets_the_local_selection(self):
+        entry = {**settings_store.PEER_DEFAULTS, "id": PEER, "token": "peer-token", "name": "Peer",
+                 "platform": "windows", "port": protocol.DEFAULT_PORT}
+        self.store.add_peer(entry)
+        raw = settings_store.config_to_raw(self.window.controller.cfg)
+        raw["design_follow_peer"] = PEER
+        self.window.controller.apply_settings(self.store.save(raw))
+
+        self.store.remove_peer("peer-token")
+        self.window.peers_changed()
+
+        self.assertEqual(self.window.controller.cfg.design_follow_peer, "")
+
+    def test_a_peer_that_has_not_sent_a_design_state_is_disabled(self):
+        entry = {**settings_store.PEER_DEFAULTS, "id": PEER, "token": "peer-token", "name": "Old PC",
+                 "platform": "windows", "port": protocol.DEFAULT_PORT}
+        self.store.add_peer(entry)
+
+        self.window._refresh_design_follow()
+
+        cell = next(cell for value, cell, _words in self.window.follow_select.cells if value == PEER)
+        self.assertFalse(cell.enabled)
+        self.assertIn("Needs beta.6 or later", next(title for value, title in self.window.follow_select.choices if value == PEER))
 
     def test_the_pcs_settings_arrive_and_this_macs_own_stay(self):
         self.window.apply_same(pc_message(True, 100))
@@ -87,6 +249,7 @@ class SameOnBothTests(unittest.TestCase):
         self.assertEqual(self.window.panel.pair_status.text, "That code was not accepted.")
 
     def test_the_hold_switch_reaches_the_controller_before_the_debounce(self):
+        self.window.hold_box.value = True
         self.window.controller.full_screen_app = "Game"
         self.window.hold_box._toggle()
         self.assertIs(self.window.controller.cfg.crossing["hold_full_screen"], False)
@@ -95,6 +258,7 @@ class SameOnBothTests(unittest.TestCase):
         self.assertEqual(self.window.controller.full_screen_app, "Game")
 
     def test_settings_arriving_from_the_pc_leave_the_hold_switch_as_chosen(self):
+        self.window.hold_box.value = True
         self.window.hold_box._toggle()
         self.window.apply_same(pc_message(True, 100))
         self.assertFalse(self.window.hold_box.value)
@@ -123,10 +287,25 @@ class SameOnBothTests(unittest.TestCase):
         self.assertEqual(len(self.sent), 1)
         self.assertEqual(self.sent[0]["design"]["effect_length"], "short")
 
-    def test_a_change_here_while_off_goes_nowhere(self):
+    def test_a_design_change_while_off_announces_its_local_design_state(self):
         self.window.length_select.value = "short"
         self.window._apply_settings()
-        self.assertEqual(self.sent, [])
+        self.assertEqual(len(self.sent), 1)
+        self.assertFalse(self.sent[0]["on"])
+        self.assertEqual(self.sent[0]["design_sync"]["values"]["effect_length"], "short")
+
+    def test_changing_size_redraws_the_design_tiles(self):
+        from unittest import mock
+
+        stills = [mock.Mock() for _ in self.window.effect_stills]
+        self.window.effect_stills = stills
+        with mock.patch.object(self.window.previews, "repaint") as repaint:
+            self.window.size_select.value = "small"
+            self.window._reflect()
+        self.assertTrue(stills)
+        for still in stills:
+            still.setNeedsDisplay_.assert_called_once_with(True)
+        repaint.assert_called_once_with()
 
     def test_an_old_pc_turns_the_switch_off_and_says_why(self):
         self.window._set_same(True)
@@ -136,10 +315,12 @@ class SameOnBothTests(unittest.TestCase):
         self.assertFalse(self.window.same_switch.value)
         self.assertIn("too old", self.window.same_note.text)
 
-    def test_a_peers_state_is_sent_on_unchanged_to_the_others_but_not_back_to_it(self):
+    def test_a_peers_same_state_is_forwarded_with_this_macs_own_design_state(self):
         data = pc_message(True, 100, by=PEER)
         self.window.apply_same(data, peer=PEER)
-        self.assertEqual(self.sent, [data])
+        self.assertEqual(len(self.sent), 1)
+        self.assertEqual({key: value for key, value in self.sent[0].items() if key != "design_sync"}, data)
+        self.assertNotEqual(self.sent[0]["design_sync"]["by"], PEER)
         self.assertEqual(self.sources, [PEER])
 
     def test_who_made_the_change_is_kept_with_it(self):

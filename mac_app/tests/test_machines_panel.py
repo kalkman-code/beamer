@@ -579,9 +579,23 @@ class CodeBoxCentringTests(Base):
         window.setContentSize_((773, window.frame().size.height))
         boxes = self.panel.code_boxes
         boxes.focus(window)
+        boxes.fields[0].selectText_(None)
+        self.assertIsInstance(window.firstResponder(), AppKit.NSTextView)
         for digit in "408819":
             window.firstResponder().insertText_(digit)
         self.assertEqual(boxes.value, "408819")
+        editor = boxes.fields[-1].currentEditor()
+        self.assertIsNotNone(editor, "the last code box must still be in field-editor mode")
+        self.assertEqual(editor.alignment(), AppKit.NSTextAlignmentCenter)
+        self.assertEqual(
+            editor.typingAttributes()[AppKit.NSParagraphStyleAttributeName].alignment(),
+            AppKit.NSTextAlignmentCenter,
+        )
+        layout = editor.layoutManager()
+        glyph_range = layout.glyphRangeForCharacterRange_actualCharacterRange_((0, 1), None)[0]
+        glyph = layout.boundingRectForGlyphRange_inTextContainer_(glyph_range, editor.textContainer())
+        offset = glyph.origin.x + glyph.size.width / 2 - editor.bounds().size.width / 2
+        self.assertLessEqual(abs(offset), 0.3, f"the active field editor draws the digit off-centre: {offset}")
         window.contentView().layoutSubtreeIfNeeded()
         view = boxes.view
         bounds = view.bounds()

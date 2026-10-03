@@ -1,6 +1,9 @@
+import os
 import sys
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -19,6 +22,18 @@ def window(pid, layer, x, y, width, height):
 
 
 class CoversADisplayTest(unittest.TestCase):
+    def test_beamer_is_not_a_full_screen_app_to_itself(self):
+        app = mock.Mock()
+        workspace = mock.Mock()
+        workspace.frontmostApplication.return_value = app
+        app.localizedName.return_value = "Beamer"
+        app.processIdentifier.return_value = os.getpid()
+        appkit = SimpleNamespace(NSWorkspace=SimpleNamespace(sharedWorkspace=lambda: workspace))
+        with mock.patch.object(kvm_bridge_app, "AppKit", appkit), \
+                mock.patch.object(kvm_bridge_app, "_ax_full_screen", return_value=True) as ax:
+            self.assertIsNone(kvm_bridge_app.full_screen_app())
+        ax.assert_not_called()
+
     def test_a_zoomed_window_under_the_menu_bar_is_not_full_screen(self):
         self.assertFalse(
             kvm_bridge_app._covers_a_display([window(9, 0, 0, 33, 1728, 1084)], 9, DISPLAYS)

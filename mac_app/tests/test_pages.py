@@ -82,12 +82,13 @@ class DesignChoicesTest(unittest.TestCase):
         from core import effects
 
         groups = pages.style_groups()
-        self.assertEqual([group for group, _ in groups], ["Classic", "Membrane", "Sparks", "Instrument"])
-        self.assertEqual([value for value, _title, _detail in groups[0][1]], ["glow", "beam"])
+        self.assertEqual([group for group, _ in groups], ["Light", "Membrane", "Sparks", "Instrument", "Folio", "Selvedge"])
+        self.assertEqual([value for value, _title, _detail in groups[0][1]], ["glow", "beam", "aperture"])
+        self.assertEqual([detail for _value, _title, detail in groups[0][1]], ["Quiet", "Medium", "Showpiece"])
         for group, choices in groups[1:]:
             with self.subTest(group=group):
                 self.assertEqual([detail for _value, _title, detail in choices], ["Quiet", "Medium", "Showpiece"])
-        values = [value for _group, choices in groups[1:] for value, _title, _detail in choices]
+        values = [value for _group, choices in groups for value, _title, _detail in choices if value not in ("glow", "beam")]
         self.assertEqual(tuple(values), effects.EFFECT_IDS)
         self.assertEqual(groups[1][1][0][:2], ("skin", "Skin"))
 
@@ -96,8 +97,8 @@ class DesignChoicesTest(unittest.TestCase):
         from core import effects
 
         groups = pages.colour_groups(crossing.GLOW_COLOURS)
-        self.assertEqual(groups[0], ("Classic", [(name, name.capitalize()) for name in crossing.GLOW_COLOURS]))
-        self.assertEqual([group for group, _ in groups[1:]], ["Membrane", "Sparks", "Instrument"])
+        self.assertEqual(groups[0], ("Light", [(name, name.capitalize()) for name in crossing.GLOW_COLOURS]))
+        self.assertEqual([group for group, _ in groups[1:]], ["Membrane", "Sparks", "Instrument", "Folio", "Selvedge"])
         self.assertEqual(tuple(value for _group, choices in groups[1:] for value, _title in choices), effects.PACK_IDS)
         self.assertIn(("sodium", "Sodium"), groups[3][1])
 
@@ -105,8 +106,8 @@ class DesignChoicesTest(unittest.TestCase):
         import crossing
 
         self.assertIsNone(pages.effects_load_error())
-        self.assertEqual([group for group, _ in pages.style_groups(False)], ["Classic"])
-        self.assertEqual([group for group, _ in pages.colour_groups(crossing.GLOW_COLOURS, False)], ["Classic"])
+        self.assertEqual([group for group, _ in pages.style_groups(False)], ["Light"])
+        self.assertEqual([group for group, _ in pages.colour_groups(crossing.GLOW_COLOURS, False)], ["Light"])
         from unittest import mock
         from core import effects
 
@@ -129,7 +130,7 @@ class DesignChoicesTest(unittest.TestCase):
 
     def test_glow_and_beam_tiles_read_as_the_effects_do(self):
         today = pages.style_groups()[0][1]
-        self.assertEqual([detail for _value, _name, detail in today], ["Classic", "Classic"])
+        self.assertEqual([detail for _value, _name, detail in today], ["Quiet", "Medium", "Showpiece"])
 
     def test_the_notch_style_only_matters_under_glow_and_beam(self):
         self.assertTrue(pages.notch_style_applies("glow"))
@@ -189,7 +190,7 @@ class CrossingPageRulesTests(unittest.TestCase):
         self.assertTrue(line(True, True, False, True, False, None).startswith("Not connected to any machine"))
         self.assertEqual(line(True, True, True, False, False, None), "Only the shortcut is switched on; there is nothing to pause.")
         self.assertTrue(line(True, True, True, True, True, None).startswith("Paused."))
-        self.assertTrue(line(True, True, True, True, False, "Keynote").startswith("Off while Keynote is full screen"))
+        self.assertEqual(line(True, True, True, True, False, "Keynote"), "Held: an app is full screen.")
         self.assertEqual(line(True, True, True, True, False, None), "On. Pause it to lean on an edge without switching.")
 
     def test_a_reason_shows_even_when_only_the_shortcut_is_on(self):

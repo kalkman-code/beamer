@@ -1482,6 +1482,8 @@ class CrossingWiringTests(unittest.TestCase):
         self.assertTrue(self.controller.redirecting, "resuming re-arms the edge with no other change")
 
     def test_a_full_screen_app_inhibits_the_pointer_methods_but_not_the_shortcut(self):
+        # The hold is off by default since 02-10-2026.
+        self.controller.cfg.crossing["hold_full_screen"] = True
         self.controller.full_screen_app = "Steam"
         event, returned = self._push(10)
         self.assertIs(returned, event)

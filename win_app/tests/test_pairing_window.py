@@ -16,6 +16,7 @@ from core import pairing, peerlist, protocol
 from core.tests import responder_harness as harness
 
 try:
+    from PySide6.QtCore import Qt
     from PySide6.QtWidgets import QApplication
 
     import app_config
@@ -401,6 +402,11 @@ class PairingSheetWindowTest(unittest.TestCase):
         self.assertEqual(self.window.sheet.code_label.text(), f"{code[:3]} {code[3:]}")
         self.assertTrue(self.window.sheet.code_showing)
         self.assertTrue(self.window.sheet.count_label.text().startswith("Expires in "))
+
+    def test_pairing_code_text_is_centred_in_its_stretched_label(self):
+        self.show_code()
+        alignment = self.window.sheet.code_label.alignment()
+        self.assertTrue(alignment & Qt.AlignmentFlag.AlignHCenter)
 
     def test_cancelling_the_code_puts_the_button_back_and_says_nothing(self):
         self.show_code()

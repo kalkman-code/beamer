@@ -6,6 +6,7 @@ others unconverted."""
 
 import ctypes
 import logging
+import os
 import sys
 from typing import List, Tuple
 
@@ -121,12 +122,24 @@ def full_screen_app():
     """The name of the foreground app while it is full screen, else None. GUI thread, once a
     second, as the Mac checks."""
     _require()
+    pid = _foreground_process_id()
+    if pid is None or pid == os.getpid():
+        return None
     state = ctypes.c_int(0)
     if ctypes.windll.shell32.SHQueryUserNotificationState(ctypes.byref(state)) != 0:
         return None
     if state.value in _EXCLUSIVE_STATES or (state.value == QUNS_BUSY and _foreground_covers_its_monitor()):
         return _foreground_app_name() or "An app"
     return None
+
+
+def _foreground_process_id():
+    hwnd = user32.GetForegroundWindow()
+    if not hwnd:
+        return None
+    pid = ctypes.c_ulong(0)
+    user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+    return pid.value
 
 
 class MONITORINFO(ctypes.Structure):

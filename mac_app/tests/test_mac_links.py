@@ -458,6 +458,12 @@ class ComingHomeTests(Base):
         self.assertEqual(let_go["target"], self.own)
         self.assertEqual(self.alerts, [])
 
+    def test_the_log_names_the_edge_input_comes_home_at(self):
+        with self.assertLogs(self.controller.logger, level="INFO") as said:
+            self.arrives(protocol.switch_v6(1, protocol.read_id(self.own), "right", 0.25))
+        moves = [line for line in said.output if "move applied:" in line]
+        self.assertTrue(moves and "at the right edge" in moves[-1], said.output)
+
     def test_a_send_home_without_a_position_still_returns_input_and_shows_the_arrival(self):
         self.arrives(protocol.switch_v6(1, protocol.read_id(self.own)))
         self.assertFalse(self.controller.redirecting)

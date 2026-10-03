@@ -13,7 +13,10 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(
 import app_config
 import capture_win
 from app_config import ConfigError, config_from_dict, config_to_dict, default_config
+from core import protocol
+from core.return_edge import Rect
 from core.tests import responder_harness as harness
+from core.tests.responder_harness import Initiator, Machine
 from links_rig import B, Rig, make_config
 
 
@@ -96,12 +99,17 @@ class ConfigRangeTests(unittest.TestCase):
         again = config_from_dict(saved)
         self.assertEqual((again.modifier_style, again.block_while_dragging), ("positional", False))
 
-    def test_the_full_screen_hold_defaults_on_and_round_trips(self):
-        config = config_from_dict(raw())
-        self.assertTrue(config.hold_full_screen)
-        saved = config_to_dict(replace(config, hold_full_screen=False))
-        self.assertFalse(config_from_dict(saved).hold_full_screen)
-        self.assertTrue(config_from_dict(raw()).hold_full_screen)
+    def test_the_full_screen_hold_defaults_off_and_preserves_each_saved_choice(self):
+        self.assertFalse(config_from_dict(raw()).hold_full_screen)
+        for choice in (False, True):
+            saved = config_to_dict(replace(default_config(), auth_token="t", hold_full_screen=choice))
+            self.assertEqual(config_from_dict(saved).hold_full_screen, choice)
+
+    def test_mac_layout_round_trips_and_an_older_file_defaults_to_semantic(self):
+        old = config_from_dict(raw())
+        self.assertEqual(old.modifier_style, "semantic")
+        saved = config_to_dict(replace(old, modifier_style="mac_layout"))
+        self.assertEqual(config_from_dict(saved).modifier_style, "mac_layout")
 
     def test_an_unknown_modifier_style_is_refused(self):
         with self.assertRaises(ConfigError):
@@ -126,6 +134,8 @@ class HeldEdgeTests(unittest.TestCase):
         self.assertTrue(self.sender.redirecting)
 
     def test_a_full_screen_app_holds_the_edge(self):
+        # The hold is off by default since 02-10-2026.
+        self.sender.update_config(make_config(hold_full_screen=True))
         self.sender.full_screen_app = "Game"
         self.push()
         self.assertFalse(self.sender.redirecting)
@@ -137,6 +147,33 @@ class HeldEdgeTests(unittest.TestCase):
         self.assertFalse(self.sender.edges_held)
         self.push()
         self.assertTrue(self.sender.redirecting)
+
+    def test_this_pcs_full_screen_setting_decides_its_edges_while_the_mac_drives_it(self):
+        for enabled in (False, True):
+            with self.subTest(hold_full_screen=enabled):
+                rig = Rig(cursor=(0, 500), hold_full_screen=enabled)
+                rig.sender.full_screen_app = "Game"
+                desktop = harness.FakeDesktop([Rect(0, 0, 1920, 1080)], cursor=(0, 500))
+                machine = Machine(
+                    [harness.entry(B, "Mac", side="left")],
+                    [{"peer": protocol.id_text(B), "kind": "edge"}],
+                    desktop=desktop,
+                ).start()
+                self.addCleanup(machine.stop)
+                # This is the WindowsApplication receiver wiring, using this PC's own setting.
+                machine.responder.edges_held = lambda: rig.sender.edges_held
+                link = Initiator(machine, B)
+                self.addCleanup(link.close)
+                link.handshake()
+                route = link.take()
+                self.assertEqual(link.answer(route)[0], protocol.MSG_ACCEPT)
+                seq = link.move(-200, 0)
+                self.assertIsNotNone(link.acked(seq))
+                crossed = link.expect(protocol.MSG_SWITCH, timeout=0.2)
+                if enabled:
+                    self.assertIsNone(crossed, "the PC's enabled hold let the Mac cross its edge")
+                else:
+                    self.assertEqual(crossed["next"], protocol.id_text(B))
 
     def test_a_drag_against_the_edge_does_not_cross(self):
         self.sender.on_button("left", True)

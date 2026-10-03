@@ -1307,7 +1307,7 @@
       ]
     },
     "key_table": {
-      "$comment": "WIRE.md section 7's table. `sender` is the family of the machine whose key was pressed (mac: macos and ios; pc: every other platform, an unknown one included); `physical` is the key on that machine's own keyboard; the three columns are the name it travels as to a peer of the same family, and across families under each saved style. `evdev` maps a Linux sender's key codes to physical names; a code not in it is a character key.",
+      "$comment": "WIRE.md section 7's table. `sender` is the family of the machine whose key was pressed (mac: macos and ios; pc: every other platform, an unknown one included); `physical` is the key on that machine's own keyboard; the columns are the name it travels as to a peer of the same family and across families under each saved style. `evdev` maps a Linux sender's key codes to physical names; a code not in it is a character key.",
       "mac_platforms": [
         "ios",
         "macos"
@@ -1320,7 +1320,8 @@
           "physical": "ctrl",
           "same_family": "ctrl",
           "across_semantic": "cmd",
-          "across_positional": "ctrl"
+          "across_positional": "ctrl",
+          "across_mac_layout": "\u2014"
         },
         {
           "key": "Mac right Control",
@@ -1328,7 +1329,8 @@
           "physical": "ctrl_r",
           "same_family": "ctrl_r",
           "across_semantic": "cmd",
-          "across_positional": "ctrl"
+          "across_positional": "ctrl",
+          "across_mac_layout": "\u2014"
         },
         {
           "key": "Mac Command",
@@ -1336,7 +1338,8 @@
           "physical": "cmd",
           "same_family": "cmd",
           "across_semantic": "ctrl",
-          "across_positional": "cmd"
+          "across_positional": "cmd",
+          "across_mac_layout": "\u2014"
         },
         {
           "key": "Mac right Command",
@@ -1344,7 +1347,8 @@
           "physical": "cmd_r",
           "same_family": "cmd_r",
           "across_semantic": "ctrl",
-          "across_positional": "cmd"
+          "across_positional": "cmd",
+          "across_mac_layout": "\u2014"
         },
         {
           "key": "Mac Option",
@@ -1352,7 +1356,8 @@
           "physical": "alt",
           "same_family": "alt",
           "across_semantic": "alt",
-          "across_positional": "alt"
+          "across_positional": "alt",
+          "across_mac_layout": "\u2014"
         },
         {
           "key": "Mac right Option",
@@ -1360,7 +1365,8 @@
           "physical": "alt_r",
           "same_family": "alt_r",
           "across_semantic": "alt",
-          "across_positional": "alt"
+          "across_positional": "alt",
+          "across_mac_layout": "\u2014"
         },
         {
           "key": "PC Control",
@@ -1368,7 +1374,8 @@
           "physical": "ctrl",
           "same_family": "ctrl",
           "across_semantic": "cmd",
-          "across_positional": "ctrl"
+          "across_positional": "ctrl",
+          "across_mac_layout": "ctrl"
         },
         {
           "key": "PC right Control",
@@ -1376,7 +1383,8 @@
           "physical": "ctrl_r",
           "same_family": "ctrl_r",
           "across_semantic": "cmd_r",
-          "across_positional": "ctrl_r"
+          "across_positional": "ctrl_r",
+          "across_mac_layout": "ctrl_r"
         },
         {
           "key": "PC Windows or Super",
@@ -1384,7 +1392,8 @@
           "physical": "cmd",
           "same_family": "cmd",
           "across_semantic": "ctrl",
-          "across_positional": "cmd"
+          "across_positional": "cmd",
+          "across_mac_layout": "alt"
         },
         {
           "key": "PC right Windows or Super",
@@ -1392,7 +1401,8 @@
           "physical": "cmd_r",
           "same_family": "cmd_r",
           "across_semantic": "ctrl_r",
-          "across_positional": "cmd_r"
+          "across_positional": "cmd_r",
+          "across_mac_layout": "alt_r"
         },
         {
           "key": "PC Alt",
@@ -1400,7 +1410,8 @@
           "physical": "alt",
           "same_family": "alt",
           "across_semantic": "alt",
-          "across_positional": "alt"
+          "across_positional": "alt",
+          "across_mac_layout": "cmd"
         },
         {
           "key": "PC right Alt or AltGr",
@@ -1408,7 +1419,8 @@
           "physical": "alt_r",
           "same_family": "alt_r",
           "across_semantic": "alt_r",
-          "across_positional": "alt_r"
+          "across_positional": "alt_r",
+          "across_mac_layout": "cmd_r"
         }
       ],
       "names": [

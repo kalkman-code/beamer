@@ -1044,7 +1044,8 @@ class LinkResponder:
                 return True
             offset = corner_offset(model.corner, model.edge) if isinstance(model, crossing.CornerPush) else outcome.offset
             self._disarm_locked()
-            LOGGER.info("The pointer pushed through a zone here; asking %s to move its input on", link.name)
+            LOGGER.info("The pointer pushed through the zone at this machine's %s edge; asking %s to move its input on",
+                        model.edge, link.name)
             link.post(protocol.switch_v6(link.route, peer, outcome.edge, offset))
             after.append(lambda: self._callback("pressure", model.edge, 1.0, True, part))
             return True
@@ -1344,6 +1345,7 @@ class LinkResponder:
             if focus["edge"] is not None:
                 x, y = crossing.arrival_position(desktop.monitors(), focus["edge"], focus["offset"])
                 desktop.set_cursor_position(x, y)
+                LOGGER.info("%s's pointer arrived at this machine's %s edge", link.name, focus["edge"])
                 self._callback("arrival", focus["edge"], x, y)
             else:
                 x, y = desktop.cursor_position()

@@ -106,6 +106,9 @@ def editable_default_config():
         same_on_both=False,
         same_set_at=0,
         same_by="",
+        design_set_at=0,
+        design_by="",
+        design_follow_peer="",
         pointer_speed=1.0,
         scroll_speed=1.0,
         reverse_scroll=False,
@@ -138,6 +141,9 @@ def config_to_raw(cfg):
         "same_on_both": cfg.same_on_both,
         "same_set_at": cfg.same_set_at,
         "same_by": cfg.same_by,
+        "design_set_at": cfg.design_set_at,
+        "design_by": cfg.design_by,
+        "design_follow_peer": cfg.design_follow_peer,
         "pointer_speed": cfg.pointer_speed,
         "scroll_speed": cfg.scroll_speed,
         "reverse_scroll": cfg.reverse_scroll,
@@ -730,6 +736,7 @@ class SettingsStore:
             ("glow_colour", GLOW_COLOURS + effects.PACK_IDS),
             ("shortcut_arrival_style", effects.SWITCH_STYLES),
             ("effect_length", tuple(value for value, _name in effects.LENGTHS)),
+            ("effect_size", tuple(value for value, _name in effects.SIZES)),
         )
         for name, allowed in choices:
             if crossing[name] not in allowed:

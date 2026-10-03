@@ -79,7 +79,9 @@ class LinkStateTest(unittest.TestCase):
         self.assertState("windows", "signal", redirecting=True)
         self.assertState("unlocking", "amber", status="Unlocking STUDIO-PC…", windows_locked=True, redirecting=True)
         self.assertState("paused", "ink", crossing_paused=True)
-        self.assertState("full_screen", "ink", full_screen_app="Final Cut Pro")
+        state = link_state.describe(controller(full_screen_app="Final Cut Pro"))
+        self.assertEqual((state.key, state.word, state.detail),
+                         ("full_screen", "Held", "Held: an app is full screen."))
         self.assertState("waking", "amber", waking=True, connected=False)
 
     def test_tunnel_is_tagged(self):

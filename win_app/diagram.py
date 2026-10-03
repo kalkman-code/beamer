@@ -101,8 +101,17 @@ class ArrangementDiagram(QWidget):
     def _drawing(self, width: float):
         keys = [key for key, place in self._places.items() if place[3] > 0.001]
         placed = [tuple(self._places[key][:3]) for key in keys]
-        pc, rects, height = pages_win.layout_rects(max(1.0, width - 2 * PAD), PAD, placed, SCREEN, GAP,
-                                                   centre_pc=len(self._machines) > 1)
+        available = max(1.0, width - 2 * PAD)
+        centre_pc = len(self._machines) > 1
+        pc, rects, _height = pages_win.layout_rects(available, PAD, placed, SCREEN, GAP,
+                                                    centre_pc=centre_pc)
+        bounds_left = min([pc[0], *(rect[0] for rect in rects)])
+        bounds_right = max([pc[0] + pc[2], *(rect[0] + rect[2] for rect in rects)])
+        scale = max(1.0, available * 0.68 / max(1.0, bounds_right - bounds_left))
+        screen = (SCREEN[0] * scale, SCREEN[1] * scale)
+        gap = GAP * scale
+        pc, rects, height = pages_win.layout_rects(available, PAD, placed, screen, gap,
+                                                   centre_pc=centre_pc)
         return (pc[0] + PAD, pc[1], pc[2], pc[3]), {key: (rect[0] + PAD, *rect[1:]) for key, rect in zip(keys, rects)}, height
 
     def _height(self) -> int:

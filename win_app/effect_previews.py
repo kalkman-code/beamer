@@ -159,6 +159,7 @@ class EffectStill(QWidget):
         self.palette = tuple(palette)
         self.place = "edge"
         self.pace = 1.0
+        self.effect_size = "medium"
         self._image = None
         self.playing_since = None
         self.setFixedHeight(STILL_HEIGHT)
@@ -180,6 +181,12 @@ class EffectStill(QWidget):
     def set_pace(self, pace: float) -> None:
         if pace != self.pace:
             self.pace = pace
+            self._image = None
+            self.update()
+
+    def set_effect_size(self, size: str) -> None:
+        if size != self.effect_size:
+            self.effect_size = size
             self._image = None
             self.update()
 
@@ -217,7 +224,7 @@ class EffectStill(QWidget):
 
     def _paint_still(self, painter: QPainter, t: float) -> None:
         scene = effects.preview_scene(effects.preview_effect(self.effect_id), t, self.place, self.palette,
-                                      system_reduced_motion(), theme.is_dark(), self.pace)
+                                      system_reduced_motion(), theme.is_dark(), self.pace, self.effect_size)
         width = STILL_VIEW_W
         view_h = min(effects.PREVIEW_SCREEN[1], width * self.height() / max(1, self.width()))
         centre = STILL_CENTRE[self.place]
@@ -244,7 +251,7 @@ class SwitchStill(EffectStill):
     def _paint_still(self, painter: QPainter, t: float) -> None:
         fx = effects.switch_effect(self.effect_id, self.crossing_style)
         scene = effects.preview_switch_scene(fx, t, self.palette, "windows", system_reduced_motion(), theme.is_dark(),
-                                             self.pace)
+                                             self.pace, self.effect_size)
         paint_scene(painter, QRectF(self.rect()), SWITCH_STILL_VIEW, scene, 10.0, labels=False)
 
 

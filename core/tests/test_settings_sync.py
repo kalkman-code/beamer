@@ -18,7 +18,8 @@ def mac_raw(**crossing):
     base = {
         "methods": ["shortcut", "edge", "notch"], "edge": "right", "edge_parts": ["middle"],
         "corner": "top_right", "resistance_px": 120, "block_while_dragging": True, "glow": True,
-        "glow_style": "glow", "glow_colour": "signal", "effect_length": "normal", "shortcut_arrival": True,
+        "glow_style": "glow", "glow_colour": "signal", "effect_length": "normal", "effect_size": "medium",
+        "shortcut_arrival": True,
         "shortcut_arrival_style": "match", "notch_style": "beam", "notch_after_ms": 1200, "haptics": True,
         "hold_full_screen": False,
     }
@@ -31,7 +32,7 @@ def pc_config(**fields):
     base = dict(
         crossing_methods=["edge", "shortcut"], crossing_edge_parts=["middle"], crossing_corner="top_left",
         crossing_resistance_px=120, block_while_dragging=True, trigger_key="cmd_r", trigger_style="double_tap",
-        double_tap_ms=300, glow_style="glow", glow_colour="signal", effect_length="normal",
+        double_tap_ms=300, glow_style="glow", glow_colour="signal", effect_length="normal", effect_size="medium",
         shortcut_arrival=True, shortcut_arrival_style="match", mac_return_edge="left", edge_glow=True,
         appearance="light",
     )
@@ -40,6 +41,175 @@ def pc_config(**fields):
 
 
 class MessageTests(unittest.TestCase):
+    def test_pc_modifier_style_is_local_and_not_part_of_same_on_all_machines(self):
+        self.assertNotIn("modifier_style", settings_sync.CROSSING_KEYS + settings_sync.DESIGN_KEYS)
+
+    def test_new_design_choices_survive_the_settings_message_round_trip(self):
+        from core import effects
+
+        styles = ("aperture", "crease", "pleat", "concertina", "thread", "weave", "jacquard")
+        colours = ("vellum", "carbon_copy", "marbled", "flax", "madder", "tide")
+        for style in styles:
+            for colour in colours:
+                with self.subTest(style=style, colour=colour):
+                    values = settings_sync.mac_values(mac_raw(
+                        glow_style=style, glow_colour=colour, shortcut_arrival_style=style,
+                    ))
+                    data = settings_sync.message_data(True, 7, values)
+                    _on, _stamp, received = settings_sync.read(data, KEYS)
+                    self.assertEqual(received["glow_style"], style)
+                    self.assertEqual(received["glow_colour"], colour)
+                    self.assertEqual(received["shortcut_arrival_style"], style)
+        self.assertTrue(set(styles) <= set(effects.EFFECT_IDS))
+        self.assertTrue(set(colours) <= set(effects.PACK_IDS))
+    def test_an_optional_design_state_keeps_its_own_stamp_and_effect_size(self):
+        values = {**settings_sync.mac_values(mac_raw()), "effect_size": "large"}
+        design_state = {"set_at": 63, "by": b64(b"\x03" * 16), "values": values}
+        data = settings_sync.message_data(False, 50, design_state=design_state)
+
+        self.assertFalse(data["on"])
+        self.assertEqual(data["design_sync"], design_state)
+
+    def test_a_settings_message_without_a_design_state_remains_readable(self):
+        data = settings_sync.message_data(False, 50)
+
+        self.assertIsNone(settings_sync.read_design_state(data, KEYS))
+
+    def test_a_design_state_is_validated_independently_of_same_on_all_machines(self):
+        values = {"glow_style": "beam", "unknown": "ignored"}
+        state = {"set_at": NOW, "by": b64(b"\x03" * 16), "values": values}
+
+        self.assertEqual(settings_sync.read_design_state(
+            {"on": False, "set_at": NOW, "by": b64(bytes(16)), "design_sync": state}, KEYS),
+                         {"set_at": NOW, "by": state["by"],
+                          "values": {"effect_size": "medium", "glow_style": "beam"}})
+
+    def test_an_invalid_effect_size_is_ignored_but_a_missing_one_defaults_to_medium(self):
+        state = {"set_at": NOW, "by": b64(bytes(16)),
+                 "values": {"effect_size": "giant", "glow_style": "beam"}}
+
+        self.assertEqual(settings_sync.read_design_state(
+            {"on": False, "set_at": NOW, "by": b64(bytes(16)), "design_sync": state}, KEYS),
+                         {"set_at": NOW, "by": state["by"], "values": {"glow_style": "beam"}})
+
+    def test_a_design_state_in_a_malformed_settings_envelope_is_ignored(self):
+        for outer in ({"on": "no"}, {"set_at": True}, {"by": "not an id"}):
+            data = {"on": False, "set_at": NOW, "by": b64(bytes(16)), **outer,
+                    "design_sync": {"set_at": NOW + 1, "by": b64(bytes([1]) * 16),
+                                    "values": {"glow_style": "beam"}}}
+            self.assertIsNone(settings_sync.read_design_state(data, KEYS), outer)
+
+    def test_same_on_design_change_gets_a_new_local_design_stamp(self):
+        changed = settings_sync.design_change_stamp(
+            {"effect_length": "normal"}, {"effect_length": "long"}, 50,
+            {"set_at": 90}, b64(b"\x02" * 16), now=100,
+        )
+
+        self.assertEqual(changed, {"set_at": 100, "by": b64(b"\x02" * 16)})
+        self.assertIsNone(settings_sync.design_change_stamp(
+            {"effect_length": "long"}, {"effect_length": "long"}, 50,
+            {"set_at": 90}, b64(b"\x02" * 16), now=100,
+        ))
+
+    def test_design_states_use_the_same_stamp_order_as_same_on_all_machines(self):
+        larger = {"set_at": 100, "by": b64(b"\x02" * 16), "values": {"glow_style": "beam"}}
+        self.assertTrue(settings_sync.design_arrived(larger, 100, b64(b"\x01" * 16)))
+        self.assertFalse(settings_sync.design_arrived(larger, 100, larger["by"]))
+        self.assertFalse(settings_sync.design_arrived(larger, 101, ""))
+
+    def test_design_follow_chain_keeps_the_leaders_stamp(self):
+        a_id, b_id = (b64(bytes([byte]) * 16) for byte in (1, 2))
+        a_state = {"set_at": 100, "by": a_id, "values": {"glow_style": "beam"}}
+
+        b = settings_sync.followed_design({"glow_style": "glow"}, a_state, a_id, a_id, False,
+                                          50, b64(bytes(16)))
+        c = settings_sync.followed_design({"glow_style": "glow"},
+                                          {"set_at": b["set_at"], "by": b["by"], "values": b["values"]},
+                                          b_id, b_id, False, 20, b64(bytes(16)))
+
+        self.assertTrue(b["changed"] and c["changed"])
+        self.assertEqual(c["values"]["glow_style"], "beam")
+        self.assertEqual((b["set_at"], b["by"], c["set_at"], c["by"]),
+                         (100, a_id, 100, a_id))
+
+    def test_follower_accepts_the_leaders_next_stamp_after_reannouncing_it(self):
+        a_id, b_id = b64(b"\x01" * 16), b64(b"\x02" * 16)
+        current = {"glow_style": "glow"}
+        first = {"set_at": 100, "by": a_id, "values": {"glow_style": "beam"}}
+        applied = settings_sync.followed_design(current, first, a_id, a_id, False,
+                                                50, "")
+        next_from_a = {"set_at": 101, "by": a_id, "values": {"glow_style": "flint"}}
+
+        updated = settings_sync.followed_design(
+            applied["values"], next_from_a, a_id, a_id, False,
+            applied["set_at"], applied["by"],
+        )
+
+        self.assertTrue(updated["changed"])
+        self.assertEqual(updated["values"]["glow_style"], "flint")
+        self.assertEqual((updated["set_at"], updated["by"]), (101, a_id))
+
+    def test_mutual_design_follow_converges_without_a_second_announcement(self):
+        a_id, b_id = b64(b"\x01" * 16), b64(b"\x02" * 16)
+        b_after_a = settings_sync.followed_design(
+            {"glow_style": "glow"}, {"set_at": 100, "by": a_id, "values": {"glow_style": "beam"}},
+            a_id, a_id, False, 90, b64(bytes(16)),
+        )
+        a_after_b = settings_sync.followed_design(
+            {"glow_style": "beam"},
+            {"set_at": b_after_a["set_at"], "by": b_after_a["by"], "values": b_after_a["values"]},
+            b_id, b_id, False, 100, a_id,
+        )
+
+        self.assertTrue(b_after_a["changed"])
+        self.assertIsNone(a_after_b)
+
+    def test_mutual_design_announcements_crossing_in_flight_converge_on_the_newer_stamp(self):
+        a_id, b_id = b64(bytes([1]) * 16), b64(bytes([2]) * 16)
+        ids = {"A": a_id, "B": b_id}
+        held = {
+            "A": {"values": {"glow_style": "beam"}, "set_at": 200, "by": a_id},
+            "B": {"values": {"glow_style": "glow"}, "set_at": 100, "by": b_id},
+        }
+        # Both link-up announcements are already in flight before either side reacts.
+        queue = [("A", "B", dict(held["A"])), ("B", "A", dict(held["B"]))]
+        sent = 0
+        while queue:
+            source, follower, incoming = queue.pop(0)
+            sent += 1
+            self.assertLess(sent, 10, "mutual follows kept re-announcing")
+            current = held[follower]
+            applied = settings_sync.followed_design(
+                current["values"], incoming,
+                source, source, False, current["set_at"], current["by"],
+            )
+            if applied is not None and applied["changed"]:
+                held[follower] = {"values": applied["values"], "set_at": applied["set_at"], "by": applied["by"]}
+                queue.append((follower, source, dict(held[follower])))
+
+        self.assertEqual(held["A"]["values"]["glow_style"], "beam")
+        self.assertEqual(held["B"]["values"]["glow_style"], "beam")
+        self.assertEqual((held["A"]["set_at"], held["A"]["by"]), (200, a_id))
+        self.assertEqual((held["B"]["set_at"], held["B"]["by"]), (200, a_id))
+
+    def test_design_follow_ignores_other_peers_and_waits_while_same_is_on(self):
+        state = {"set_at": 100, "by": b64(b"\x02" * 16), "values": {"glow_style": "beam"}}
+        peer = state["by"]
+        current = {"glow_style": "glow"}
+
+        self.assertIsNone(settings_sync.followed_design(current, state, peer, "", False, 0, ""))
+        self.assertIsNone(settings_sync.followed_design(current, state, peer, peer, True, 0, ""))
+
+    def test_a_newer_identical_design_keeps_its_stamp_without_an_announcement(self):
+        peer = b64(bytes([2]) * 16)
+        applied = settings_sync.followed_design(
+            {"glow_style": "beam"}, {"set_at": 100, "by": peer, "values": {"glow_style": "beam"}},
+            peer, peer, False, 50, "",
+        )
+
+        self.assertEqual(applied, {"changed": False, "values": {"glow_style": "beam"},
+                                   "set_at": 100, "by": peer})
+
     def test_off_carries_no_values(self):
         data = settings_sync.message_data(False, 50, settings_sync.mac_values(mac_raw()))
         self.assertEqual(data, {"on": False, "set_at": 50, "by": ""})
@@ -48,6 +218,7 @@ class MessageTests(unittest.TestCase):
         data = settings_sync.message_data(True, 50, settings_sync.mac_values(mac_raw()))
         self.assertEqual(set(data["crossing"]), set(settings_sync.CROSSING_KEYS))
         self.assertEqual(set(data["design"]), set(settings_sync.DESIGN_KEYS))
+        self.assertEqual(data["design"]["effect_size"], "medium")
         self.assertIs(data["crossing"]["shortcut"], True)
         flat = {**data["crossing"], **data["design"]}
         for own in ("notch_style", "notch_after_ms", "haptics", "glow", "appearance", "edge", "hold_full_screen",
@@ -148,6 +319,22 @@ class MessageTests(unittest.TestCase):
 
 
 class AdapterTests(unittest.TestCase):
+    def test_size_is_read_applied_and_transmitted_on_both_machines(self):
+        mac = mac_raw(effect_size="large")
+        values = settings_sync.mac_values(mac)
+        self.assertEqual(values["effect_size"], "large")
+        self.assertEqual(settings_sync.apply_mac(mac_raw(), values)["crossing"]["effect_size"], "large")
+        message = settings_sync.message_data(True, 1, values)
+        self.assertEqual(message["design"]["effect_size"], "large")
+        self.assertEqual(settings_sync.read(message, KEYS)[2]["effect_size"], "large")
+
+        pc = pc_config(effect_size="small")
+        values = settings_sync.pc_values(pc)
+        self.assertEqual(values["effect_size"], "small")
+        target = pc_config()
+        settings_sync.apply_pc(target, values)
+        self.assertEqual(target.effect_size, "small")
+
     def test_the_mac_keeps_its_notch_its_zones_and_its_own_rows(self):
         raw = mac_raw()
         values = settings_sync.mac_values(mac_raw(glow_style="beam", resistance_px=40))

@@ -420,6 +420,18 @@ class Pressure(Case):
         self.assertEqual(self.machine.pressures[1], ("left", 1.0, True, None))
         self.assertNotIn(("move", -60, 0), self.machine.injected())
 
+    def test_the_log_names_the_edge_a_pointer_landed_on_and_the_edge_it_pushed_through(self):
+        # 02-10 20:40: input bounced between two machines every half second, and neither log
+        # said which edges, so a bad arrangement could not be told from a hand wiggling at one.
+        with self.assertLogs(receiver.LOGGER, level="INFO") as said:
+            link = self.owner(resistance_px=0, reach=[], edge="right", offset=0.5)
+            self.assertTrue(wait_for(lambda: self.machine.arrivals), self.machine.arrivals)
+            self.machine.desktop.cursor = (0, 540)
+            link.move(-60, 0)
+            link.expect(SWITCH)
+        self.assertTrue(any("arrived at this machine's right edge" in line for line in said.output), said.output)
+        self.assertTrue(any("pushed through the zone at this machine's left edge" in line for line in said.output), said.output)
+
 
 class RearmNeverRevives(Case):
     """H: a settings change re-arms only zones that are live; and a replayed frame ends the link."""

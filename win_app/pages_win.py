@@ -63,20 +63,21 @@ def dots(config_error: bool, firewall_tone: str | None) -> dict:
     return {}
 
 
-# The Design page's styles and colours: Classic first, then each crossing effects direction in
-# effects.DIRECTIONS order. Classic's Glow and Beam light this PC's edge or corner as the pointer
+# The Design page's styles and colours: Light first, then each crossing effects direction in
+# effects.DIRECTIONS order. Light's Glow, Beam and Aperture draw this PC's edge or corner as the pointer
 # leaves; the effects draw the departure and the arrival, at an edge, a corner or the Mac's notch.
-CLASSIC = "Classic"
+CLASSIC = "Light"
 TODAY_STYLES = (
     ("glow", "Glow", "A band of light that deepens the harder you push."),
     ("beam", "Beam", "A thin line with a comet of light running along it."),
+    ("aperture", "Aperture", "A fine lens of light opens under pressure and closes softly behind the arriving pointer."),
 )
 TODAY_COLOURS = (("signal", "Signal"), ("colourful", "Colourful"), ("ocean", "Ocean"), ("sunset", "Sunset"), ("mono", "Mono"))
 
 
 def effects_load_error():
     """None when every crossing effect loads, else the exception: the Design page then offers only
-    Classic's styles and colours rather than failing to build, and Beamer still starts."""
+    Light's styles and colours rather than failing to build, and Beamer still starts."""
     try:
         effects._load()
     except Exception as exc:
@@ -89,9 +90,11 @@ def style_groups() -> tuple:
     its intensity: quiet, medium or showpiece."""
     # Glow and Beam's detail is their kind, as an effect's is its intensity; what they do is said
     # under the preview.
-    groups = [(CLASSIC, tuple((value, name, CLASSIC) for value, name, _blurb in TODAY_STYLES))]
     if effects_load_error() is not None:
-        return tuple(groups)
+        return ((CLASSIC, tuple((value, name, effects.CLASSIC[value].intensity.capitalize())
+                               for value, name, _blurb in TODAY_STYLES[:2])),)
+    groups = [(CLASSIC, tuple((value, name, effects.CLASSIC[value].intensity.capitalize())
+                              for value, name, _blurb in TODAY_STYLES))]
     for _module, title, effect_ids, _packs in effects.DIRECTIONS:
         found = [effects.effect(effect_id) for effect_id in effect_ids]
         groups.append((title, tuple((fx.id, fx.name, fx.intensity.capitalize()) for fx in found)))
@@ -217,10 +220,7 @@ def crossing_state_sentence(paired, heard, sending, connected, armed, paused, fu
     if paused:
         return "Paused. The edge, part of the edge and corner do nothing until you resume; the shortcut still works."
     if full_screen_app is not None:
-        return (
-            f"Off while {full_screen_app} is full screen, so the pointer stays put at "
-            "the edges; the shortcut still works."
-        )
+        return "Held: an app is full screen."
     return "On. Pause it to lean on an edge without switching."
 
 
@@ -258,7 +258,11 @@ SWITCH_SIMPLE = (
 
 def switch_groups() -> tuple:
     """style_groups() for a switch: SWITCH_SIMPLE in place of Classic, then the same directions."""
-    return ((SIMPLE, SWITCH_SIMPLE),) + style_groups()[1:]
+    if effects_load_error() is not None:
+        return ((SIMPLE, SWITCH_SIMPLE),)
+    aperture = ((CLASSIC, (("aperture", effects.CLASSIC["aperture"].name,
+                           effects.CLASSIC["aperture"].intensity.capitalize()),)),)
+    return ((SIMPLE, SWITCH_SIMPLE),) + aperture + style_groups()[1:]
 
 
 # The Crossing page's "Where your Mac is": the value is the edge of this PC that leads to the Mac.

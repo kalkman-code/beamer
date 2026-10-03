@@ -25,6 +25,11 @@ PC_ROWS = [
     ("alt", "alt", "alt", "alt"),
     ("alt_r", "alt_r", "alt_r", "alt_r"),
 ]
+PC_MAC_LAYOUT_ROWS = [
+    ("ctrl", "ctrl"), ("ctrl_r", "ctrl_r"),
+    ("cmd", "alt"), ("cmd_r", "alt_r"),
+    ("alt", "cmd"), ("alt_r", "cmd_r"),
+]
 
 # 1.4.x as it stands: the Mac's two key_map styles, and Windows' capture names (Ctrl is "cmd", the
 # Windows key is "ctrl") with POSITIONAL_SWAP on top.
@@ -54,6 +59,14 @@ class TableTests(unittest.TestCase):
                 for peer in MAC:
                     self.assertEqual(keytable.wire_name(physical, own, peer, "semantic"), semantic, (own, peer, physical))
                     self.assertEqual(keytable.wire_name(physical, own, peer, "positional"), positional, (own, peer, physical))
+
+    def test_mac_layout_maps_each_pc_modifier_side_to_its_mac_key(self):
+        for physical, expected in PC_MAC_LAYOUT_ROWS:
+            self.assertEqual(keytable.wire_name(physical, "windows", "macos", "mac_layout"), expected)
+
+    def test_mac_layout_leaves_non_modifier_keys_unchanged(self):
+        for name in ("shift", "shift_r", "caps_lock", "a", "enter", "f13"):
+            self.assertEqual(keytable.wire_name(name, "windows", "macos", "mac_layout"), name)
 
     def test_an_unknown_platform_is_a_pc_on_both_sides(self):
         self.assertEqual(keytable.wire_name("cmd", "haiku", "macos", "semantic"), "ctrl")

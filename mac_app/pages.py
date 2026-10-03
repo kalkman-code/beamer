@@ -79,10 +79,11 @@ def step(current, direction):
 # The Design page's styles and colours. The classic Glow and Beam come first and stay the default;
 # the crossing effects follow in effects.DIRECTIONS order, each direction a row of quiet, medium
 # and showpiece, and its three colour packs a row of swatches.
-TODAY = "Classic"
+TODAY = "Light"
 TODAY_STYLES = (
     ("glow", "Glow", "A band of light that deepens the harder you push."),
     ("beam", "Beam", "A thin line with a comet of light running along it."),
+    ("aperture", "Aperture", "A fine lens of light opens under pressure and closes softly behind the arriving pointer."),
 )
 INTENSITIES = {"quiet": "Quiet", "medium": "Medium", "showpiece": "Showpiece", "classic": "Classic"}
 
@@ -99,9 +100,12 @@ def effects_load_error():
 
 def style_groups(with_effects=True):
     """[(group, [(style id, name, detail)])] for the style tiles."""
+    with_effects = with_effects and effects_load_error() is None
     # Glow and Beam's detail is their kind, as an effect's is its intensity; what they do is said
     # under the preview.
-    groups = [(TODAY, [(value, name, INTENSITIES["classic"]) for value, name, _blurb in TODAY_STYLES])]
+    classic_styles = TODAY_STYLES if with_effects else TODAY_STYLES[:2]
+    groups = [(TODAY, [(value, name, effects.CLASSIC[value].intensity.capitalize())
+                       for value, name, _blurb in classic_styles])]
     for _module, direction, effect_ids, _packs in effects.DIRECTIONS if with_effects else ():
         row = []
         for effect_id in effect_ids:
@@ -118,7 +122,10 @@ def switch_style_groups(with_effects=True):
     """[(group, [(value, name, detail)])] for the style tiles in Switch mode: what a switch plays,
     effects.SWITCH_STYLES, with the effects grouped as the crossing's are."""
     simple = [("match", "Same as crossing", "Plays the crossing style"), ("locator", "Ring", "Closes onto the pointer")]
-    return [(SIMPLE, simple)] + style_groups(with_effects)[1:]
+    with_effects = with_effects and effects_load_error() is None
+    aperture = [(TODAY, [("aperture", effects.CLASSIC["aperture"].name,
+                          effects.CLASSIC["aperture"].intensity.capitalize())])] if with_effects else []
+    return [(SIMPLE, simple)] + aperture + style_groups(with_effects)[1:]
 
 
 def colour_groups(today_colours, with_effects=True):
@@ -382,10 +389,7 @@ def crossing_state_sentence(paired, sending, connected, armed, paused, full_scre
     if paused:
         return "Paused. Edges, corners and the notch do nothing until you resume; the shortcut still works."
     if full_screen_app is not None:
-        return (
-            f"Off while {full_screen_app} is full screen, so the pointer stays put at "
-            "the edges; the shortcut still works."
-        )
+        return "Held: an app is full screen."
     return "On. Pause it to lean on an edge without switching."
 
 

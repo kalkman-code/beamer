@@ -508,7 +508,8 @@ class MacDrivenTests(unittest.TestCase):
         # no longer passes a held edge. Lifted, the same push leads home.
         for held in ("crossing_paused", "full_screen_app"):
             with self.subTest(held=held):
-                duo = self.duo(crossing={"edge": "right"})
+                # The full-screen hold is off by default since 02-10-2026.
+                duo = self.duo(crossing={"edge": "right", "hold_full_screen": True})
                 self.drive(duo, "right")
                 setattr(duo.mac, held, True if held == "crossing_paused" else "Steam")
                 duo.pc_leans(MAC_EDGE_POINT["right"], 30, times=4)
@@ -516,6 +517,19 @@ class MacDrivenTests(unittest.TestCase):
                 setattr(duo.mac, held, False if held == "crossing_paused" else None)
                 duo.pc_leans(MAC_EDGE_POINT["right"], 30, times=3)
                 self.assertIsNotNone(duo.pc_switch(), "the edge did not lead home once released")
+                duo.close()
+
+    def test_this_macs_full_screen_setting_alone_decides_its_edges_while_the_pc_drives_it(self):
+        for enabled in (False, True):
+            with self.subTest(hold_full_screen=enabled):
+                duo = self.duo(crossing={"edge": "right", "hold_full_screen": enabled})
+                self.drive(duo, "right")
+                duo.mac.full_screen_app = "Steam"
+                duo.pc_leans(MAC_EDGE_POINT["right"], 30, times=4)
+                if enabled:
+                    self.assertIsNone(duo.pc_switch(0.2), "the Mac's enabled hold let the PC cross its edge")
+                else:
+                    self.assertIsNotNone(duo.pc_switch(), "the Mac's disabled hold held its edge")
                 duo.close()
 
     def test_this_macs_own_pointer_can_take_input_back_only_with_its_own_link_to_the_pc_up(self):

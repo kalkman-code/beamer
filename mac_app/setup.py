@@ -81,6 +81,7 @@ setup(
                 "core.peerlist", "core.protocol", "core.receiver", "core.return_edge", "core.settings_sync",
                 "core.updates", "core.wol",
                 "core.fx_ink", "core.fx_instrument", "core.fx_membrane", "core.fx_sparks", "core.fx_warp",
+                "core.fx_light", "core.fx_material", "core.fx_folio", "core.fx_selvedge",
             ],
             "iconfile": "../Beamer.icns",
             "plist": {

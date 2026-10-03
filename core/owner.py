@@ -320,6 +320,10 @@ class Owner:
             pressed[ident] = _release(message)
         elif kind in _UPS:
             pressed.pop(ident, None)
+        if kind == "text" and message.pop("_bracket_modifiers", False):
+            message = dict(message, _pressed_keys=[
+                dict(release["data"]) for (key_kind, _key), release in pressed.items() if key_kind == "key"
+            ])
         return [Send(self.on, message)]
 
     def _replay_held(self):

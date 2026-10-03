@@ -387,8 +387,11 @@ def full_screen_app():
     app = AppKit.NSWorkspace.sharedWorkspace().frontmostApplication()
     if app is None:
         return None
+    pid = app.processIdentifier()
+    if pid == os.getpid():
+        return None
     name = app.localizedName() or "An app"
-    if _ax_full_screen(app.processIdentifier()):
+    if _ax_full_screen(pid):
         return name
     error, displays, count = Quartz.CGGetActiveDisplayList(16, None, None)
     if error != 0:
@@ -398,7 +401,7 @@ def full_screen_app():
         rect = Quartz.CGDisplayBounds(display)
         display_frames.append((rect.origin.x, rect.origin.y, rect.size.width, rect.size.height))
     windows = Quartz.CGWindowListCopyWindowInfo(Quartz.kCGWindowListOptionOnScreenOnly, Quartz.kCGNullWindowID)
-    if _covers_a_display(windows or (), app.processIdentifier(), display_frames):
+    if _covers_a_display(windows or (), pid, display_frames):
         return name
     return None
 
@@ -499,7 +502,6 @@ class EdgeGlow:
 
     dark_appearance = staticmethod(notch_beam.dark_appearance)
 
-    BAND_MAX = 18.0
     FLASH_SECONDS = 0.18
     PREVIEW_SECONDS = 0.6
     # How far a corner's light reaches along each of its two walls.
@@ -640,16 +642,19 @@ class EdgeGlow:
             return
         self._ensure_panel()
         strength = max(level, flash, lingering)
-        band = 3.0 + 3.0 * strength if beam else 2.0 + self.BAND_MAX * strength
+        box = self.controller._current_desktop_bounds()
+        display = effects_overlay.display_at((self.region[0] + self.region[2] / 2.0,
+                                              self.region[1] + self.region[3] / 2.0), box)
+        full_depth = effects.edge_depth(display[2] - display[0], display[3] - display[1],
+                                        feel.get("effect_size", "medium"))
+        band = full_depth if beam else full_depth * (0.35 + 0.65 * max(level, flash))
         if self._corner() is not None:
-            self._draw_corner(feel, beam, band, level, flash, strength)
+            self._draw_corner(feel, beam, band, full_depth, level, flash, strength)
             return
         if self.side is not None:
             self.side.setHidden_(True)
         if self.mac_edge == "top":
-            x, y, width, height = self.region
-            band = self._top_band(band, beam, effects_overlay.display_at(
-                (x + width / 2.0, y + height / 2.0), self.controller._current_desktop_bounds()))
+            band = self._top_band(band, beam, display, full_depth)
         self.panel.setFrame_display_(self._band_frame(band), False)
         # Colour runs along the edge: top to bottom on a side, left to right along the top or bottom.
         start, end = ((0.5, 1.0), (0.5, 0.0)) if self.mac_edge in ("left", "right") else ((0.0, 0.5), (1.0, 0.5))
@@ -715,18 +720,19 @@ class EdgeGlow:
         display = effects_overlay.display_at((x + width / 2.0, y + height / 2.0), box)
         return effects_overlay.corner_name(self.region, display), display
 
-    def _top_band(self, band, beam, display):
+    def _top_band(self, band, beam, display, full_depth):
         """How deep the glow reaches down from the top of `display`. Over a menu bar it is scaled
         to fill the bar at full strength: the bar is about twice the band, so at the band's own
         depth it lit only the bar's top half, under the status items and the clock, and a corner's
         top arm read as a faint stripe beside the full side arm. The beam is a line and stays one."""
         bar = menu_bar_height(display)
-        full = 2.0 + self.BAND_MAX
-        if beam or bar <= full:
+        if beam or bar <= 0:
             return band
-        return band * bar / full
+        if bar >= full_depth:
+            return min(full_depth, band)
+        return min(bar, band * bar / full_depth)
 
-    def _draw_corner(self, feel, beam, band, level, flash, strength):
+    def _draw_corner(self, feel, beam, band, full_depth, level, flash, strength):
         """The band along both of the corner's walls, brightest where they meet and fading out along
         each, so it reads as the corner rather than two edges; the beam's comet runs in along the top
         or bottom wall and out along the side. One gradient layer per wall, each masked by its fade."""
@@ -747,7 +753,7 @@ class EdgeGlow:
         fade = lambda u: max(0.0, 1.0 - u) ** 1.4
         # AppKit's layer space runs up from the bottom; u runs from the corner outward.
         at_top = vertical == "top"
-        across = self._top_band(band, beam, (left, top, right, bottom)) if at_top else band
+        across = self._top_band(band, beam, (left, top, right, bottom), full_depth) if at_top else band
         walls = (
             (self.fill, self.masks[0], ((0.0, arm - across) if at_top else (0.0, 0.0), (arm, across)),
              ((1.0, 0.5), (0.0, 0.5)) if horizontal == "right" else ((0.0, 0.5), (1.0, 0.5)),
@@ -931,6 +937,43 @@ class FlippedView(AppKit.NSView):
         return True
 
 
+def window_fill_frame(window):
+    screen = window.screen() or AppKit.NSScreen.mainScreen()
+    return screen.visibleFrame()
+
+
+def titlebar_action(setting):
+    value = (setting or "").strip().casefold()
+    if value in {"fill", "zoom"}:
+        return "fill"
+    if value in {"minimise", "minimize"}:
+        return "minimise"
+    return None
+
+
+def perform_titlebar_double_click(window, setting=None):
+    if setting is None:
+        domain = AppKit.NSUserDefaults.standardUserDefaults().persistentDomainForName_("NSGlobalDomain") or {}
+        setting = domain.get("AppleActionOnDoubleClick")
+    action = titlebar_action(setting)
+    if action == "fill":
+        window.zoom_(None)
+    elif action == "minimise":
+        window.miniaturize_(None)
+
+
+def perform_titlebar_drag(window, event):
+    window.performWindowDragWithEvent_(event)
+
+
+class TitlebarStrip(AppKit.NSView):
+    def mouseDown_(self, event):
+        if event.clickCount() >= 2:
+            perform_titlebar_double_click(self.window())
+        else:
+            perform_titlebar_drag(self.window(), event)
+
+
 class ControlWindow(AppKit.NSObject):
     def initWithController_settingsStore_logger_(self, controller, settings_store, logger):
         self = objc.super(ControlWindow, self).init()
@@ -965,6 +1008,7 @@ class ControlWindow(AppKit.NSObject):
         self.previews = None
         self._apply_serial = 0
         self._save_pending = False
+        self._design_states = {}
         # The machine the Crossing page shows and writes the ways of: an id ("" is the entry
         # migrated from 1.4.x), None while nothing is paired.
         self.chosen_peer = None
@@ -997,7 +1041,12 @@ class ControlWindow(AppKit.NSObject):
         theme.tint(content.layer(), background="ground")
         self.appearance_watch = theme.AppearanceWatch.alloc().initWithCallback_(lambda: self._apply_appearance())
 
-        top = widgets.hairline()
+        top = TitlebarStrip.alloc().initWithFrame_(((0, 0), (900, 18)))
+        top.setTranslatesAutoresizingMaskIntoConstraints_(False)
+        top.setWantsLayer_(True)
+        theme.tint(top.layer(), background="ground")
+        top_rule = widgets.box("rule")
+        top.addSubview_(top_rule)
         self.sidebar = widgets.Sidebar(
             pages.PAGES,
             self._select_page,
@@ -1016,6 +1065,11 @@ class ControlWindow(AppKit.NSObject):
             top.topAnchor().constraintEqualToAnchor_(content.topAnchor()),
             top.leadingAnchor().constraintEqualToAnchor_(content.leadingAnchor()),
             top.trailingAnchor().constraintEqualToAnchor_(content.trailingAnchor()),
+            top.heightAnchor().constraintEqualToConstant_(18),
+            top_rule.leadingAnchor().constraintEqualToAnchor_(top.leadingAnchor()),
+            top_rule.trailingAnchor().constraintEqualToAnchor_(top.trailingAnchor()),
+            top_rule.bottomAnchor().constraintEqualToAnchor_(top.bottomAnchor()),
+            top_rule.heightAnchor().constraintEqualToConstant_(1),
             self.sidebar_width,
             self.sidebar.view.topAnchor().constraintEqualToAnchor_(top.bottomAnchor()),
             self.sidebar.view.bottomAnchor().constraintEqualToAnchor_(content.bottomAnchor()),
@@ -1076,6 +1130,9 @@ class ControlWindow(AppKit.NSObject):
         sidebar = min(high, max(low, width * 0.25))
         self.sidebar_width.setConstant_(sidebar)
         self._apply_width(width - sidebar - 1)
+
+    def windowWillUseStandardFrame_defaultFrame_(self, window, _default_frame):
+        return window_fill_frame(window)
 
     @objc.python_method
     def _apply_width(self, width):
@@ -1175,6 +1232,7 @@ class ControlWindow(AppKit.NSObject):
         self.tick_steps_select.value = crossing_raw["haptic_steps"]
         self.hold_box.value = crossing_raw["hold_full_screen"]
         self._load_shared(raw)
+        self._refresh_design_follow()
 
     @objc.python_method
     def _load_shared(self, raw):
@@ -1193,6 +1251,7 @@ class ControlWindow(AppKit.NSObject):
         self.dragging_box.value = crossing_raw["block_while_dragging"]
         self.glow_style_select.value = crossing_raw["glow_style"]
         self.length_select.value = crossing_raw.get("effect_length", "normal")
+        self.size_select.value = crossing_raw.get("effect_size", "medium")
         self.glow_colour_select.value = crossing_raw["glow_colour"]
         self._reflect()
 
@@ -1270,8 +1329,8 @@ class ControlWindow(AppKit.NSObject):
         if fx is not None:
             self.effect_blurb.set(fx.blurb)
         # Drawing every still is tens of milliseconds, so only what they show redraws them: the
-        # colour, the place, the length, the palette, and for Same as crossing the crossing style.
-        stills = (colour, style, place, self.length_select.value, theme.is_dark())
+        # colour, the place, the length, the size, the palette, and for Same as crossing the crossing style.
+        stills = (colour, style, place, self.length_select.value, self.size_select.value, theme.is_dark())
         if stills != self._stills:
             self._stills = stills
             for still in self.effect_stills:
@@ -1573,6 +1632,11 @@ class ControlWindow(AppKit.NSObject):
         except SettingsError as exc:
             self.logger.warning("settings not read after the peers changed: %s", exc)
             return
+        peer_ids = {entry.get("id") for entry in self.settings_store.current()["peers"]}
+        if cfg.design_follow_peer and cfg.design_follow_peer not in peer_ids:
+            raw = config_to_raw(cfg)
+            raw["design_follow_peer"] = ""
+            cfg = self.settings_store.save(raw)
         self.controller.peers_changed()
         self.controller.apply_settings(cfg)
         if self.windows_input is not None:
@@ -1685,10 +1749,16 @@ class ControlWindow(AppKit.NSObject):
         top, leading, bottom, trailing = theme.PAGE_PADDING
         padding = [
             body.topAnchor().constraintEqualToAnchor_constant_(page.topAnchor(), top),
-            body.leadingAnchor().constraintEqualToAnchor_constant_(page.leadingAnchor(), leading),
+            body.leadingAnchor().constraintGreaterThanOrEqualToAnchor_constant_(page.leadingAnchor(), leading),
             page.bottomAnchor().constraintGreaterThanOrEqualToAnchor_constant_(body.bottomAnchor(), bottom),
-            page.trailingAnchor().constraintEqualToAnchor_constant_(body.trailingAnchor(), trailing),
+            page.trailingAnchor().constraintGreaterThanOrEqualToAnchor_constant_(body.trailingAnchor(), trailing),
+            body.centerXAnchor().constraintEqualToAnchor_(page.centerXAnchor()),
+            body.widthAnchor().constraintLessThanOrEqualToConstant_(theme.PAGE_CONTENT_WIDTH),
         ]
+        available_width = body.widthAnchor().constraintEqualToAnchor_constant_(page.widthAnchor(), -(leading + trailing))
+        # Below WindowSizeStayPut (500): above it, the column's 960 pt cap became the window's.
+        available_width.setPriority_(AppKit.NSLayoutPriorityDragThatCannotResizeWindow)
+        padding.append(available_width)
         # The page ends where its body does, unless motion props it up with the floor while a
         # module folds away, so the scroll offset eases down rather than snapping. Only the
         # page is pulled short; pulling the body would stretch a module into the held space.
@@ -1796,6 +1866,7 @@ class ControlWindow(AppKit.NSObject):
         for note in self.own_notes:
             if note.view.isHidden() == on:
                 motion.set_hidden(note.view, not on)
+        self._refresh_design_follow()
 
     @objc.python_method
     def _set_same(self, on):
@@ -1812,6 +1883,8 @@ class ControlWindow(AppKit.NSObject):
             return
         self.controller.apply_settings(cfg)
         self._send_same()
+        if not on:
+            self._apply_followed_design()
         self._show_same()
 
     @objc.python_method
@@ -1819,8 +1892,54 @@ class ControlWindow(AppKit.NSObject):
         """This Mac's settings message, for a change here and for announcing on a new link. Called
         from the links' threads as well, so it reads the settings once."""
         cfg = self.controller.cfg
+        values = settings_sync.mac_values(config_to_raw(cfg))
+        design_state = {
+            "set_at": cfg.design_set_at,
+            "by": cfg.design_by or self.own_id(),
+            "values": {key: values[key] for key in settings_sync.DESIGN_KEYS},
+        }
         return settings_sync.message_data(cfg.same_on_both, cfg.same_set_at,
-                                          settings_sync.mac_values(config_to_raw(cfg)), by=cfg.same_by or self.own_id())
+                                          values, by=cfg.same_by or self.own_id(), design_state=design_state)
+
+    @objc.python_method
+    def _apply_followed_design(self):
+        cfg = self.controller.cfg
+        peer = cfg.design_follow_peer
+        state = self._design_states.get(peer)
+        if not peer or state is None or cfg.same_on_both:
+            return
+        current = settings_sync.mac_values(config_to_raw(cfg))
+        taken = settings_sync.followed_design(current, state, peer, peer, cfg.same_on_both,
+                                              cfg.design_set_at, cfg.design_by)
+        if taken is None:
+            return
+        raw = settings_sync.apply_mac(config_to_raw(cfg), taken["values"])
+        raw["design_set_at"] = taken["set_at"]
+        raw["design_by"] = taken["by"]
+        try:
+            cfg = self.settings_store.save(raw)
+        except (SettingsError, TypeError, ValueError):
+            self.logger.exception("could not save followed Design from %s", peer)
+            return
+        self.controller.apply_settings(cfg)
+        self._load_shared(config_to_raw(cfg))
+        if taken["changed"]:
+            self._send_same()
+
+    @objc.python_method
+    def _receive_design(self, data, peer):
+        if peer is None:
+            return
+        peer_id = protocol.id_text(peer) if isinstance(peer, bytes) else peer
+        state = settings_sync.read_design_state(data, KEY_NAME_TO_CODE)
+        if state is None:
+            return
+        held = self._design_states.get(peer_id)
+        if held is None or settings_sync.design_arrived(state, held["set_at"], held["by"]):
+            self._design_states[peer_id] = state
+            self._refresh_design_follow()
+        if peer_id == self.controller.cfg.design_follow_peer:
+            self._apply_followed_design()
 
     @objc.python_method
     def own_id(self):
@@ -1842,28 +1961,44 @@ class ControlWindow(AppKit.NSObject):
         when it is newer than this Mac's; then its values replace the shared ones here, and it is
         sent on, unchanged, to every other machine that keeps it."""
         cfg = self.controller.cfg
+        was_on = cfg.same_on_both
         taken = settings_sync.arrived(data, cfg.same_set_at, KEY_NAME_TO_CODE, by_here=cfg.same_by)
-        if taken is None:
-            return
-        on, set_at, values = taken
-        raw = config_to_raw(cfg)
-        raw["same_on_both"] = on
-        raw["same_set_at"] = set_at
-        raw["same_by"] = data.get("by", "")
-        if on:
-            raw = settings_sync.apply_mac(raw, values)
-        try:
-            cfg = self.settings_store.save(raw)
-        except (SettingsError, TypeError, ValueError):
-            self.logger.exception("could not save the settings %s sent", peer)
-            return
-        self.controller.apply_settings(cfg)
-        self._send_same(data, source=peer)
-        if self.previews is not None:
-            self.previews.repaint()
-        self.logger.info("settings from %s applied (same on all machines %s)", peer, "on" if on else "off")
-        self._load_shared(config_to_raw(cfg))
-        self.refresh()
+        if taken is not None:
+            on, set_at, values = taken
+            raw = config_to_raw(cfg)
+            design_stamp = None
+            if on:
+                design_stamp = settings_sync.design_change_stamp(
+                    settings_sync.mac_values(raw), values, cfg.design_set_at,
+                    settings_sync.read_design_state(data, KEY_NAME_TO_CODE), self.own_id(),
+                )
+            raw["same_on_both"] = on
+            raw["same_set_at"] = set_at
+            raw["same_by"] = data.get("by", "")
+            if on:
+                raw = settings_sync.apply_mac(raw, values)
+                if design_stamp is not None:
+                    raw["design_set_at"] = design_stamp["set_at"]
+                    raw["design_by"] = design_stamp["by"]
+            try:
+                cfg = self.settings_store.save(raw)
+            except (SettingsError, TypeError, ValueError):
+                self.logger.exception("could not save the settings %s sent", peer)
+                return
+            self.controller.apply_settings(cfg)
+            # Keep global settings' existing forwarding, but replace the optional direct state
+            # with this machine's own state instead of relaying the sender's state.
+            forwarded = dict(data)
+            forwarded["design_sync"] = self.same_state()["design_sync"]
+            self._send_same(forwarded, source=peer)
+            if self.previews is not None:
+                self.previews.repaint()
+            self.logger.info("settings from %s applied (same on all machines %s)", peer, "on" if on else "off")
+            self._load_shared(config_to_raw(cfg))
+            self.refresh()
+        self._receive_design(data, peer)
+        if taken is not None and was_on and not on:
+            self._apply_followed_design()
 
     @objc.python_method
     def _login_module(self):
@@ -1968,6 +2103,69 @@ class ControlWindow(AppKit.NSObject):
         for module in (self._on_screen_module(), self.style_module, self.colour_module,
                        self._trackpad_module(), self._appearance_module()):
             widgets.add(body, module.view)
+        self.follow_module = widgets.Module(spacing=10)
+        self.follow_module.add(widgets.eyebrow("Match design with"))
+        self.follow_host = widgets.stack(spacing=0)
+        self.follow_module.add(self.follow_host)
+        self.follow_note = widgets.note()
+        self.follow_module.add(self.follow_note.view)
+        widgets.add(body, self.follow_module.view)
+        self._refresh_design_follow()
+
+    @objc.python_method
+    def _refresh_design_follow(self):
+        if not hasattr(self, "follow_host"):
+            return
+        for view in self.follow_host.arrangedSubviews():
+            self.follow_host.removeArrangedSubview_(view)
+            view.removeFromSuperview()
+        peers = self.settings_store.current()["peers"]
+        labels = peerlist.labels(peers)
+        choices = [("", "None")]
+        unsupported = set()
+        for entry in peers:
+            peer = entry.get("id", "")
+            if not peer:
+                continue
+            title = labels.get(entry.get("token", ""), entry.get("name") or "Machine")
+            if peer not in self._design_states:
+                title += " — Needs beta.6 or later"
+                unsupported.add(peer)
+            choices.append((peer, title))
+        self.follow_select = widgets.Segmented(choices, columns=min(2, len(choices)),
+                                               on_change=self._set_design_follow)
+        self.follow_select.value = self.controller.cfg.design_follow_peer
+        for value, cell, _words in self.follow_select.cells:
+            if value in unsupported:
+                cell.enabled = False
+                cell.setAlphaValue_(0.45)
+                cell.setToolTip_("Needs beta.6 or later")
+        widgets.add(self.follow_host, self.follow_select.view)
+        peer = self.controller.cfg.design_follow_peer
+        if peer:
+            entry = next((item for item in peers if item.get("id") == peer), {})
+            name = labels.get(entry.get("token", ""), entry.get("name") or "that machine")
+            if self.controller.cfg.same_on_both:
+                self.follow_note.set(f"Following {name}, paused while Same on all machines is on.")
+            else:
+                self.follow_note.set(f"Following {name}. Change a Design setting to stop following.")
+        elif unsupported:
+            self.follow_note.set("A paired machine is unavailable until it has beta.6 or later.")
+        else:
+            self.follow_note.set("None: this machine keeps its own Design.")
+
+    @objc.python_method
+    def _set_design_follow(self, peer):
+        raw = config_to_raw(self.controller.cfg)
+        raw["design_follow_peer"] = peer or ""
+        try:
+            cfg = self.settings_store.save(raw)
+        except (SettingsError, TypeError, ValueError):
+            self.logger.exception("could not save Match design with")
+            return
+        self.controller.apply_settings(cfg)
+        self._refresh_design_follow()
+        self._apply_followed_design()
 
     @objc.python_method
     def _appearance_module(self):
@@ -2097,7 +2295,7 @@ class ControlWindow(AppKit.NSObject):
         widgets.add(self.pause_row, self.crossing_state.view)
         module.add(self.pause_row)
         module.body.setCustomSpacing_afterView_(14, self.toggle_button.view)
-        self.hold_box = widgets.Switch("Hold the edges while an app is full screen", on_change=self._hold_changed)
+        self.hold_box = widgets.Switch("Hold this Mac's edges while an app on it is full screen", on_change=self._hold_changed)
         module.add(self.hold_box.view)
         module.add(self._own_note())
         module.add(widgets.note(
@@ -2464,12 +2662,14 @@ class ControlWindow(AppKit.NSObject):
         colour = lambda: self.glow_colour_select.value or "signal"
         place = lambda: self.place
         pace = lambda: effects.pace(self.length_select.value)
+        effect_size = lambda: self.size_select.value or "medium"
         # The two sets of tiles, one per mode; only the chosen mode's shows.
         self.crossing_styles_box = widgets.stack(spacing=0)
         rows = []
         for group, choices in pages.style_groups(self.effects_ready):
             # Glow and Beam as stills of the same scene as the effects, so every tile reads alike.
-            tiles = [(value, title, detail, previews.effect_still(value, colour, self.logger, place=place, pace=pace))
+            tiles = [(value, title, detail, previews.effect_still(value, colour, self.logger, place=place,
+                                                                    pace=pace, effect_size=effect_size))
                      for value, title, detail in choices]
             self.effect_stills.extend(tile[3] for tile in tiles)
             if group == pages.TODAY:
@@ -2493,7 +2693,8 @@ class ControlWindow(AppKit.NSObject):
             tiles = []
             for value, title, detail in choices:
                 fx = lambda value=value: effects.switch_effect(value, self.glow_style_select.value or "glow")
-                tiles.append((value, title, detail, previews.switch_still(fx, colour, self.logger, pace=pace)))
+                tiles.append((value, title, detail, previews.switch_still(
+                    fx, colour, self.logger, pace=pace, effect_size=effect_size)))
             self.effect_stills.extend(tile[3] for tile in tiles)
             rows.append(self._style_group(self.switch_styles_box, group, tiles))
         widgets.add(self.switch_styles_box, widgets.note(
@@ -2512,9 +2713,15 @@ class ControlWindow(AppKit.NSObject):
         module.body.setCustomSpacing_afterView_(18, self.chosen_box)
         # Every style and every switch plays at this length, so it follows the tiles either way.
         self.length_select = widgets.Segmented(effects.LENGTHS, on_change=self._changed)
-        module.add(widgets.field_row("Length", self.length_select.view)[0])
+        self.size_select = widgets.Segmented(effects.SIZES, on_change=self._changed)
+        length_size = widgets.stack(vertical=False, spacing=14)
+        length_size.setDistribution_(AppKit.NSStackViewDistributionFillEqually)
+        length_size.addArrangedSubview_(widgets.field_row("Length", self.length_select.view)[0])
+        length_size.addArrangedSubview_(widgets.field_row("Size", self.size_select.view)[0])
+        widgets.add(module.body, length_size)
         module.add(widgets.note(
-            "How long each animation takes to play through once the pointer crosses, and to land."
+            "Length sets how long each animation takes to play through once the pointer crosses, and to land. "
+            "Size sets the depth of the edge band."
         ).view)
         return module
 
@@ -2641,7 +2848,7 @@ class ControlWindow(AppKit.NSObject):
         module.add(self.wake_hint.view)
         module.add(widgets.hairline())
         line = widgets.stack(vertical=False, spacing=12)
-        line.addArrangedSubview_(widgets.note("A new address or port takes effect when you connect.").view)
+        line.addArrangedSubview_(widgets.note("A new address or port takes effect when you connect.", reading=False).view)
         line.addArrangedSubview_(widgets.Button("Connect", self, "connect:", style="primary").view)
         module.add(line)
         return module
@@ -2719,6 +2926,9 @@ class ControlWindow(AppKit.NSObject):
         self.message_label = widgets.note(pages.footer(None))
         line = widgets.stack(vertical=False, spacing=16)
         line.addArrangedSubview_(self.message_label.view)
+        # Without a slack view the line is as wide as the note (at most 560 pt), the bar and the
+        # pane follow it, and the window can never be wider than the sidebar plus that: 773 pt.
+        line.addArrangedSubview_(widgets.hug(widgets.box(), AppKit.NSLayoutPriorityDefaultLow))
         bar.addSubview_(line)
         widgets.pin(line, bar, (12, 16, 12, 16))
         return bar
@@ -2826,14 +3036,23 @@ class ControlWindow(AppKit.NSObject):
                 "glow_style": self.glow_style_select.value,
                 "glow_colour": self.glow_colour_select.value,
                 "effect_length": self.length_select.value or "normal",
+                "effect_size": self.size_select.value or "medium",
                 "block_while_dragging": self.dragging_box.value,
                 "hold_full_screen": self.hold_box.value,
                 "arrangement_set_at": self.controller.cfg.crossing.get("arrangement_set_at", 0),
             }
-            shared = self.controller.cfg.same_on_both and settings_sync.changed(
-                settings_sync.mac_values(config_to_raw(self.controller.cfg)), settings_sync.mac_values(raw))
+            before = settings_sync.mac_values(config_to_raw(self.controller.cfg))
+            after = settings_sync.mac_values(raw)
+            shared = self.controller.cfg.same_on_both and settings_sync.changed(before, after)
+            design_changed = any(before.get(key) != after.get(key) for key in settings_sync.DESIGN_KEYS)
+            if design_changed:
+                raw["design_follow_peer"] = ""
+                raw["design_set_at"] = settings_sync.next_stamp(
+                    max(self.controller.cfg.design_set_at, self.controller.cfg.same_set_at), time.time())
+                raw["design_by"] = self.own_id()
             if shared:
-                raw["same_set_at"] = settings_sync.next_stamp(self.controller.cfg.same_set_at, time.time())
+                raw["same_set_at"] = settings_sync.next_stamp(
+                    max(self.controller.cfg.same_set_at, raw.get("design_set_at", 0)), time.time())
                 raw["same_by"] = self.own_id()
             cfg = self.settings_store.save(raw)
         except (SettingsError, TypeError, ValueError) as exc:
@@ -2845,6 +3064,9 @@ class ControlWindow(AppKit.NSObject):
             self.previews.repaint()
         if shared:
             self._send_same()
+        elif design_changed:
+            self._send_same()
+        self._refresh_design_follow()
         if self._write_ways():
             self._say("Saved. Changes apply as you make them.", "ink_2")
 

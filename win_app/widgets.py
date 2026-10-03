@@ -35,6 +35,8 @@ def label(text: str, role: str, wrap: bool = False) -> QLabel:
     item = QLabel(text)
     item.setProperty("vernier", role)
     item.setWordWrap(wrap)
+    if wrap and role in {"note", "note-quiet", "note-amber"}:
+        item.setMaximumWidth(tokens.READING_WIDTH)
     return item
 
 
@@ -576,16 +578,16 @@ class JumpKeyRecorder(QPushButton):
         self.armed = False
         self.setProperty("vernier", "keycap")
         self.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.setFixedHeight(42)
-        row = QHBoxLayout(self)
-        row.setContentsMargins(12, 0, 12, 0)
-        row.setSpacing(10)
-        self.key = label("Choose a key combination", "keycap")
+        self.setMinimumHeight(52)
+        row = QVBoxLayout(self)
+        row.setContentsMargins(12, 5, 12, 5)
+        row.setSpacing(2)
+        self.key = label("Choose a key combination", "body")
         self.hint = label("Click, then press a key combination", "small")
         self.key.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
         self.hint.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
-        row.addWidget(self.key, 1)
-        row.addWidget(self.hint, 0, Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        row.addWidget(self.key)
+        row.addWidget(self.hint)
         self.clicked.connect(self._toggle)
         self._names = {"ctrl": "Win", "cmd": "Ctrl", "alt": "Alt", "shift": "Shift"}
 
@@ -596,6 +598,7 @@ class JumpKeyRecorder(QPushButton):
         self.setAccessibleName(f"Jump straight here key, {shown}")
         if not self.armed:
             self.key.setText(shown)
+            set_role(self.key, "keycap" if self.value else "body")
 
     def cancel(self) -> None:
         if not self.armed:
@@ -605,7 +608,7 @@ class JumpKeyRecorder(QPushButton):
         if self.on_arm is not None:
             self.on_arm(False)
         self.set_value(self.value)
-        set_role(self.key, "keycap")
+        set_role(self.key, "keycap" if self.value else "body")
         self.hint.setText("Click, then press a key combination")
         set_role(self, "keycap")
 

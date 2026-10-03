@@ -429,6 +429,7 @@ class EffectsOverlay:
             raise ValueError(f"no crossing effect called {feel['glow_style']!r}")
         self.palette = palette(feel["glow_colour"])
         self.player.pace = effects.pace(feel.get("effect_length"))
+        self.player.effect_size = feel.get("effect_size", "medium")
         self.reduced = reduce_motion()
         self.dark = dark_appearance()
         self.box = tuple(self.controller._current_desktop_bounds())

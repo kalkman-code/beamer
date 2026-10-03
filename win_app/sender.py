@@ -57,6 +57,7 @@ PHYSICAL = {"cmd": "ctrl", "cmd_r": "ctrl_r", "ctrl": "cmd", "ctrl_r": "cmd_r"}
 MEDIA_KEYS = frozenset(
     {"volume_mute", "volume_down", "volume_up", "media_next", "media_prev", "media_stop", "media_play_pause"}
 )
+MODIFIER_KEYS = frozenset({"shift", "shift_r", "ctrl", "ctrl_r", "alt", "alt_r", "cmd", "cmd_r"})
 # What this machine tells its peers it is (WIRE.md section 2); Linux and Windows read keys alike.
 OWN_PLATFORM = "linux" if sys.platform.startswith("linux") else "windows"
 INPUT_TYPES = protocol.INPUT_TYPES
@@ -70,6 +71,10 @@ HOME_REASONS = {
     "refused": "{name} would not take the input",
     "malformed": "{name} would not take the input",
 }
+
+
+def _at_edge(edge) -> str:
+    return f", at its {edge} edge" if isinstance(edge, str) else ""
 
 
 def is_this_machine(host: str, local_addresses=None, address_towards=None) -> bool:
@@ -285,7 +290,7 @@ class LinkSender:
     def full_screen_app(self):
         """The full-screen app holding the edges, or None: also None while this PC's own setting
         has the hold off, read here so every reader of the hold agrees and a change applies at once."""
-        if self._setting("hold_full_screen", True):
+        if self._setting("hold_full_screen", False):
             return self._full_screen_app
         return None
 
@@ -415,6 +420,18 @@ class LinkSender:
             self.go(target)
         return True
 
+    def on_dead_key(self, vk: Optional[int] = None) -> bool:
+        """Swallow a dead key only while its live peer owns this PC's input."""
+        owner = self._owner
+        if owner is None or not owner.away:
+            return False
+        if not self._live():
+            self._lost()
+            return False
+        if vk is not None and self._ignore_gate.keeps(ignored.key(vk), True):
+            return False
+        return True
+
     def on_key(self, name: str, down: bool, vk: Optional[int] = None, us: Optional[str] = None) -> bool:
         """One key, from the hook thread: True when it is not for this PC. Held keys are known by
         their virtual key where there is one: the name is the character with Shift applied, so
@@ -434,6 +451,29 @@ class LinkSender:
             elif vk is not None and self._ignore_gate.keeps(ignored.key(vk), down):
                 return False
         return self._input({"type": protocol.MSG_KEYDOWN if down else protocol.MSG_KEYUP, "data": dict(data)})
+
+    def on_text(self, text: str, vk: Optional[int] = None) -> bool:
+        """Sends a composed key sequence as text when this PC's input is away."""
+        owner = self._owner
+        if owner is None:
+            return False
+        if owner.away:
+            if not self._live():
+                self._lost()
+                return False
+            elif vk is not None and self._ignore_gate.keeps(ignored.key(vk), True):
+                return False
+        actions = []
+        with self._lock:
+            owner = self._owner
+            if owner is None:
+                return False
+            message = protocol.text_msg(text)
+            message["_bracket_modifiers"] = True
+            actions = owner.input(message)
+            self._queue(actions)
+        self._report(actions)
+        return not any(action is owner_module.LOCAL for action in actions)
 
     @staticmethod
     def _key_data(name: str, us: Optional[str]) -> dict:
@@ -751,6 +791,27 @@ class LinkSender:
         """Hands what the owner answered to the outbound worker, in order. Called with the lock still
         held, in the same step as the decision, so two threads' decisions cannot reach the worker the
         other way round (a release behind the press it releases would leave the key down)."""
+        queued_actions = []
+        for action in actions:
+            if isinstance(action, owner_module.Send) and action.message.get("type") == protocol.MSG_TEXT:
+                modifiers = [
+                    data for data in action.message.pop("_pressed_keys", [])
+                    if data.get("key") in MODIFIER_KEYS
+                ]
+                queued_actions.extend(
+                    owner_module.Send(action.peer, {"type": protocol.MSG_KEYUP, "data": modifier,
+                                                     "_preserve_key_name": True})
+                    for modifier in modifiers
+                )
+                queued_actions.append(action)
+                queued_actions.extend(
+                    owner_module.Send(action.peer, {"type": protocol.MSG_KEYDOWN, "data": modifier})
+                    for modifier in modifiers
+                )
+                continue
+            queued_actions.append(action)
+
+        actions = queued_actions
         for index, action in enumerate(actions):
             if isinstance(action, (owner_module.Send, owner_module.SendClipboard, owner_module.SetClipboard, owner_module.Drop)):
                 try:
@@ -894,7 +955,8 @@ class LinkSender:
                 data.get("resistance_px"), data.get("reach"), bool(data.get("stay")),
             )
         elif kind in (protocol.MSG_KEYDOWN, protocol.MSG_KEYUP):
-            message = self._key_message(peer, message)
+            preserve = message.pop("_preserve_key_name", False)
+            message = self._key_message(peer, message, preserve=preserve)
             if message is None:
                 return
         if kind in INPUT_TYPES:
@@ -904,7 +966,7 @@ class LinkSender:
         else:
             self.links.post(peer, message)
 
-    def _key_message(self, peer: bytes, message: dict) -> Optional[dict]:
+    def _key_message(self, peer: bytes, message: dict, preserve: bool = False) -> Optional[dict]:
         """The key as `peer` is sent it: named by the key table for the peer's platform and the
         user's style, and dropped when the peer does not take media keys."""
         data = message["data"]
@@ -913,7 +975,9 @@ class LinkSender:
         if physical in MEDIA_KEYS and "media_keys" not in self.links.caps(peer):
             return None
         held = (peer, physical)
-        if message["type"] == protocol.MSG_KEYUP and held in self._sent_names:
+        if message["type"] == protocol.MSG_KEYUP and held in self._sent_names and preserve:
+            name = self._sent_names[held]
+        elif message["type"] == protocol.MSG_KEYUP and held in self._sent_names:
             # The release leaves under the name its press went under, whatever the style says now.
             name = self._sent_names.pop(held)
         elif message["type"] == protocol.MSG_KEYDOWN and held in self._sent_names:
@@ -986,7 +1050,7 @@ class LinkSender:
             self._last_on = protocol.id_text(moved.to)
             if self._pin_point is None:
                 self._pin_point = self._desktop_module().cursor_position()
-            LOGGER.info("input is on %s", self._name(moved.to))
+            LOGGER.info("input is on %s%s", self._name(moved.to), _at_edge(moved.edge))
             self._report_redirecting(True)
             return
         self._pin_point = None
@@ -995,7 +1059,7 @@ class LinkSender:
         # of deltas still in flight cannot cross twice, and nothing else re-arms it.
         with self._lock:
             self._arm_locked()
-        LOGGER.info("input returned to this PC (%s)", moved.why)
+        LOGGER.info("input returned to this PC (%s)%s", moved.why, _at_edge(moved.edge))
         self._report_redirecting(False)
         if moved.edge in return_edge.EDGES and isinstance(moved.offset, (int, float)):
             self._land(moved.edge, moved.offset)

@@ -92,15 +92,16 @@ class SettingsStoreTests(unittest.TestCase):
             store.set_jump_key(peer["id"], "", "alt_r")
             self.assertEqual(store.current()["peers"][0]["jump_key"], "")
 
-    def test_the_full_screen_hold_defaults_on_and_round_trips(self):
+    def test_the_full_screen_hold_defaults_off_and_preserves_each_saved_choice(self):
         with tempfile.TemporaryDirectory() as directory:
             store = SettingsStore(Path(directory) / "settings.json")
             loaded = store.save(self.valid_raw())
-            self.assertTrue(loaded.crossing["hold_full_screen"])
+            self.assertFalse(loaded.crossing["hold_full_screen"])
+            for choice in (False, True):
+                raw = config_to_raw(loaded)
+                raw["crossing"]["hold_full_screen"] = choice
+                self.assertEqual(store.save(raw).crossing["hold_full_screen"], choice)
             raw = config_to_raw(loaded)
-            raw["crossing"]["hold_full_screen"] = False
-            store.save(raw)
-            self.assertFalse(store.load().crossing["hold_full_screen"])
             raw["crossing"]["hold_full_screen"] = "no"
             with self.assertRaises(SettingsError):
                 store.save(raw)
@@ -269,7 +270,7 @@ class SettingsStoreTests(unittest.TestCase):
         from core import effects
 
         pairs = [(style, "signal") for style in effects.EFFECT_IDS]
-        pairs += [(style, colour) for style in ("glow", "beam") for colour in effects.PACK_IDS]
+        pairs += [(style, colour) for style in ("glow", "beam", "aperture") for colour in effects.PACK_IDS]
         pairs += list(zip(effects.EFFECT_IDS, effects.PACK_IDS))
         with tempfile.TemporaryDirectory() as directory:
             store = SettingsStore(Path(directory) / "settings.json")

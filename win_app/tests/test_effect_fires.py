@@ -20,9 +20,12 @@ counts as "an effect" is config plumbing already covered by test_effect_overlay.
 file's concern."""
 
 import os
+import sys
 import unittest
 from types import SimpleNamespace
 from unittest import mock
+
+sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 try:
     from PySide6.QtWidgets import QApplication
@@ -34,10 +37,11 @@ except ImportError:  # PySide6 is only in the Windows venv
 
 
 def _owner(edge_glow=True, glow_style="glow", glow_colour="signal", shortcut_arrival=True,
-           shortcut_arrival_style="match", effects=None, glow=None):
+           shortcut_arrival_style="match", effect_size="medium", effects=None, glow=None):
     config = SimpleNamespace(
         edge_glow=edge_glow, glow_style=glow_style, glow_colour=glow_colour,
         shortcut_arrival=shortcut_arrival, shortcut_arrival_style=shortcut_arrival_style, effect_length="normal",
+        effect_size=effect_size,
     )
     return SimpleNamespace(_closing=False, _config=config, effects=effects, glow=glow)
 
@@ -60,14 +64,20 @@ class PressureRoutingTest(unittest.TestCase):
         owner = _owner(glow_style="glow", glow_colour="ocean", glow=mock.Mock())
         owner._effect_overlay = mock.Mock(return_value=None)
         kvm_bridge_win.WindowsApplication._on_pressure(owner, "left", 0.4, False)
-        owner.glow.configure.assert_called_once_with("glow", "ocean", "normal")
+        owner.glow.configure.assert_called_once_with("glow", "ocean", "normal", "medium")
         owner.glow.set_pressure.assert_called_once_with("left", 0.4, False, None)
 
     def test_a_beam_style_push_configures_the_glow_as_beam(self):
         owner = _owner(glow_style="beam", glow=mock.Mock())
         owner._effect_overlay = mock.Mock(return_value=None)
         kvm_bridge_win.WindowsApplication._on_pressure(owner, "left", 0.4, False)
-        owner.glow.configure.assert_called_once_with("beam", "signal", "normal")
+        owner.glow.configure.assert_called_once_with("beam", "signal", "normal", "medium")
+
+    def test_the_selected_size_reaches_the_glow_renderer(self):
+        owner = _owner(glow_style="glow", glow=mock.Mock(), effect_size="large")
+        owner._effect_overlay = mock.Mock(return_value=None)
+        kvm_bridge_win.WindowsApplication._on_pressure(owner, "left", 0.4, False)
+        owner.glow.configure.assert_called_once_with("glow", "signal", "normal", "large")
 
     def test_an_effect_that_failed_earlier_falls_back_to_plain_glow(self):
         """_on_pressure's own comment: an effect that failed earlier in the run falls back to
@@ -76,7 +86,7 @@ class PressureRoutingTest(unittest.TestCase):
         owner = _owner(glow_style="wormhole", glow_colour="mono", glow=mock.Mock())
         owner._effect_overlay = mock.Mock(return_value=None)
         kvm_bridge_win.WindowsApplication._on_pressure(owner, "left", 0.4, False)
-        owner.glow.configure.assert_called_once_with("glow", "mono", "normal")
+        owner.glow.configure.assert_called_once_with("glow", "mono", "normal", "medium")
 
     def test_a_part_of_the_edge_push_passes_the_part_through_to_the_overlay(self):
         owner = _owner(glow_style="rupture")

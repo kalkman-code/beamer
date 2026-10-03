@@ -357,14 +357,15 @@ def point(x, y):
     return SimpleNamespace(x=float(x), y=float(y))
 
 
-def state(screen_w, screen_h, os_name, method, palette, *, reduced=False, dark=True, notch=None, **fields):
+def state(screen_w, screen_h, os_name, method, palette, *, reduced=False, dark=True, notch=None,
+          effect_size="medium", **fields):
     """The `s` an effect reads, with the harness's field names. Departure passes region, point,
     along (the fraction along the edge), pressure, tick (the last quarter tick, or None) and since
     (seconds since breakthrough); arrival passes point, edge and since (seconds since landing)."""
     s = SimpleNamespace(
         screen=SimpleNamespace(w=float(screen_w), h=float(screen_h), os=os_name),
         method=method, palette=list(palette), reduced=bool(reduced), scale=1.0, dark=bool(dark),
-        hash=hash_n, memo={},
+        effect_size=effect_size, hash=hash_n, memo={},
     )
     if notch is not None:
         s.notch = SimpleNamespace(**notch)
@@ -404,12 +405,19 @@ class Effect:
         self.arrive_seconds = min(0.8, float(arrive_seconds))
 
 
+def _light_aperture(pen, state, departing):
+    from .fx_light import _aperture
+    _aperture(pen, state, departing)
+
+
 # Every direction built, in the order the Design pages list them: each direction's quiet, medium
 # and showpiece effect, and its three colour packs. Ids are the settings values, so never rename one.
 ALL_DIRECTIONS = (
     ("fx_membrane", "Membrane", ("skin", "film", "rupture"), ("oil_slick", "soap_bubble", "pearl")),
     ("fx_sparks", "Sparks", ("flint", "filings", "discharge"), ("ember", "forge", "sparkler_gold")),
     ("fx_instrument", "Instrument", ("rule", "gauge", "rangefinder"), ("phosphor", "sodium", "contrast")),
+    ("fx_folio", "Folio", ("crease", "pleat", "concertina"), ("vellum", "carbon_copy", "marbled")),
+    ("fx_selvedge", "Selvedge", ("thread", "weave", "jacquard"), ("flax", "madder", "tide")),
     ("fx_ink", "Ink", ("capillary", "viscous_drop", "sumi_bloom"), ("indigo_ink", "matcha", "terracotta")),
     ("fx_warp", "Warp", ("light_slit", "hyperdrive", "wormhole"), ("neon", "vaporwave", "cyber")),
 )
@@ -422,11 +430,13 @@ STAND_INS = {"capillary": "glow", "viscous_drop": "glow", "sumi_bloom": "glow",
              "light_slit": "beam", "hyperdrive": "glow", "wormhole": "glow",
              "neon": "colourful", "vaporwave": "colourful", "cyber": "colourful"}
 DIRECTIONS = tuple(direction for direction in ALL_DIRECTIONS if direction[0] not in HIDDEN)
-EFFECT_IDS = tuple(effect for _module, _name, effects, _packs in DIRECTIONS for effect in effects)
+EFFECT_IDS = ("aperture",) + tuple(effect for _module, _name, effects, _packs in DIRECTIONS for effect in effects)
 # The effects whose designs draw a pack's colours as given on a light wallpaper; the others shade
 # them for light themselves.
-LIGHT_AS_GIVEN = tuple(effect for module, _name, effects, _packs in ALL_DIRECTIONS if module in ("fx_ink", "fx_warp")
-                       for effect in effects)
+LIGHT_AS_GIVEN = ("aperture", "crease", "pleat", "concertina", "thread", "weave", "jacquard") + tuple(
+    effect for module, _name, effects, _packs in ALL_DIRECTIONS if module in ("fx_ink", "fx_warp")
+    for effect in effects
+)
 PACK_IDS = tuple(pack for _module, _name, _effects, packs in DIRECTIONS for pack in packs)
 
 _loaded = None
@@ -439,6 +449,7 @@ def _load():
     if _loaded is None:
         import importlib
         effects, packs = {}, {}
+        effects["aperture"] = CLASSIC["aperture"]
         for module_name, _name, effect_ids, pack_ids in ALL_DIRECTIONS:
             module = importlib.import_module(f"{__package__}.{module_name}")
             by_id = {effect.id: effect for effect in module.EFFECTS}
@@ -514,7 +525,6 @@ LOCATOR = Effect("locator", "Ring", "quiet", "A ring in the chosen colours close
 # screen each app draws them with its own glow window, which these follow: a band along the edge,
 # deepening with the push and flashing through at breakthrough, or a thin line with a comet running
 # along it that runs off the end; in a corner, the band along both walls, brightest where they meet.
-CLASSIC_BAND = 44.0
 CLASSIC_ARM = 200.0
 CLASSIC_FLASH_S = 0.35
 CLASSIC_FINISH_S = 0.6
@@ -573,12 +583,13 @@ def _classic_depart(beam):
         strength = max(pressure * 0.85, flash, finish if beam else 0.0)
         if strength <= 0.0:
             return
-        depth = CLASSIC_BAND if beam else CLASSIC_BAND * (0.35 + 0.65 * max(pressure, flash))
+        w, h = s.screen.w, s.screen.h
+        full_depth = edge_depth(w, h, getattr(s, "effect_size", "medium"))
+        depth = full_depth if beam else full_depth * (0.35 + 0.65 * max(pressure, flash))
         # The comet sweeps as the push builds, then runs off the far end after breakthrough.
         centre = -0.15 + 1.1 * pressure if since is None else 0.95 + (1.0 + _CLASSIC_COMET) * (1.0 - finish)
         lit = (lambda u: _comet(u, centre, flash)) if beam else (lambda u: 1.0)
         r = s.region
-        w, h = s.screen.w, s.screen.h
         pen.globalCompositeOperation = "lighter" if s.dark else "source-over"
         if r.kind == "corner":
             vertical, horizontal = getattr(r, "corner", "top_right").split("_")
@@ -610,10 +621,16 @@ def _classic_depart(beam):
 
 
 CLASSIC = {
-    "glow": Effect("glow", "Glow", "classic", "A band of light that deepens the harder you push.",
+    "glow": Effect("glow", "Glow", "quiet", "A band of light that deepens the harder you push.",
                    _classic_depart(False), lambda pen, s: None, CLASSIC_FLASH_S, 0.0),
-    "beam": Effect("beam", "Beam", "classic", "A thin line with a comet of light running along it.",
+    "beam": Effect("beam", "Beam", "medium", "A thin line with a comet of light running along it.",
                    _classic_depart(True), lambda pen, s: None, CLASSIC_FINISH_S, 0.0),
+    "aperture": Effect(
+        "aperture", "Aperture", "showpiece",
+        "A fine lens of light opens under pressure and closes softly behind the arriving pointer.",
+        lambda pen, state: _light_aperture(pen, state, True),
+        lambda pen, state: _light_aperture(pen, state, False), 0.62, 0.62,
+    ),
 }
 
 
@@ -640,11 +657,13 @@ def switch_style_groups():
     cannot load; the overlay has already said why."""
     groups = [(None, (("match", "Same as crossing"), ("locator", "Ring")))]
     try:
+        _load()
+        light = (("Light", (("aperture", CLASSIC["aperture"].name),)),)
         found = [(title, tuple((effect_id, effect(effect_id).name) for effect_id in effect_ids))
                  for _module, title, effect_ids, _packs in DIRECTIONS]
     except Exception:
         return groups
-    return groups + found
+    return groups + list(light) + found
 
 
 def switch_effect(choice, crossing_style):
@@ -700,7 +719,7 @@ def preview_size(method):
     return (w, h * 2 + PREVIEW_GAP) if method == "notch" else (w * 2 + PREVIEW_GAP, h)
 
 
-def preview_scene(fx, t, method, palette, reduced=False, dark=True, pace=1.0):
+def preview_scene(fx, t, method, palette, reduced=False, dark=True, pace=1.0, effect_size="medium"):
     """The Design pages' loop, identical on both apps: the pointer glides to the Mac's boundary,
     pushes through with three ticks, lands on the PC, and rests. Returns dict(screens=[(x, y, w,
     h, os)], notch=(x, y, w, h, r) or None, pointer=(x, y, os) or None, pens=[Pen]) for time `t`
@@ -748,18 +767,19 @@ def preview_scene(fx, t, method, palette, reduced=False, dark=True, pace=1.0):
                 tick = SimpleNamespace(index=index, age=t - crossed_at)
             s = state(w, h, "mac", method, palette, notch=mac_notch, region=SimpleNamespace(**region),
                       point=point(*at), along=at[1] / h if region["edge"] == "right" else at[0] / w,
-                      pressure=pressure, tick=tick, since=None, **common)
+                      pressure=pressure, tick=tick, since=None, effect_size=effect_size, **common)
             pen = draw(fx, "depart", s, mac_origin)
             if pen is not None:
                 scene["pens"].append(pen)
         return scene
     since = (t - _P_CROSS) / pace
     s = state(w, h, "mac", method, palette, notch=mac_notch, region=SimpleNamespace(**region), point=point(*at),
-              along=0.5, pressure=0.0, tick=None, since=since, **common)
+              along=0.5, pressure=0.0, tick=None, since=since, effect_size=effect_size, **common)
     pen = draw(fx, "depart", s, mac_origin)
     if pen is not None:
         scene["pens"].append(pen)
-    s = state(w, h, "windows", method, palette, point=point(*land), edge=land_edge, since=since, **common)
+    s = state(w, h, "windows", method, palette, point=point(*land), edge=land_edge, since=since,
+              effect_size=effect_size, **common)
     pen = draw(fx, "arrive", s, pc_origin)
     if pen is not None:
         scene["pens"].append(pen)
@@ -778,7 +798,7 @@ SWITCH_LOOP_S = 2.0
 _S_START = 0.35
 
 
-def preview_switch_scene(fx, t, palette, os_name="mac", reduced=False, dark=True, pace=1.0):
+def preview_switch_scene(fx, t, palette, os_name="mac", reduced=False, dark=True, pace=1.0, effect_size="medium"):
     """The Design pages' loop for what a switch plays, in preview_scene's shape: one screen, the
     pointer still near its middle, and `fx`'s switch arrival round it every SWITCH_LOOP_S."""
     t = t % SWITCH_LOOP_S
@@ -787,7 +807,8 @@ def preview_switch_scene(fx, t, palette, os_name="mac", reduced=False, dark=True
     scene = {"screens": [(0.0, 0.0, w, h, os_name)], "notch": None, "pointer": (at[0], at[1], os_name), "pens": []}
     since = (t - _S_START) / pace
     if since >= 0.0:
-        s = state(w, h, os_name, "switch", legible(palette, dark, fx), reduced=reduced, dark=dark, point=point(*at),
+        s = state(w, h, os_name, "switch", legible(palette, dark, fx), reduced=reduced, dark=dark,
+                  effect_size=effect_size, point=point(*at),
                   edge=nearest_edge(at[0], at[1], w, h), since=since)
         pen = draw(fx, "arrive", s)
         if pen is not None:
@@ -798,7 +819,23 @@ def preview_switch_scene(fx, t, palette, os_name="mac", reduced=False, dark=True
 # The Design pages' Length: how long an effect takes to play through once the pointer crosses, and
 # to land, as a multiple of its own timing. The push itself follows the hand, so it has no pace.
 LENGTHS = (("short", "Short"), ("normal", "Normal"), ("long", "Long"))
-PACES = {"short": 0.75, "normal": 1.0, "long": 1.5}
+SIZES = (("small", "Small"), ("medium", "Medium"), ("large", "Large"))
+PACES = {"short": 0.5, "normal": 1.0, "long": 2.0}
+_SIZE_FRACTIONS = {"small": 0.03, "medium": 0.045, "large": 0.06}
+_MIN_EDGE_DEPTH = 24.0
+_MAX_EDGE_DEPTH = 144.0
+_EFFECT_REFERENCE_DEPTH = 36.0
+
+
+def edge_depth(screen_w, screen_h, size="medium"):
+    """The edge band's depth in screen units, scaled to the shorter side of its display."""
+    fraction = _SIZE_FRACTIONS.get(size, _SIZE_FRACTIONS["medium"])
+    return max(_MIN_EDGE_DEPTH, min(_MAX_EDGE_DEPTH, min(float(screen_w), float(screen_h)) * fraction))
+
+
+def effect_depth_scale(s):
+    """Scale material depths from their 1200 by 800 reference canvas to this screen and Size."""
+    return edge_depth(s.screen.w, s.screen.h, getattr(s, "effect_size", "medium")) / _EFFECT_REFERENCE_DEPTH
 
 
 def pace(length):
@@ -824,6 +861,7 @@ class Player:
         self.crossed_at = None
         # How long everything after the push takes, as a multiple of each effect's own timing.
         self.pace = pace
+        self.effect_size = "medium"
 
     def push(self, now, method, region, at, pressure, tick_index=None, display=None):
         """`region` is dict(kind, edge, corner?, x, y, w, h); `at` is (x, y) of the pinned pointer.
@@ -892,7 +930,7 @@ class Player:
                 if d["tick"] is not None and since is None:
                     tick = SimpleNamespace(index=d["tick"][0], age=now - d["tick"][1])
                 s = state(fw, fh, os_name, d["method"], legible(palette, dark, fx), reduced=reduced, dark=dark,
-                          notch=local_notch, region=SimpleNamespace(**region), point=point(x, y), along=along,
+                          notch=local_notch, effect_size=self.effect_size, region=SimpleNamespace(**region), point=point(x, y), along=along,
                           pressure=d["pressure"], tick=tick, since=since)
                 pen = _clipped(draw(fx, "depart", s, (ox, oy)), frame)
                 if pen is not None:
@@ -909,7 +947,7 @@ class Player:
                 # A switch lands wherever the pointer was, often below the notch but nowhere near it,
                 # and effects that see a notch above the pointer draw round the notch.
                 s = state(fw, fh, os_name, a["method"], legible(palette, dark, arrival_fx), reduced=reduced,
-                          dark=dark, notch=None if a["switch"] else local_notch,
+                          dark=dark, notch=None if a["switch"] else local_notch, effect_size=self.effect_size,
                           point=point(a["at"][0] - ox, a["at"][1] - oy), edge=a["edge"], since=since)
                 pen = _clipped(draw(arrival_fx, "arrive", s, (ox, oy)), frame)
                 if pen is not None:

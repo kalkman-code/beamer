@@ -65,7 +65,7 @@ ROUND_TRIP_MAX_AGE_SECONDS = 5.0
 # the ownership by force after one second), then goes ahead.
 LET_GO_WAIT_SECONDS = 1.3
 OWN_PLATFORM = "macos"
-CAPABILITIES = ("clipboard", "clipboard_image", "gestures", "media_keys", "text", "settings")
+CAPABILITIES = ("clipboard", "clipboard_image", "gestures", "media_keys", "text", "settings", "design_sync")
 MEDIA_KEY_NAMES = frozenset({"volume_mute", "volume_down", "volume_up", "media_next", "media_prev", "media_stop", "media_play_pause"})
 
 # Why input came home, in words, for the alert. A why that is not here comes home quietly.
@@ -808,7 +808,7 @@ class KVMController:
     def full_screen_app(self):
         """The full-screen app holding the edges, or None: also None while this Mac's own setting
         has the hold off, read here so every reader of the hold agrees and a change applies at once."""
-        if self.cfg.crossing.get("hold_full_screen", True):
+        if self.cfg.crossing.get("hold_full_screen", False):
             return self._full_screen_app
         return None
 
@@ -2225,10 +2225,11 @@ class KVMController:
 
     def _on_moved(self, moved):
         self.logger.info(
-            "move applied: to %s from %s why %s (thread %s)",
+            "move applied: to %s from %s why %s%s (thread %s)",
             self._name_of(moved.to) if moved.to is not None else "home",
             self._name_of(moved.left) if moved.left is not None else "home",
             moved.why,
+            f" at the {moved.edge} edge" if isinstance(moved.edge, str) else "",
             threading.current_thread().name,
         )
         if moved.to is not None:

@@ -277,7 +277,7 @@ class EffectOverlay(QWidget):
         self._timer.setInterval(FRAME_MS)
         self._timer.timeout.connect(self._tick)
 
-    def configure(self, style: str, colour: str, length: str = "normal") -> None:
+    def configure(self, style: str, colour: str, length: str = "normal", size: str = "medium") -> None:
         if style != self._style:
             self._style = style
             self.player = effects.Player()
@@ -293,6 +293,7 @@ class EffectOverlay(QWidget):
         # Read each time, like the colours; a Player already playing keeps the pace it started with.
         if not self.player.busy:
             self.player.pace = effects.pace(length)
+            self.player.effect_size = size
         try:
             self._palette = app_config.palette_colours(colour)
         except Exception:

@@ -288,6 +288,12 @@ class ClassicPreviewTests(unittest.TestCase):
         self.assertGreater(pen.bounds[3], effects.CLASSIC_ARM - 10)
         self.assertLessEqual(pen.bounds[2], w + 4)
 
+    def test_aperture_is_a_light_effect_and_has_a_preview(self):
+        fx = effects.preview_effect("aperture")
+        self.assertEqual((fx.id, fx.intensity), ("aperture", "showpiece"))
+        self.assertEqual(effects.switch_effect("aperture", "glow").id, "aperture")
+        self.assertTrue(effects.preview_scene(fx, 1.8, "edge", PALETTE)["pens"])
+
     def test_only_the_styles_have_a_preview(self):
         self.assertIsNone(effects.preview_effect("nonsense"))
         self.assertEqual(effects.preview_effect("flint").id, "flint")
@@ -309,7 +315,7 @@ class LengthTests(unittest.TestCase):
             lasted[length] = t
         self.assertLess(lasted["short"], lasted["normal"])
         self.assertLess(lasted["normal"], lasted["long"])
-        self.assertAlmostEqual(lasted["long"] / lasted["normal"], 1.5, delta=0.1)
+        self.assertAlmostEqual(lasted["long"] / lasted["normal"], 2.0, delta=0.1)
 
     def test_the_push_follows_the_hand_whatever_the_length(self):
         fx = effects.effect("flint")

@@ -1,7 +1,17 @@
 import unittest
+import os
+import sys
+from types import SimpleNamespace
+from unittest import mock
+
+sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 try:
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    from PySide6.QtCore import QPoint, QRect
+    from PySide6.QtWidgets import QApplication
     import edge_glow
+    from core import effects
 except ImportError:  # PySide6 is only in the Windows build venv
     edge_glow = None
 
@@ -19,6 +29,21 @@ class BeamMathsTests(unittest.TestCase):
 
     def test_breakthrough_lights_the_whole_edge(self):
         self.assertEqual(edge_glow.comet_alpha(0.0, 0.5, 1.0), 1.0)
+
+
+@unittest.skipIf(edge_glow is None, "PySide6 is not installed")
+class SelectedSizeTests(unittest.TestCase):
+    def test_glow_window_geometry_uses_the_selected_display_scaled_size(self):
+        _app = QApplication.instance() or QApplication([])
+        screen = SimpleNamespace(geometry=lambda: QRect(0, 0, 1920, 1080))
+        glow = edge_glow.EdgeGlow()
+        self.addCleanup(glow.deleteLater)
+        glow.configure("glow", "signal", size="large")
+        glow._edge, glow._part = "left", None
+        with mock.patch.object(edge_glow.QApplication, "screens", return_value=[screen]), \
+                mock.patch.object(edge_glow.QCursor, "pos", return_value=QPoint(0, 500)):
+            glow._place()
+        self.assertEqual(glow.geometry().width(), round(effects.edge_depth(1920, 1080, "large")))
 
 
 @unittest.skipIf(edge_glow is None, "PySide6 is not installed")

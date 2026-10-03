@@ -73,14 +73,14 @@ class DesignGroupsTest(unittest.TestCase):
 
     def test_glow_and_beam_tiles_read_as_the_effects_do(self):
         today = pages_win.style_groups()[0][1]
-        self.assertEqual([detail for _value, _name, detail in today], ["Classic", "Classic"])
+        self.assertEqual([detail for _value, _name, detail in today], ["Quiet", "Medium", "Showpiece"])
 
     def test_styles_are_classic_then_each_direction_in_order(self):
         groups = pages_win.style_groups()
         self.assertEqual([title for title, _items in groups],
-                         ["Classic", "Membrane", "Sparks", "Instrument"])
-        self.assertEqual([style for style, _n, _d in groups[0][1]], ["glow", "beam"])
-        effect_ids = tuple(style for _title, items in groups[1:] for style, _n, _d in items)
+                         ["Light", "Membrane", "Sparks", "Instrument", "Folio", "Selvedge"])
+        self.assertEqual([style for style, _n, _d in groups[0][1]], ["glow", "beam", "aperture"])
+        effect_ids = tuple(style for _title, items in groups for style, _n, _d in items if style not in ("glow", "beam"))
         self.assertEqual(effect_ids, effects.EFFECT_IDS)
 
     def test_every_effect_tile_names_its_intensity(self):
@@ -105,8 +105,8 @@ class DesignGroupsTest(unittest.TestCase):
             styles, colours = pages_win.style_groups(), pages_win.colour_groups()
         finally:
             effects._load = real
-        self.assertEqual([title for title, _items in styles], ["Classic"])
-        self.assertEqual([title for title, _items in colours], ["Classic"])
+        self.assertEqual([title for title, _items in styles], ["Light"])
+        self.assertEqual([title for title, _items in colours], ["Light"])
 
     def test_only_the_new_effects_count_as_effects(self):
         self.assertFalse(pages_win.is_effect("glow"))
@@ -221,11 +221,12 @@ class SwitchGroupsTest(unittest.TestCase):
         self.assertEqual(sorted(values), sorted(effects.SWITCH_STYLES))
         self.assertEqual(len(values), len(set(values)))
 
-    def test_simple_comes_first_then_the_crossing_directions(self):
+    def test_simple_and_aperture_come_first_then_the_crossing_directions(self):
         groups = pages_win.switch_groups()
         self.assertEqual(groups[0], ("Simple", (("match", "Same as crossing", "Plays the crossing style"),
                                                 ("locator", "Ring", "Closes onto the pointer"))))
-        self.assertEqual(groups[1:], pages_win.style_groups()[1:])
+        self.assertEqual(groups[1], ("Light", (("aperture", "Aperture", "Showpiece"),)))
+        self.assertEqual(groups[2:], pages_win.style_groups()[1:])
 
 
 @unittest.skipIf(widgets is None, "needs PySide6")
@@ -244,7 +245,7 @@ class DesignControlsTest(unittest.TestCase):
         tiles = widgets.TileGroups(groups, "glow", on_change=chosen.append)
         tiles.groups["Sparks"]._chosen("discharge")
         self.assertEqual((tiles.value, chosen), ("discharge", ["discharge"]))
-        self.assertEqual(tiles.groups["Classic"].value, "discharge")
+        self.assertEqual(tiles.groups["Light"].value, "discharge")
         tiles.set_value("skin")
         self.assertEqual(chosen, ["discharge"], "set_value must not report a change")
         self.assertTrue(all(group.value == "skin" for group in tiles.groups.values()))
@@ -346,6 +347,34 @@ class CrossingPageTest(unittest.TestCase):
         rows |= {"shortcut"} if motion.target_shown(page.shortcut_module) else set()
         return rows
 
+    def test_the_native_titlebar_can_maximise_and_has_no_width_cap(self):
+        from PySide6.QtCore import Qt
+
+        self.assertTrue(self.page.windowFlags() & Qt.WindowType.WindowMaximizeButtonHint)
+        self.assertEqual(self.page.maximumWidth(), 16777215)
+
+    def test_crossing_controls_and_diagram_stay_in_a_capped_column(self):
+        from PySide6.QtWidgets import QApplication
+
+        self.page.resize(2560, 1440)
+        self.page.show()
+        self.page._select_page("crossing")
+        QApplication.processEvents()
+
+        self.assertLessEqual(self.page.arrangement_diagram.width(), 960)
+        self.assertLessEqual(max(button.width() for button in self.page.edge_choice._buttons.values()), 240)
+
+    def test_jump_placeholder_uses_body_text_with_the_hint_below(self):
+        from PySide6.QtWidgets import QApplication
+
+        self.page.resize(820, 700)
+        self.page.show()
+        self.page._select_page("crossing")
+        QApplication.processEvents()
+
+        self.assertEqual(self.page.jump_recorder.key.property("vernier"), "body")
+        self.assertLess(self.page.jump_recorder.key.y(), self.page.jump_recorder.hint.y())
+
     def test_rows_hide_and_come_back_with_the_ways(self):
         self.ways()
         self.assertEqual(self.shown(), {"edge", "shortcut"})
@@ -388,7 +417,8 @@ class CrossingPageTest(unittest.TestCase):
         self.assertTrue(line(True, True, True, False, True, False, None).startswith("Not connected to the other machine"))
         self.assertTrue(line(True, True, True, True, False, False, None).startswith("Only the shortcut"))
         self.assertTrue(line(True, True, True, True, True, True, None).startswith("Paused."))
-        self.assertTrue(line(True, True, True, True, True, False, "Keynote").startswith("Off while Keynote"))
+        self.assertEqual(line(True, True, True, True, True, False, "Keynote"),
+                         "Held: an app is full screen.")
         self.assertEqual(line(True, True, True, True, True, False, None), "On. Pause it to lean on an edge without switching.")
 
     def test_the_crossing_line_names_the_machine_it_is_given(self):

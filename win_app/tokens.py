@@ -115,6 +115,8 @@ RADIUS = {
 MODULE_PADDING = (14.0, 16.0)
 RACK_GAP = 1.0
 MIN_WINDOW = {"mac": (640, 540), "windows": (640, 600)}
+READING_WIDTH = 560.0
+PAGE_CONTENT_WIDTH = 960.0
 
 # Mass-spring parameters (mass 1) for everything that moves. The notch island integrates two of
 # these, width and depth; a trackpad tick adds `tick_velocity` points per second to the width.

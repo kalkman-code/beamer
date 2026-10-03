@@ -41,7 +41,7 @@ DEFAULT_CROSSING = {
     "glow_colour": "signal",
     "block_while_dragging": True,
     # A full-screen app in front holds this Mac's edges. This Mac's own choice, never shared.
-    "hold_full_screen": True,
+    "hold_full_screen": False,
     # "Part of the edge": the thirds of `edge` that cross, as return_edge.PARTS names them.
     "edge_parts": ["middle"],
     # A switch by the shortcut or a menu, not a crossing, plays an arrival around the pointer.
@@ -50,6 +50,7 @@ DEFAULT_CROSSING = {
     "shortcut_arrival_style": "match",
     # How long an effect takes to play through once the pointer crosses: see effects.LENGTHS.
     "effect_length": "normal",
+    "effect_size": "medium",
     # Unix seconds at the moment this Mac last changed the arrangement -- which
     # edge leads to the PC. Either machine may change it, so when two ends meet
     # holding different answers the newer stamp wins. Never read by the engine;

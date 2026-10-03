@@ -73,7 +73,7 @@ def describe(controller) -> LinkState:
         if armed and controller.full_screen_app is not None:
             return LinkState(
                 "full_screen", INK, "Held", "Held",
-                f"{controller.full_screen_app} is full screen, so edges are off while it has focus.", SIGNAL,
+                "Held: an app is full screen.", SIGNAL,
             )
         via = " through the macOS 27 tunnel" if tunnel else ""
         return LinkState("mac", INK, "On Mac", linked, f"Connected to {peer}{via}.", SIGNAL)
