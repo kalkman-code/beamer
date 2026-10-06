@@ -65,8 +65,8 @@ class PaletteTest(unittest.TestCase):
         import crossing
         import tokens
 
-        self.assertEqual(crossing.GLOW_COLOURS, tuple(tokens.PALETTES))
-        for name in crossing.GLOW_COLOURS:
+        self.assertEqual(set(crossing.GLOW_COLOURS) | {'aurora'}, set(tokens.PALETTES))
+        for name in tokens.PALETTES:
             with self.subTest(colour=name):
                 self.assertGreaterEqual(len(notch_beam.palette_colours(name)), 2)
         closed = notch_beam.palette_colours("colourful", closed=True)

@@ -121,6 +121,18 @@ class RemoteTest(unittest.TestCase):
         self.assertEqual(self.tokens.token, "new")
         self.assertEqual(desktop_portal.monitors()[0].width, 1920)
 
+    def test_clipboard_version_zero_still_requests_clipboard_before_start(self):
+        self.bus.versions[inject_portal.CLIPBOARD] = 0
+        self.up()
+        self.assertEqual(len(self.bus.made("RequestClipboard")), 1)
+
+    def test_remote_desktop_version_zero_attempts_the_required_calls_without_v2_options(self):
+        self.bus.versions[inject_portal.INTERFACE] = 0
+        self.up()
+        options = self.bus.made("SelectDevices")[0][1]
+        self.assertNotIn("persist_mode", options)
+        self.assertEqual(len(self.bus.made("ConnectToEIS")), 1)
+
     def test_the_pointer_lands_moves_and_stays_on_the_displays(self):
         self.up()
         desktop_portal.set_cursor_position(100, 100)

@@ -1,77 +1,55 @@
 # Security
 
-Beamer sends your keystrokes, pointer and clipboard between two machines, so the link between
-them matters. This is what it protects, what it does not, and how to report a problem.
+Beamer sends your keystrokes, pointer and clipboard between machines, so the link between them
+matters. This is what it protects, what it does not, and how to report a problem.
 
 ## What the link protects
 
-- **Every frame is encrypted and authenticated.** Each connection opens with both machines sending
-  a fresh random prefix. Each direction of that connection then gets its own key, derived with
-  HKDF-SHA256 from the shared token and both prefixes, and every frame is sealed with
-  ChaCha20-Poly1305. A peer that cannot decrypt the first frame does not hold the token, and the
-  connection goes no further.
-- **The token is never sent.** Not when connecting, and not when pairing.
-- **Recorded traffic cannot be played back.** Within a connection, each frame carries a counter the
-  receiver requires to advance by one, so a frame sent twice, dropped or reordered ends the
-  connection. A whole recorded connection sent again as a new one fails too: the receiver's fresh
-  prefix is part of the key, so frames recorded under an earlier one do not decrypt. Before 1.4.1
-  the key was the same for every connection, and that whole-connection replay worked: someone on
-  your network who recorded a session could send it again, and the keystrokes, clicks and clipboard
-  in it would be repeated. Update both machines to 1.4.1 or later.
-- **Pairing is a six-digit code that lasts a minute and works once.** The two machines run CPace,
-  a password-authenticated key exchange, with the code as the password, and the token comes out
-  of it. The code never crosses the network, and neither does anything a list of codes could be
-  tested against: someone listening, or answering in either machine's place, learns only whether
-  their one guess was right. The PC answers the first machine to try a code and no other, and the
-  Mac judges one answer to a code and no other, so a code allows at most one guess against each
-  machine, two chances in a million, and a new code needs someone at the PC to press Pair a Mac
-  again. The exchange is written out in [PAIRING.md](PAIRING.md). Before 1.4.3 each machine
-  proved it knew the code with an HMAC keyed from it, and someone on your network during that
-  minute could capture the Mac's proof, try every code against it offline given enough hardware,
-  and pair with the PC as the Mac. Update both machines to 1.4.3 or later, and pair again if you
-  last paired on a network you do not trust.
-- **Traffic stays on your network.** The two machines talk to each other directly. There is no
-  server, no account and no telemetry. On Windows, the firewall rules Beamer adds apply to Private
-  networks only. The one request that leaves your network is the update check: once a day, an
-  ordinary HTTPS request to GitHub's public releases API, carrying nothing about you or your
-  machines beyond the address any request comes from. Check for updates on Overview turns it off.
-- **Strangers cannot tie it up cheaply.** A connection must authenticate within a deadline and
-  within 4KB, and only a handful of unauthenticated connections are held at once.
+- **Every frame is encrypted and authenticated.** Beamer 1.5.0 uses wire version 6. Each connection
+  exchanges fresh X25519 public keys and random nonce prefixes. The two directions get separate
+  keys, derived with HKDF-SHA256 from the shared token and the X25519 result. PyNaCl provides
+  X25519 and ChaCha20-Poly1305 through libsodium; HKDF-SHA256 uses Python's standard library.
+  Frames are sealed with ChaCha20-Poly1305.
+- **A later token leak does not decrypt a recorded 1.5.0 connection.** The connection key also
+  depends on each side's fresh X25519 secret, which is discarded after key setup. A token is still
+  sensitive: someone who gets it can act as that paired machine while they have it.
+- **The token is never sent.** It is used locally to identify the pair and derive connection keys.
+- **Frames cannot be replayed or reordered within a connection.** Each frame carries a counter the
+  receiver requires to advance by one. A repeated, dropped or reordered frame ends the connection.
+  A recorded connection also fails when sent again because a new connection has fresh keys.
+- **Pairing uses a short-lived six-digit code.** The machines run CPace, a password-authenticated
+  key exchange, to agree a token. The code is not sent over the network, and a recorded exchange
+  cannot be checked against a list of possible codes offline. A code is accepted once and expires
+  after a minute. The exchange is written out in [PAIRING.md](PAIRING.md).
+- **Traffic stays on your network.** Paired machines talk directly. There is no account, relay
+  server or telemetry. The update check makes an ordinary HTTPS request to GitHub's public releases
+  API once a day; it sends no Beamer data, though GitHub sees the address the request comes from.
+  Check for updates on Overview turns it off. Windows firewall rules apply to Private networks
+  only.
+- **Unauthenticated connections are limited.** A peer has five seconds and a 4KB first frame to
+  authenticate, and Beamer holds only a small number of unauthenticated connections at once.
 
 ## What it does not protect against
 
-- **Anyone on your network can see that Beamer is running.** The PC broadcasts a small beacon every
-  two seconds with its name and Beamer's port, and both machines listen on TCP 24820. Anyone can
-  send to the pairing port on UDP 24821 while a code is on screen.
-- **Someone on your network while you pair can interfere.** A junk message uses up the code and
-  stops that pairing, and so does answering the Mac in the PC's place. That is a nuisance, not a
-  way in: whoever does it gets one guess at the code against the PC and one against the Mac, two
-  chances in a million for each code you show. The PC answers one machine per code, and the Mac
-  will not send a code a second time once an answer to it has failed.
-- **The step that mixes the code into pairing is not constant-time arithmetic.** How long it
-  takes varies by a few millionths of a second with the code. The PC sends its answer a fixed
-  time after the request arrives, so that duration cannot be read off the network, and the code
-  is used once and gone in a minute; someone who can time code inside your machine has already
-  got further than this protects against.
-- **The PC's address is not proved by pairing.** The Mac takes the PC's address and port from the
-  PC's announcement, which anything on your network can imitate. That can point the Mac at the
-  wrong address and stop it connecting; it cannot read or forge the link, whose keys come from
-  the token.
-- **A machine that holds the token is trusted completely.** It can type and click anything on the
-  other machine. On Windows that includes admin windows, because Beamer runs elevated so it can
-  reach them. Treat the token like a password.
-- **The token is stored in each app's settings file**, in the user's own profile: under
-  `~/Library/Application Support/Beamer` on the Mac, readable only by that user, and under
-  `%LOCALAPPDATA%\Beamer` on Windows. Anyone who can read that file can act as the paired machine.
-  Pairing again replaces it.
-- **Malware on either machine.** Anything that can read your keyboard or the settings file on one
-  machine already has what Beamer would protect.
-- **A token that leaks later.** The keys come from the token and the prefixes, and the prefixes
-  are sent in the clear, so anyone who records your traffic and later learns the token can decrypt
-  the recording. Pairing again gives a new token.
-- **Traffic analysis.** Encryption hides what you type, not when. Someone watching the network can
-  see that the two machines are talking and the size and timing of frames. The protocol version
-  byte at the start of each connection is sent in the clear.
+- **Someone on your network can see that Beamer is running.** Machines announce their name and
+  connection port on the local network. Anyone on that network can try to reach the pairing
+  service while a code is on screen.
+- **Someone on your network can interrupt pairing.** A failed attempt can use up the displayed
+  code, so you may need to show a new one. The attempt does not reveal the code or let the person
+  join the pair.
+- **Pairing does not prove a machine's network address.** The address comes from local discovery,
+  which another machine on the network can imitate. That can stop a connection or point Beamer at
+  the wrong address, but the encrypted link still requires the paired token.
+- **A machine with the token is trusted.** It can type and click in applications that accept
+  synthetic input on the paired machine. On Windows, Beamer runs elevated so it can reach elevated
+  windows; it cannot control the secure desktop. Treat the token like a password.
+- **Malware on either machine.** Software that can read your keyboard or Beamer's local settings
+  can already act as you or the paired machine.
+- **Traffic analysis.** Encryption hides the contents, not when machines talk or the size and timing
+  of frames. The protocol version and a stable key identifier for the pair are sent in the clear,
+  so a network observer can recognise connections between the same pair of machines.
+- **Old Beamer versions cannot connect to 1.5.0.** Version 1.5.0 uses wire version 6; Beamer 1.4.x
+  uses version 5. Update both ends and pair the machines again.
 
 ## Reporting a vulnerability
 

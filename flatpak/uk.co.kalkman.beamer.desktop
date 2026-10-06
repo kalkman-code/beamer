@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=Beamer
+Comment=Share one keyboard and mouse between your computers
+Exec=beamer
+Icon=uk.co.kalkman.beamer
+Terminal=false
+Categories=Utility;Network;
+Keywords=keyboard;mouse;clipboard;sharing;
+StartupNotify=true

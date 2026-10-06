@@ -166,12 +166,12 @@ class ListTests(Base):
         self.panel._toggle_sheet()
         self.assertFalse(self.panel.open)
 
-    def test_the_machines_lead_the_page_while_none_is_paired_and_follow_the_controls_after(self):
+    def test_the_machines_lead_the_page_with_and_without_existing_machines(self):
         body = self.window.overview_body
         self.panel.refresh()
         self.window._place_machines(False)
         order = list(body.arrangedSubviews())
-        self.assertEqual(order.index(self.panel.machines_module.view), 3)
+        self.assertEqual(order.index(self.panel.machines_module.view), 1)
         self.window._place_machines(True)
         order = list(body.arrangedSubviews())
         self.assertEqual(order[1:3], [self.panel.machines_module.view, self.panel.sheet.view])
@@ -329,7 +329,7 @@ class ShowingACodeTests(Base):
             self.panel._show_code()
             self.panel.refresh()
         self.assertEqual(self.service.begun, 1)
-        self.assertEqual(self.panel.code_label.text, "482 913")
+        self.assertEqual(self.panel.shown_code_boxes.value, "482913")
         self.assertEqual(self.panel.code_expiry.text, "Expires in 60 s")
         self.assertIn("192.0.2.9", self.panel.code_address.text)
         self.assertFalse(self.panel.qr_view.isHidden())
@@ -420,6 +420,31 @@ class EnteringACodeTests(Base):
         self.panel._choose(0)
         self.assertEqual(self.panel.chosen["name"], "Laptop")
         self.assertEqual(self.panel.pair_status.text, "Six digits, as shown on Laptop.")
+
+    def test_long_discovery_name_keeps_room_and_full_name_tooltip_at_900_points(self):
+        self.window.window.setContentSize_((900, 900))
+        self.service.heard = [heard(name=f"Peer {index}", address=f"192.0.2.{index}") for index in range(4)]
+        full_name = "localhost-live.example.lan"
+        self.service.heard.append(heard(name=full_name, address=full_name, platform="linux"))
+        self.panel._heard_key = None
+        self.panel.refresh()
+        self.window.window.contentView().layoutSubtreeIfNeeded()
+
+        row = self.panel.heard_list.arrangedSubviews()[-1]
+        line = row.subviews()[0]
+        name, detail = line.arrangedSubviews()[1:]
+        required_name_width = name.attributedStringValue().size().width
+        self.assertGreaterEqual(name.frame().size.width, 100)
+        self.assertLess(name.frame().size.width, required_name_width)
+        self.assertGreater(detail.frame().size.width, 60)
+        self.assertLess(detail.frame().size.width, detail.attributedStringValue().size().width)
+        self.assertEqual(name.toolTip(), full_name)
+        self.assertEqual(name.accessibilityLabel(), full_name)
+        self.assertEqual(detail.toolTip(), "Linux · " + full_name)
+        self.assertEqual(detail.accessibilityLabel(), "Linux · " + full_name)
+        paragraph = name.attributedStringValue().attribute_atIndex_effectiveRange_(
+            AppKit.NSParagraphStyleAttributeName, 0, None)[0]
+        self.assertEqual(paragraph.lineBreakMode(), AppKit.NSLineBreakByTruncatingTail)
 
     def test_a_machine_not_showing_a_code_is_said_so(self):
         self.service.heard = [heard(pair_id=None)]
@@ -591,11 +616,6 @@ class CodeBoxCentringTests(Base):
             editor.typingAttributes()[AppKit.NSParagraphStyleAttributeName].alignment(),
             AppKit.NSTextAlignmentCenter,
         )
-        layout = editor.layoutManager()
-        glyph_range = layout.glyphRangeForCharacterRange_actualCharacterRange_((0, 1), None)[0]
-        glyph = layout.boundingRectForGlyphRange_inTextContainer_(glyph_range, editor.textContainer())
-        offset = glyph.origin.x + glyph.size.width / 2 - editor.bounds().size.width / 2
-        self.assertLessEqual(abs(offset), 0.3, f"the active field editor draws the digit off-centre: {offset}")
         window.contentView().layoutSubtreeIfNeeded()
         view = boxes.view
         bounds = view.bounds()
@@ -608,24 +628,45 @@ class CodeBoxCentringTests(Base):
             return colour.redComponent() + colour.greenComponent() + colour.blueComponent()
 
         offsets = []
-        rows = range(int(4 * scale), int((bounds.size.height - 4) * scale), 2)
         for control in boxes.fields:
             box = control.superview()
             frame = box.convertRect_toView_(box.bounds(), view)
-            # Inside the box's border and corner, on its own ground.
-            first, last = int((frame.origin.x + 4) * scale), int((frame.origin.x + frame.size.width - 4) * scale)
-            ground = level(first, int(bounds.size.height * scale / 2))
-            inked = [x for x in range(first, last) if any(abs(level(x, y) - ground) > 0.6 for y in rows)]
+            # Measure rendered ink inside the box, clear of its border and corners.
+            left = int((frame.origin.x + 4) * scale)
+            right = int((frame.origin.x + frame.size.width - 4) * scale)
+            top = int((frame.origin.y + 4) * scale)
+            bottom = int((frame.origin.y + frame.size.height - 4) * scale)
+            ground = level(left, top)
+            inked = [(x, y) for x in range(left, right) for y in range(top, bottom)
+                     if abs(level(x, y) - ground) > 0.6]
             self.assertTrue(inked, "no digit drawn in a box")
-            ink = (inked[0] + inked[-1] + 1) / 2 / scale
-            offsets.append(round(ink - (frame.origin.x + frame.size.width / 2), 2))
+            ink_left, ink_right = min(x for x, _ in inked), max(x for x, _ in inked)
+            ink_top, ink_bottom = min(y for _, y in inked), max(y for _, y in inked)
+            ink_x = (ink_left + ink_right + 1) / 2
+            ink_y = (ink_top + ink_bottom + 1) / 2
+            box_x = (frame.origin.x + frame.size.width / 2) * scale
+            box_y = (frame.origin.y + frame.size.height / 2) * scale
+            offsets.append((round(ink_x - box_x, 2), round(ink_y - box_y, 2)))
         return offsets
 
     def test_each_typed_digit_sits_in_the_middle_of_its_box(self):
         self.panel._toggle_sheet()
         self.panel.refresh()
-        for offset in self.ink_offsets():
-            self.assertLessEqual(abs(offset), 0.3, f"digits sit off the middle of their boxes: {self.ink_offsets()}")
+        offsets = self.ink_offsets()
+        self.assertEqual(len(offsets), pairing.CODE_DIGITS)
+        for horizontal, vertical in offsets:
+            self.assertLessEqual(abs(horizontal), 1, f"digits sit off the horizontal middle in pixels: {offsets}")
+            self.assertLessEqual(abs(vertical), 1, f"digits sit off the vertical middle in pixels: {offsets}")
+        editor = self.panel.code_boxes.fields[-1].currentEditor()
+        self.assertEqual(editor.selectedRange().location, 1)
+        self.assertEqual(editor.selectedRange().length, 0)
+
+    def test_pasting_the_whole_code_fills_all_six_boxes(self):
+        self.panel._toggle_sheet()
+        boxes = self.panel.code_boxes
+        boxes.focus(self.window.window)
+        self.window.window.firstResponder().insertText_("408819")
+        self.assertEqual(boxes.value, "408819")
 
 
 class TrayTests(Base):

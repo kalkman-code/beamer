@@ -45,7 +45,9 @@ class EdgeGlowConfigTests(unittest.TestCase):
 
     def test_style_and_colour_default_to_the_original_look_and_round_trip(self):
         config = config_from_dict(dict(BASE))
-        self.assertEqual((config.glow_style, config.glow_colour), ("glow", "signal"))
+        self.assertEqual((config.glow_style, config.glow_colour), ("glow", "colourful"))
+        existing = config_from_dict({**BASE, "glow_colour": "signal"})
+        self.assertEqual(existing.glow_colour, "signal")
         config = config_from_dict({**BASE, "glow_style": "beam", "glow_colour": "sunset"})
         saved = config_to_dict(config)
         self.assertEqual((saved["glow_style"], saved["glow_colour"]), ("beam", "sunset"))
@@ -55,6 +57,17 @@ class EdgeGlowConfigTests(unittest.TestCase):
         import tokens
 
         self.assertEqual(app_config.GLOW_COLOURS, tuple(tokens.PALETTES) + effects.PACK_IDS)
+
+    def test_all_original_saved_colours_keep_their_id_and_stops(self):
+        from pathlib import Path
+        import json
+        fixture = Path(__file__).resolve().parents[2] / 'core/tests/colour_packs_rc3.json'
+        for value, stops in json.loads(fixture.read_text()).items():
+            with self.subTest(value=value):
+                saved = config_to_dict(config_from_dict({**BASE, 'glow_colour': value}))
+                loaded = config_from_dict(saved)
+                self.assertEqual(loaded.glow_colour, value)
+                self.assertEqual(app_config.palette_colours(loaded.glow_colour), tuple(stops))
 
     def test_every_crossing_effect_and_pack_is_accepted_and_round_trips(self):
         from core import effects

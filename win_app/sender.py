@@ -168,6 +168,7 @@ class LinkSender:
         self._entries: list = []        # every entry, in the order the UI shows them
         self._zone_list: list = []
         self._models: list = []         # [(peer id, model)], this PC's zones in use
+        self._edge_cursor_error_logged = False
         self._ignore_gate = ignored.Gate()
         # The name a key went down under, by virtual key, so its release matches even when Shift or
         # the style changes while it is held.
@@ -450,6 +451,8 @@ class LinkSender:
                 self._lost()
             elif vk is not None and self._ignore_gate.keeps(ignored.key(vk), down):
                 return False
+        elif vk is not None and not down:
+            self._ignore_gate.keeps(ignored.key(vk), False)
         return self._input({"type": protocol.MSG_KEYDOWN if down else protocol.MSG_KEYUP, "data": dict(data)})
 
     def on_text(self, text: str, vk: Optional[int] = None) -> bool:
@@ -499,6 +502,8 @@ class LinkSender:
                 self._lost()
             elif self._ignore_gate.keeps(ignored.button(name), down):
                 return False
+        elif not down:
+            self._ignore_gate.keeps(ignored.button(name), False)
         return self._input({"type": protocol.MSG_MOUSEDOWN if down else protocol.MSG_MOUSEUP, "data": {"button": name}})
 
     def on_wheel(self, dy: float, dx: float) -> bool:
@@ -566,7 +571,14 @@ class LinkSender:
         try:
             desktop = self._desktop_module()
             monitors = self._cached_monitors()
-            pointer = desktop.cursor_position()
+            try:
+                pointer = desktop.cursor_position()
+            except Exception:
+                if not self._edge_cursor_error_logged:
+                    LOGGER.warning("Could not read the cursor position; skipping this edge event", exc_info=True)
+                    self._edge_cursor_error_logged = True
+                return
+            self._edge_cursor_error_logged = False
             outcome = model = target = None
             for peer, candidate in list(self._models):
                 result = candidate.feed(monitors, pointer, float(dx), float(dy))
@@ -945,6 +957,9 @@ class LinkSender:
         """`peer`'s link is lost: what waited for its clipboard is for a link that is gone."""
         with self._clip_lock:
             self._clip_wait.pop(peer, None)
+        for held in tuple(self._sent_names):
+            if held[0] == peer:
+                self._sent_names.pop(held, None)
 
     def _send(self, peer: bytes, message: dict) -> None:
         kind = message["type"]
@@ -1124,7 +1139,7 @@ class LinkSender:
         """A peer's hardware address, read from the ARP table while the entry is fresh, for the wake-up
         a later switch may need. Only when the peer did not say its own in its `welcome`."""
         entry = self._peers.get(peer) or {}
-        if entry.get("hw") or not entry.get("host"):
+        if entry.get("port") == 0 or entry.get("hw") or not entry.get("host"):
             return
         try:
             address = self._mac_lookup(entry["host"])
@@ -1145,7 +1160,7 @@ class LinkSender:
         peer = peer or self.shortcut_target()
         entry = self._peers.get(peer) if peer is not None else None
         address = (entry or {}).get("hw") or ""
-        if not address or self.links.up(peer) or self.links.refused(peer):
+        if (entry or {}).get("port") == 0 or not address or self.links.up(peer) or self.links.refused(peer):
             return False
         with self._wake_lock:
             if peer in self._waking:
@@ -1338,7 +1353,7 @@ class LinkSet:
         turned local is stopped. The link itself ends and waits when `send` is off."""
         wanted = {
             entry["token"]: entry for entry in entries
-            if protocol.linkable(entry) and not self._is_local(entry.get("host") or "")
+            if entry.get("port") != 0 and protocol.linkable(entry) and not self._is_local(entry.get("host") or "")
         }
         with self._lock:
             gone = [token for token in self._links if token not in wanted]

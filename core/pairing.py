@@ -916,12 +916,16 @@ class PairingClient:
 
 def _udp_socket(bind_port: int) -> socket.socket:
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    if hasattr(socket, "SO_REUSEPORT"):
-        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
-    sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
-    sock.bind(("", bind_port))
-    sock.settimeout(0.5)
+    try:
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        if hasattr(socket, "SO_REUSEPORT"):
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+        sock.bind(("", bind_port))
+        sock.settimeout(0.5)
+    except OSError:
+        sock.close()
+        raise
     return sock
 
 
@@ -1172,6 +1176,7 @@ class Announcer:
         self._lock = threading.Lock()
         self._stop = threading.Event()
         self._thread = None
+        self._sock = None
         self.error = None
 
     def start(self) -> None:
@@ -1187,6 +1192,11 @@ class Announcer:
         if thread is not None and thread is not threading.current_thread():
             thread.join(timeout=2.0)
         self._thread = None
+
+    @property
+    def listening_port(self):
+        sock = self._sock
+        return sock.getsockname()[1] if sock is not None else None
 
     def begin_pairing(self) -> str:
         with self._lock:
@@ -1229,6 +1239,8 @@ class Announcer:
             self.logger.error("pairing beacon could not bind UDP %s: %s", self.bind_port, exc)
             return
         self.error = None
+        self.bind_port = sock.getsockname()[1]
+        self._sock = sock
         next_beacon = 0.0
         answered = {}
         refused = {}
@@ -1315,6 +1327,7 @@ class Announcer:
             self.error = str(exc)
             self.logger.exception("pairing beacon stopped")
         finally:
+            self._sock = None
             sock.close()
 
 
@@ -1379,6 +1392,11 @@ class Discovery:
         if thread is not None and thread is not threading.current_thread():
             thread.join(timeout=2.0)
         self._thread = None
+
+    @property
+    def listening_port(self):
+        sock = self._sock
+        return sock.getsockname()[1] if sock is not None else None
 
     def pcs(self) -> list:
         """Every PC heard from recently: dicts of name, address, port, reply_port, pair_id and
@@ -1544,6 +1562,7 @@ class Discovery:
             self.logger.error("discovery could not bind UDP %s: %s", self.bind_port, exc)
             return
         self.error = None
+        self.bind_port = sock.getsockname()[1]
         self._sock = sock
         try:
             while not self._stop.is_set():
@@ -1880,6 +1899,7 @@ class PairingService(Discovery):
                 self.tcp_error = str(exc)
                 self.logger.warning("pairing over TCP %s is not available: %s", self.tcp_port, exc)
                 return
+            self.tcp_port = listener.getsockname()[1]
             self.tcp_error = None
             stop = threading.Event()
             self._listener = (listener, stop)
@@ -2016,6 +2036,7 @@ class PairingService(Discovery):
             self.logger.error("pairing could not bind UDP %s: %s", self.bind_port, exc)
             return
         self.error = None
+        self.bind_port = sock.getsockname()[1]
         self._sock = sock
         self._own_addresses = frozenset(_local_ipv4_addresses() + [pairing_address(), "127.0.0.1"]) - {None}
         next_beacon = 0.0

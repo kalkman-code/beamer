@@ -4,13 +4,18 @@ Beamer was never in Notifications settings). Driven against a stand-in framework
 this Mac for anything or puts a notification on screen."""
 
 import logging
+import sys
 import unittest
+from pathlib import Path
 from unittest import mock
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 import rumps
 
 import notices
-from kvm_bridge_app import TrayApp
+from kvm_bridge_app import TrayApp, _set_tray_title, _tray_item
+from core import locale
 
 
 class FakeContent:
@@ -124,6 +129,13 @@ class NoticesTest(unittest.TestCase):
                          ("Can't cross to Laptop-PC", "It is being driven from Desk-PC.", "default", None))
         self.assertNotEqual(first.ident, second.ident)
 
+    def test_us_notice_text_uses_american_spelling(self):
+        with mock.patch.object(locale, "is_us_region", return_value=True):
+            self.assertTrue(self.notices.post("Cancelled", "Colourful behaviour is a favourite."))
+        notice = self.framework.center.added[0].content
+        self.assertEqual((notice.title, notice.body),
+                         ("Canceled", "Colorful behavior is a favorite."))
+
     def test_posting_asks_first_when_nothing_has_asked_yet(self):
         self.notices.post("Title", "Body")
         self.assertEqual(len(self.framework.center.asked), 1)
@@ -154,6 +166,13 @@ class _FakeTrayApp:
 
 
 class TrayNoticeTest(unittest.TestCase):
+    def test_tray_menu_titles_use_american_spelling(self):
+        with mock.patch.object(locale, "is_us_region", return_value=True):
+            item = _tray_item("Minimise", callback=None)
+            self.assertEqual(item.title, "Minimize")
+            _set_tray_title(item, "Initialising")
+        self.assertEqual(item.title, "Initializing")
+
     def test_the_tray_app_posts_through_the_notices_not_rumps_with_addresses_hidden_as_set(self):
         fake = _FakeTrayApp()
         with mock.patch.object(rumps, "notification") as old, mock.patch("AppKit.NSBeep"):

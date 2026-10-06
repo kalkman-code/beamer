@@ -124,6 +124,29 @@ class TapTests(unittest.TestCase):
         up = key_event(KEY_F13)
         self.assertIs(self.tap(FakeQuartz.kCGEventKeyUp, up), up)
 
+    def test_ignored_key_kept_here_stays_local_after_return_and_setting_change(self):
+        down = key_event(KEY_F13)
+        self.assertIs(self.tap(FakeQuartz.kCGEventKeyDown, down), down)
+        self.controller._return_local()
+        self.configure([])
+        redirect_to(self.controller)
+        up = key_event(KEY_F13)
+        self.assertIs(self.tap(FakeQuartz.kCGEventKeyUp, up), up)
+        self.assertEqual(self.sent(), [])
+
+    def test_local_release_after_return_clears_the_kept_key_for_its_next_press(self):
+        self.tap(FakeQuartz.kCGEventKeyDown, key_event(KEY_F13))
+        self.controller._return_local()
+        self.tap(FakeQuartz.kCGEventKeyUp, key_event(KEY_F13))
+        self.configure([])
+        redirect_to(self.controller)
+        self.assertIsNone(self.tap(FakeQuartz.kCGEventKeyDown, key_event(KEY_F13)))
+        self.assertIsNone(self.tap(FakeQuartz.kCGEventKeyUp, key_event(KEY_F13)))
+        self.assertEqual(self.sent(), [
+            (protocol.MSG_KEYDOWN, {"key": "f13"}),
+            (protocol.MSG_KEYUP, {"key": "f13"}),
+        ])
+
 
 class SettingsTests(unittest.TestCase):
     def test_the_list_survives_a_save_and_a_load(self):

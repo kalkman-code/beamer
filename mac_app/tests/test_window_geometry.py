@@ -37,6 +37,27 @@ def offscreen_control_window():
 
 
 class WindowGeometryTests(unittest.TestCase):
+    def _assert_side_by_side_layout(self, window, attribute, width, height, expected_orientation):
+        AppKit = kvm_bridge_app.AppKit
+        from Foundation import NSDate, NSRunLoop
+
+        window.window.setFrame_display_(((100000, 100000), (width, height)), False)
+        NSRunLoop.currentRunLoop().runUntilDate_(NSDate.dateWithTimeIntervalSinceNow_(0.25))
+        self.assertEqual(window.window.frame().size.width, width)
+        pair = getattr(window, attribute, None)
+        self.assertIsNotNone(pair, f"{attribute} was not built")
+        self.assertEqual(
+            pair.orientation(), expected_orientation,
+            f"pair width {pair.bounds().size.width}, threshold {pair.needed()}, window {window.window.frame().size.width}",
+        )
+        self.assertFalse(pair.isHidden())
+        self.assertFalse(pair.first.isHidden())
+        self.assertFalse(pair.second.isHidden())
+        self.assertEqual(pair.first.superview(), pair.view)
+        self.assertEqual(pair.second.superview(), pair.view)
+        self.assertEqual(tuple(pair.view.arrangedSubviews()), (pair.first, pair.second))
+        return pair
+
     def test_resizable_window_keeps_a_requested_full_screen_width(self):
         AppKit = kvm_bridge_app.AppKit
         window = offscreen_control_window()
@@ -51,23 +72,139 @@ class WindowGeometryTests(unittest.TestCase):
 
         self.assertEqual(window.window.frame().size.width, screen_width)
 
-    def test_a_full_screen_page_keeps_its_content_column_centred(self):
+    def test_page_column_scales_with_free_width_and_stays_centred(self):
         window = offscreen_control_window()
-        window.window.setFrame_display_(((100000, 100000), (1728, 900)), False)
         from Foundation import NSDate, NSRunLoop
 
-        NSRunLoop.currentRunLoop().runUntilDate_(NSDate.dateWithTimeIntervalSinceNow_(0.25))
+        for width in (1366, 1920, 2560, 3440, 7680):
+            window.window.setFrame_display_(((100000, 100000), (width, 900)), False)
+            NSRunLoop.currentRunLoop().runUntilDate_(NSDate.dateWithTimeIntervalSinceNow_(0.25))
+            self.assertEqual(window.window.frame().size.width, width)
 
-        # Every page: one row of a reading-width note and a button, with nothing to take the spare
-        # width, held Overview's column at 706 pt and Connection's at 684.
-        for key, page in window.pages.items():
-            page = page.documentView()
-            body = page.subviews()[0]
-            with self.subTest(page=key):
-                self.assertEqual(body.frame().size.width, kvm_bridge_app.theme.PAGE_CONTENT_WIDTH)
-                left = body.frame().origin.x
-                right = page.frame().size.width - left - body.frame().size.width
-                self.assertAlmostEqual(left, right, delta=1)
+            for key, scroll in window.pages.items():
+                window._select_page(key)
+                window.window.contentView().layoutSubtreeIfNeeded()
+                page = scroll.documentView()
+                body = page.subviews()[0]
+                free = page.frame().size.width
+                expected = kvm_bridge_app.page_column_width(free)
+                with self.subTest(window_width=width, page=key):
+                    if key == "design":
+                        # Its tile grid keeps its intrinsic column width; the Design test checks the rows.
+                        available = page.frame().size.width - sum(kvm_bridge_app.theme.PAGE_PADDING_NARROW[1::2])
+                        self.assertLessEqual(body.frame().size.width, available + 1)
+                    else:
+                        self.assertAlmostEqual(body.frame().size.width, expected, delta=1)
+                    left = body.frame().origin.x
+                    right = page.frame().size.width - left - body.frame().size.width
+                    self.assertAlmostEqual(left, right, delta=1)
+
+    def test_crossing_pair_flips_without_reparenting_at_wide_and_narrow_sizes(self):
+        AppKit = kvm_bridge_app.AppKit
+        window = offscreen_control_window()
+        window._select_page("crossing")
+        horizontal = AppKit.NSUserInterfaceLayoutOrientationHorizontal
+        vertical = AppKit.NSUserInterfaceLayoutOrientationVertical
+
+        for width, height in ((1366, 900), (1920, 900), (2560, 900), (1440, 3440)):
+            with self.subTest(window=(width, height)):
+                pair = self._assert_side_by_side_layout(window, "ways_pair", width, height, horizontal)
+                self.assertEqual(pair.needed(), 632)
+                self.assertEqual(pair.gap, 24)
+                self.assertEqual(pair.view.spacing(), 24)
+                self.assertGreaterEqual(pair.first.frame().size.width, 254)
+                self.assertGreaterEqual(pair.second.frame().size.width, 354)
+
+        with self.subTest(window=(700, 900)):
+            pair = self._assert_side_by_side_layout(window, "ways_pair", 700, 900, vertical)
+            self.assertLess(pair.bounds().size.width, pair.needed())
+
+    def test_design_controls_lead_full_width_responsive_tile_groups(self):
+        window = offscreen_control_window()
+        window._select_page("design")
+        window.landing_box.value = True
+        window._reflect()
+        self.assertFalse(window.style_for_row.isHidden())
+        self.assertFalse(window.effect_method_view.isHidden())
+        last_group = window.glow_style_select.rows[-1]
+        window.glow_style_select.value = last_group.values[-1]
+        from Foundation import NSDate, NSRunLoop
+
+        for width in (640, 1366, 2560, 1366, 640):
+            window.window.setFrame_display_(((100000, 100000), (width, 900)), False)
+            NSRunLoop.currentRunLoop().runUntilDate_(NSDate.dateWithTimeIntervalSinceNow_(0.1))
+            host = window.style_module.body
+            controls = [view.convertRect_toView_(view.bounds(), host)
+                        for view in (window.style_for_row, window.effect_method_view)]
+            tiles = [tile.convertRect_toView_(tile.bounds(), host)
+                     for row in window.glow_style_select.rows for _value, tile, _name in row.tiles]
+            with self.subTest(width=width):
+                # NSStackView is unflipped: a row's bottom must be above every tile's top.
+                self.assertGreater(min(rect.origin.y for rect in controls),
+                                   max(rect.origin.y + rect.size.height for rect in tiles))
+                for rect in controls:
+                    self.assertAlmostEqual(rect.size.width, host.bounds().size.width, delta=1)
+                for rect in tiles:
+                    self.assertGreaterEqual(rect.size.width, 96)
+                first_row = max(rect.origin.y + rect.size.height for rect in tiles)
+                count = sum(abs(rect.origin.y + rect.size.height - first_row) < 1 for rect in tiles)
+                first_family = max(
+                    window.glow_style_select.rows,
+                    key=lambda row: max(tile.convertRect_toView_(tile.bounds(), host).origin.y
+                                        + tile.convertRect_toView_(tile.bounds(), host).size.height
+                                        for _value, tile, _name in row.tiles),
+                )
+                self.assertEqual(count, first_family.grid.columns)
+                for family in window.glow_style_select.rows:
+                    bounds = family.view.bounds()
+                    bounds = kvm_bridge_app.AppKit.NSInsetRect(bounds, -1, -1)
+                    self.assertGreater(bounds.size.width, 0)
+                    self.assertGreater(bounds.size.height, 0)
+                    for _value, tile, _name in family.tiles:
+                        rect = tile.convertRect_toView_(tile.bounds(), family.view)
+                        self.assertTrue(kvm_bridge_app.AppKit.NSContainsRect(bounds, rect),
+                                        f"tile {rect} outside family row {bounds}")
+                selected = next(tile for row in window.glow_style_select.rows
+                                for value, tile, _name in row.tiles if value == window.glow_style_select.value)
+                self.assertIsNone(window.glow_style_select.ring)
+                self.assertTrue(selected.tile_selected)
+                self.assertEqual(selected.layer().borderWidth(), 2)
+
+    def test_narrow_page_uses_its_current_padding_for_available_width(self):
+        window = offscreen_control_window()
+        window._select_page("crossing")
+        from Foundation import NSDate, NSRunLoop
+
+        window.window.setFrame_display_(((100000, 100000), (640, 700)), False)
+        NSRunLoop.currentRunLoop().runUntilDate_(NSDate.dateWithTimeIntervalSinceNow_(0.1))
+        page = window.pages["crossing"].documentView()
+        body = page.subviews()[0]
+        padding = kvm_bridge_app.theme.PAGE_PADDING_NARROW if not window.wide else kvm_bridge_app.theme.PAGE_PADDING
+        available = page.frame().size.width - padding[1] - padding[3]
+        expected = min(
+            kvm_bridge_app.page_column_width(page.frame().size.width),
+            page.frame().size.width - sum(padding[1::2]),
+        )
+        self.assertAlmostEqual(body.frame().size.width, expected, delta=1)
+
+    def test_switch_mode_keeps_long_tile_titles_readable(self):
+        window = offscreen_control_window()
+        window._select_page("design")
+        window.landing_box.value = True
+        window.style_for_select.value = "switch"
+        window._reflect()
+        from Foundation import NSDate, NSRunLoop
+
+        window.window.setFrame_display_(((100000, 100000), (640, 700)), False)
+        NSRunLoop.currentRunLoop().runUntilDate_(NSDate.dateWithTimeIntervalSinceNow_(0.1))
+        _value, tile, name = next(item for row in window.switch_style_select.rows
+                                  for item in row.tiles if item[0] == "match")
+        single_line_height = name.view.attributedStringValue().size().height
+        self.assertGreaterEqual(name.view.frame().size.height, single_line_height)
+        self.assertGreaterEqual(name.view.frame().size.width, name.view.attributedStringValue().size().width)
+        self.assertGreaterEqual(tile.frame().size.width, 96)
+        self.assertTrue(kvm_bridge_app.AppKit.NSContainsRect(tile.bounds(),
+                        name.view.convertRect_toView_(name.view.bounds(), tile)))
 
     def test_a_full_screen_remove_question_keeps_its_buttons_their_own_width(self):
         from types import SimpleNamespace
@@ -76,7 +213,7 @@ class WindowGeometryTests(unittest.TestCase):
         window = offscreen_control_window()
         state = SimpleNamespace(word="Connected", led="signal", blink=False, tone="signal", detail="")
         row = SimpleNamespace(label="Windows PC", state=state, token="t1", platform="Windows", address="192.0.2.20",
-                              in_use=True, drives=True, driven=True)
+                              in_use=True, drives=True, driven=True, phone=False)
         window.panel.removing = "t1"
         window.panel._build_rows([row])
         window.window.setFrame_display_(((100000, 100000), (1728, 900)), False)
@@ -108,9 +245,16 @@ class WindowGeometryTests(unittest.TestCase):
     def test_the_global_titlebar_setting_selects_fill_or_minimise(self):
         action = getattr(kvm_bridge_app, "titlebar_action", lambda _setting: None)
 
+        self.assertEqual(action(None), "fill")
+        self.assertEqual(action(""), "fill")
+        self.assertEqual(action("Maximize"), "fill")
         self.assertEqual(action("Fill"), "fill")
         self.assertEqual(action("Zoom"), "fill")
         self.assertEqual(action("Minimise"), "minimise")
+        self.assertEqual(action("Minimize"), "minimise")
+        self.assertIsNone(action("None"))
+        self.assertIsNone(action("Do Nothing"))
+        self.assertEqual(action("Unexpected"), "fill")
 
     def test_double_click_applies_the_selected_titlebar_action(self):
         perform = getattr(kvm_bridge_app, "perform_titlebar_double_click", lambda *_args: None)

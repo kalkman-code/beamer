@@ -51,7 +51,6 @@ except ImportError:  # pragma: no cover - exercised only off macOS
 
 
 CONNECT_TIMEOUT_SECONDS = link_module.CONNECT_SECONDS
-SOCKET_IO_TIMEOUT_SECONDS = 0.5
 OUTBOUND_QUEUE_SIZE = 2048
 SSH_FALLBACK_HOST = "127.0.0.1"
 # Below 49152 for the same reason the listening ports are: macOS hands out
@@ -565,6 +564,7 @@ class KVMController:
         self.tap_run_loop = None
         self.tap_callback_ref = self._event_tap_callback
         self.translator = QuartzEventTranslator(quartz)
+        self._sent_names = {}
         self.trigger_code = KEY_NAME_TO_CODE[cfg.trigger_key]
         self._jump_swallowed = set()
         self.jump_recording = False
@@ -592,6 +592,7 @@ class KVMController:
         self.on_crossing = None
         self._crossing_failed = False
         self._crossing_failed_at = 0.0
+        self._cursor_read_error_logged = False
         self._bounds_cache = None
         self._bounds_at = 0.0
         self._displays_cache = None
@@ -952,6 +953,9 @@ class KVMController:
         # new first machine's would be the default. Sides go from the window, one machine at a time
         # (`send_arrangement`), and with every link that comes up.
         self.trigger_code = KEY_NAME_TO_CODE[cfg.trigger_key]
+        if "shortcut" not in cfg.crossing.get("methods", ()):
+            self.last_trigger_down = 0.0
+            self.trigger_suppressed = False
         self.ignore_gate.configure(cfg.ignored_inputs)
         if self._memory is not None:
             self._memory.follow(cfg)
@@ -1282,6 +1286,7 @@ class KVMController:
                 # fires cannot strand the PC's mouse here.
                 if (
                     event_type in (self.quartz.kCGEventKeyDown, self.quartz.kCGEventKeyUp, self.quartz.kCGEventFlagsChanged)
+                    and "shortcut" in self.cfg.crossing.get("methods", ())
                     and not self._was_injected(event)
                     and self.quartz.CGEventGetIntegerValueField(event, self.quartz.kCGKeyboardEventKeycode) == self.trigger_code
                 ):
@@ -1332,7 +1337,7 @@ class KVMController:
                 result = self.translator.key_result(
                     event_type,
                     event,
-                    self.trigger_code,
+                    self.trigger_code if "shortcut" in self.cfg.crossing.get("methods", ()) else None,
                     {},
                 )
                 if result.is_trigger:
@@ -1342,8 +1347,8 @@ class KVMController:
                     return event
                 had = len(result.messages)
                 result.messages = self._after_home_presses(result.messages)
+                keycode = self.quartz.CGEventGetIntegerValueField(event, self.quartz.kCGKeyboardEventKeycode)
                 if self.redirecting:
-                    keycode = self.quartz.CGEventGetIntegerValueField(event, self.quartz.kCGKeyboardEventKeycode)
                     entry = ignored.key(keycode)
                     kept = self.ignore_gate.keeps(entry, result.is_down)
                     if keycode == CAPS_LOCK_KEY_CODE:
@@ -1353,6 +1358,8 @@ class KVMController:
                         self.ignore_gate.keeps(entry, False)
                     if kept:
                         return event
+                elif not result.is_down and self.ignore_gate.keeps(ignored.key(keycode), False):
+                    return event
                 messages = result.messages
                 if had and not messages:
                     # The release of a key pressed here, while the input was home, stays here.
@@ -1369,6 +1376,7 @@ class KVMController:
                         elif ("button", button[0]) in self._home_presses:
                             self._home_presses.discard(("button", button[0]))
                         else:
+                            self.ignore_gate.keeps(ignored.button(button[0]), False)
                             self._enqueue_control({"type": protocol.MSG_MOUSEUP, "data": {"button": button[0]}})
                     return self._handle_local_mouse(event_type, event)
                 if button is not None and not button[1] and ("button", button[0]) in self._home_presses:
@@ -1475,6 +1483,13 @@ class KVMController:
         try:
             quartz = self.quartz
             location = quartz.CGEventGetLocation(event)
+        except Exception:
+            if not self._cursor_read_error_logged:
+                self.logger.warning("could not read the cursor position; skipping this edge event", exc_info=True)
+                self._cursor_read_error_logged = True
+            return event
+        self._cursor_read_error_logged = False
+        try:
             x, y = location[0], location[1]
             dx = quartz.CGEventGetDoubleValueField(event, quartz.kCGMouseEventDeltaX)
             dy = quartz.CGEventGetDoubleValueField(event, quartz.kCGMouseEventDeltaY)
@@ -1779,7 +1794,7 @@ class KVMController:
     def _sync_links(self):
         """One link per peer with `send` on, made and ended to match the peers as the book has them
         now. Cheap, and called every couple of seconds as well as when the settings change."""
-        peers = self.book.peers()
+        peers = peerlist.desktops(self.book.peers())
         wanted = {peer["token"] for peer in peers if peer.get("token") and peer.get("in_use", True) is True
                   and peer.get("send") is True}
         first = next((peer["token"] for peer in peers
@@ -2184,6 +2199,9 @@ class KVMController:
         """`peer`'s link is lost: what waited for its clipboard is for a link that is gone."""
         with self._clip_lock:
             self._clip_wait.pop(peer, None)
+        for held in tuple(self._sent_names):
+            if held[0] == peer:
+                self._sent_names.pop(held, None)
 
     def _send(self, send):
         link = self._peers_up.get(send.peer)
@@ -2220,7 +2238,18 @@ class KVMController:
         key = data.get("key")
         if key in MEDIA_KEY_NAMES:
             return message if "media_keys" in link.caps else None
-        data["key"] = keytable.wire_name(key, OWN_PLATFORM, link.peer_platform, self._key_style())
+        held = (link.peer_id, key)
+        if message["type"] == protocol.MSG_KEYUP and held in self._sent_names:
+            name = self._sent_names.pop(held)
+            if any(peer == held[0] and sent == name for (peer, _physical), sent in self._sent_names.items()):
+                return None
+        elif message["type"] == protocol.MSG_KEYDOWN and held in self._sent_names:
+            name = self._sent_names[held]
+        else:
+            name = keytable.wire_name(key, OWN_PLATFORM, link.peer_platform, self._key_style())
+            if message["type"] == protocol.MSG_KEYDOWN:
+                self._sent_names[held] = name
+        data["key"] = name
         return {"type": message["type"], "data": data}
 
     def _on_moved(self, moved):

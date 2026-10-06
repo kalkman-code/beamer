@@ -1,0 +1,1 @@
+PAIRING_QR_VISIBLE = False

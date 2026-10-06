@@ -4,7 +4,7 @@ strip in Resistance. Geometry is pages_win's, pure and tested; this file only pa
 from __future__ import annotations
 
 from PySide6.QtCore import QPointF, QRectF, QSize, Qt
-from PySide6.QtGui import QColor, QPainter, QPainterPath, QPen
+from PySide6.QtGui import QColor, QFontMetrics, QPainter, QPainterPath, QPen
 from PySide6.QtWidgets import QSizePolicy, QWidget
 
 import motion
@@ -81,7 +81,9 @@ class ArrangementDiagram(QWidget):
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.setAccessibleName("Arrangement")
-        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        policy = QSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+        policy.setHeightForWidth(True)
+        self.setSizePolicy(policy)
         self._state = None
         self._machines: list = []
         # Where each machine's screen is drawn now, by key: [angle, start, end, shown], moving between states.
@@ -90,7 +92,6 @@ class ArrangementDiagram(QWidget):
         self._marks = _marks([], False)
         self._unplaced = ""
         self._cap_text = ""
-        self.setFixedHeight(self._height())
 
     def sizeHint(self) -> QSize:
         return QSize(2 * round(SCREEN[0]) + round(GAP) + 2 * round(PAD), self._height())
@@ -107,23 +108,28 @@ class ArrangementDiagram(QWidget):
                                                     centre_pc=centre_pc)
         bounds_left = min([pc[0], *(rect[0] for rect in rects)])
         bounds_right = max([pc[0] + pc[2], *(rect[0] + rect[2] for rect in rects)])
-        scale = max(1.0, available * 0.68 / max(1.0, bounds_right - bounds_left))
+        scale = available * 0.9 / max(1.0, bounds_right - bounds_left)
         screen = (SCREEN[0] * scale, SCREEN[1] * scale)
         gap = GAP * scale
         pc, rects, height = pages_win.layout_rects(available, PAD, placed, screen, gap,
                                                    centre_pc=centre_pc)
+        metrics = QFontMetrics(theme.font(tokens.TYPE["small"], 600))
+        needed = max((metrics.boundingRect(QRectF(0, 0, max(1, rect[2] - 8), 10000).toRect(),
+                      int(Qt.TextFlag.TextWrapAnywhere), name).height() + 4
+                      for rect, name in [(pc, "This PC"), *[(rect, self._labels.get(key, OTHER))
+                                          for key, rect in zip(keys, rects)]]), default=screen[1])
+        if needed > min([pc[3], *(rect[3] for rect in rects)]):
+            screen = (screen[0], screen[1] * needed / max(1, min([pc[3], *(rect[3] for rect in rects)])))
+            pc, rects, height = pages_win.layout_rects(available, PAD, placed, screen, gap,
+                                                     centre_pc=centre_pc)
         return (pc[0] + PAD, pc[1], pc[2], pc[3]), {key: (rect[0] + PAD, *rect[1:]) for key, rect in zip(keys, rects)}, height
 
-    def _height(self) -> int:
-        _pc, _rects, height = self._drawing(float(self.width() or 2 * SCREEN[0] + GAP + 2 * PAD))
+    def _height(self, width: int | None = None) -> int:
+        _pc, _rects, height = self._drawing(float(width if width is not None else self.width() or 2 * SCREEN[0] + GAP + 2 * PAD))
         return round(PAD + height + PAD + (NOTE_ROW if self._unplaced else 0.0) + CAP_ROW * self._marks[("cap",)])
 
-    def resizeEvent(self, event) -> None:
-        super().resizeEvent(event)
-        # A narrow page shrinks the drawing, and the widget's height follows it.
-        height = self._height()
-        if height != self.height():
-            self.setFixedHeight(height)
+    def heightForWidth(self, width: int) -> int:
+        return self._height(width)
 
     def set_machines(self, machines, key_name, style, shortcut) -> None:
         """Each machine a dict: `key`, `label` ("" for the placeholder of an unpaired PC), `side` (""
@@ -170,14 +176,14 @@ class ArrangementDiagram(QWidget):
             self._places = {key: [a + (b - a) * t for a, b in zip(starts[key], end)] for key, end in ends.items()}
             self._marks = {key: start_marks.get(key, 0.0) + (targets.get(key, 0.0) - start_marks.get(key, 0.0)) * t
                            for key in set(targets) | set(start_marks)}
-            self.setFixedHeight(self._height())
+            self.updateGeometry()
             self.update()
 
         def settle():
             self._places = {key: [end[0] % 360.0, end[1], end[2], end[3]] for key, end in ends.items() if end[3] > 0.0
                             or key in self._labels}
             self._marks = {key: level for key, level in targets.items()}
-            self.setFixedHeight(self._height())
+            self.updateGeometry()
             self.update()
 
         if first:
@@ -234,14 +240,8 @@ class ArrangementDiagram(QWidget):
         painter.setFont(theme.font(tokens.TYPE["small"], 600))
         metrics = painter.fontMetrics()
         room = rect.adjusted(4, 2, -4, -2)
-        wrapped = Qt.AlignmentFlag.AlignCenter | Qt.TextFlag.TextWordWrap
-        needed = metrics.boundingRect(room.toRect(), wrapped, name)
-        if metrics.horizontalAdvance(name) > room.width() and needed.width() <= room.width() and needed.height() <= room.height():
-            # A screen sharing its side is half as wide: a two-word name goes onto two lines there.
-            painter.drawText(room, wrapped, name)
-            return
-        painter.drawText(rect, Qt.AlignmentFlag.AlignCenter,
-                         metrics.elidedText(name, Qt.TextElideMode.ElideRight, int(rect.width()) - 8))
+        wrapped = Qt.AlignmentFlag.AlignCenter | Qt.TextFlag.TextWrapAnywhere
+        painter.drawText(room, wrapped, name)
 
     @staticmethod
     def _segment(painter, rect, side, start, end, level, lead, width, gap=0.0) -> None:
@@ -324,8 +324,10 @@ class PushStrip(QWidget):
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
-        self.setFixedHeight(self.HEIGHT)
-        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.setMinimumHeight(self.HEIGHT)
+        policy = QSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        policy.setHeightForWidth(True)
+        self.setSizePolicy(policy)
         self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
         self._other = OTHER
         self._value = None
@@ -336,10 +338,21 @@ class PushStrip(QWidget):
     def minimumSizeHint(self) -> QSize:
         return QSize(160, self.HEIGHT)
 
+    def target_width(self, width=None):
+        metrics = QFontMetrics(theme.font(tokens.TYPE["small"], 600))
+        return min(max(self.MAC, metrics.horizontalAdvance(self._other) + 12),
+                   (self.width() if width is None else width) * .65)
+
+    def heightForWidth(self, width):
+        metrics = QFontMetrics(theme.font(tokens.TYPE["small"], 600))
+        room = QRectF(0, 0, max(1, self.target_width(width) - 8), 10000).toRect()
+        return max(self.HEIGHT, metrics.boundingRect(room, int(Qt.TextFlag.TextWrapAnywhere), self._other).height() + 4)
+
     def set_other_name(self, name: str) -> None:
         name = name or OTHER
         if name != self._other:
             self._other = name
+            self.updateGeometry()
             self.update()
 
     def set_edge(self, edge: str) -> None:
@@ -382,11 +395,12 @@ class PushStrip(QWidget):
             painter.scale(-1, 1)
         band = QRectF(0.5, 0.5, self.width() - 1.0, self.height() - 1.0)
         radius = tokens.RADIUS["field"]
-        edge_x = band.right() - self.MAC
+        target_width = self.target_width()
+        edge_x = band.right() - target_width
         painter.setPen(QPen(_colour("rule"), 1.0))
         painter.setBrush(_colour("well"))
         painter.drawRoundedRect(band, radius, radius)
-        mac = QRectF(edge_x, band.top(), self.MAC, band.height())
+        mac = QRectF(edge_x, band.top(), target_width, band.height())
         path = QPainterPath()
         path.addRoundedRect(mac, radius, radius)
         painter.setPen(Qt.PenStyle.NoPen)
@@ -404,14 +418,13 @@ class PushStrip(QWidget):
         self._pointer(painter, tip)
         painter.setPen(_colour("ink_3"))
         painter.setFont(theme.font(tokens.TYPE["small"], 600))
-        label = QRectF(edge_x, band.top(), self.MAC, band.height())
+        label = QRectF(edge_x, band.top(), target_width, band.height()).adjusted(4, 2, -4, -2)
         if self._mac_left:
             # Text drawn in the flipped frame would read backwards.
             painter.resetTransform()
             label = QRectF(self.width() - label.right(), label.top(), label.width(), label.height())
         painter.drawText(
-            label, Qt.AlignmentFlag.AlignCenter,
-            painter.fontMetrics().elidedText(self._other, Qt.TextElideMode.ElideRight, int(label.width()) - 4),
+            label, Qt.AlignmentFlag.AlignCenter | Qt.TextFlag.TextWrapAnywhere, self._other,
         )
         painter.end()
 

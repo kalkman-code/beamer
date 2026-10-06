@@ -1,0 +1,123 @@
+{
+  "app-id": "uk.co.kalkman.beamer",
+  "runtime": "org.kde.Platform",
+  "runtime-version": "6.11",
+  "sdk": "org.kde.Sdk",
+  "base": "io.qt.PySide.BaseApp",
+  "base-version": "6.11",
+  "command": "beamer",
+  "separate-locales": false,
+  "finish-args": [
+    "--socket=wayland",
+    "--socket=fallback-x11",
+    "--share=ipc",
+    "--share=network",
+    "--device=dri",
+    "--nofilesystem=host:reset",
+    "--no-talk-name=com.canonical.AppMenu.Registrar",
+    "--no-talk-name=org.kde.KGlobalSettings",
+    "--no-talk-name=org.kde.kconfig.notify",
+    "--talk-name=org.kde.StatusNotifierWatcher",
+    "--env=PYTHONPATH=/app/share/beamer/win_app:/app/share/beamer",
+    "--env=PYTHONNOUSERSITE=1"
+  ],
+  "build-options": {
+    "env": {
+      "BASEAPP_REMOVE_WEBENGINE": "1",
+      "BASEAPP_DISABLE_NUMPY": "1"
+    }
+  },
+  "cleanup": ["/include", "/lib/pkgconfig", "/lib/*.a", "/lib/*.la"],
+  "modules": [
+    {
+      "name": "libei-scanner-python",
+      "buildsystem": "simple",
+      "cleanup": ["*"],
+      "build-commands": ["pip3 install --verbose --no-index --no-deps --no-build-isolation --prefix=/app MarkupSafe==3.0.3 Jinja2==3.1.6"],
+      "sources": [
+        {"type": "file", "url": "https://files.pythonhosted.org/packages/7e/99/7690b6d4034fffd95959cbe0c02de8deb3098cc577c67bb6a24fe5d7caa7/markupsafe-3.0.3.tar.gz", "sha256": "722695808f4b6457b320fdc131280796bdceb04ab50fe1795cd540799ebe1698"},
+        {"type": "file", "url": "https://files.pythonhosted.org/packages/62/a1/3d680cbfd5f4b8f15abc1d571870c5fc3e594bb582bc3b64ea099db13e56/jinja2-3.1.6-py3-none-any.whl", "sha256": "85ece4451f492d0c13c5dd7c13a64681a86afae63a5f347908daf103ce6d2f67"}
+      ],
+      "build-options": {"env": {"PIP_FIND_LINKS": "."}}
+    },
+    {
+      "name": "libei",
+      "buildsystem": "meson",
+      "config-opts": ["-Dtests=disabled", "-Dliboeffis=disabled", "-Dlibeis=disabled", "-Ddocumentation=[]"],
+      "sources": [{
+        "type": "archive",
+        "url": "https://gitlab.freedesktop.org/libinput/libei/-/archive/1.6.0/libei-1.6.0.tar.bz2",
+        "sha256": "5ed6078fa63afd554cc04b1001675615da0ed8fe23b80492ab63403140b5a830"
+      }]
+    },
+    {
+      "name": "python3-pycparser",
+      "buildsystem": "simple",
+      "build-commands": ["pip3 install --verbose --exists-action=i --no-index --no-deps --no-build-isolation --prefix=/app pycparser==2.23"],
+      "sources": [{"type": "file", "url": "https://files.pythonhosted.org/packages/a0/e3/59cd50310fc9b59512193629e1984c1f95e5c8ae6e5d8c69532ccc65a7fe/pycparser-2.23-py3-none-any.whl", "sha256": "e5c6e8d3fbad53479cab09ac03729e0a9faf2bee3db8208a550daf5af81a5934"}],
+      "build-options": {"env": {"PIP_FIND_LINKS": "."}}
+    },
+    {
+      "name": "python3-cffi",
+      "buildsystem": "simple",
+      "build-commands": ["pip3 install --verbose --exists-action=i --no-index --no-deps --no-build-isolation --prefix=/app cffi==2.0.0"],
+      "sources": [{"type": "file", "url": "https://files.pythonhosted.org/packages/eb/56/b1ba7935a17738ae8453301356628e8147c79dbb825bcbc73dc7401f9846/cffi-2.0.0.tar.gz", "sha256": "44d1b5909021139fe36001ae048dbdde8214afa20200eda0f64c068cac5d5529"}],
+      "build-options": {"env": {"PIP_FIND_LINKS": "."}}
+    },
+    {
+      "name": "python3-pynacl",
+      "buildsystem": "simple",
+      "build-commands": ["pip3 install --verbose --exists-action=i --no-index --no-deps --no-build-isolation --prefix=/app PyNaCl==1.6.2"],
+      "sources": [{"type": "file", "url": "https://files.pythonhosted.org/packages/d9/9a/4019b524b03a13438637b11538c82781a5eda427394380381af8f04f467a/pynacl-1.6.2.tar.gz", "sha256": "018494d6d696ae03c7e656e5e74cdfd8ea1326962cc401bcf018f1ed8436811c"}],
+      "build-options": {"env": {"PIP_FIND_LINKS": "."}}
+    },
+    {
+      "name": "python3-jeepney",
+      "buildsystem": "simple",
+      "build-commands": ["pip3 install --verbose --exists-action=i --no-index --no-deps --no-build-isolation --prefix=/app jeepney==0.9.0"],
+      "sources": [{"type": "file", "url": "https://files.pythonhosted.org/packages/b2/a3/e137168c9c44d18eff0376253da9f1e9234d0239e0ee230d2fee6cea8e55/jeepney-0.9.0-py3-none-any.whl", "sha256": "97e5714520c16fc0a45695e5365a2e11b81ea79bba796e26f9f1d178cb182683"}],
+      "build-options": {"env": {"PIP_FIND_LINKS": "."}}
+    },
+    {
+      "name": "python3-six",
+      "buildsystem": "simple",
+      "build-commands": ["pip3 install --verbose --exists-action=i --no-index --no-deps --no-build-isolation --prefix=/app six==1.17.0"],
+      "sources": [{"type": "file", "url": "https://files.pythonhosted.org/packages/b7/ce/149a00dd41f10bc29e5921b496af8b574d8413afcd5e30dfa0ed46c2cc5e/six-1.17.0-py2.py3-none-any.whl", "sha256": "4721f391ed90541fddacab5acf947aa0d3dc7d27b2e1e8eda2be8970586c3274"}],
+      "build-options": {"env": {"PIP_FIND_LINKS": "."}}
+    },
+    {
+      "name": "python3-xlib",
+      "buildsystem": "simple",
+      "build-commands": ["pip3 install --verbose --exists-action=i --no-index --no-deps --no-build-isolation --prefix=/app python-xlib==0.33"],
+      "sources": [{"type": "file", "url": "https://files.pythonhosted.org/packages/fc/b8/ff33610932e0ee81ae7f1269c890f697d56ff74b9f5b2ee5d9b7fa2c5355/python_xlib-0.33-py2.py3-none-any.whl", "sha256": "c3534038d42e0df2f1392a1b30a15a4ff5fdc2b86cfa94f072bf11b10a164398"}],
+      "build-options": {"env": {"PIP_FIND_LINKS": "."}}
+    },
+    {
+      "name": "beamer",
+      "buildsystem": "simple",
+      "build-commands": [
+        "install -d /app/share/beamer",
+        "cp -r core win_app VERSION /app/share/beamer/",
+        "install -Dm755 flatpak/beamer /app/bin/beamer",
+        "install -Dm644 tools/flatpak_import_probe.py /app/share/beamer/tools/flatpak_import_probe.py",
+        "install -Dm644 tools/wayland_proof.py /app/share/beamer/tools/wayland_proof.py",
+        "install -Dm644 flatpak/uk.co.kalkman.beamer.desktop /app/share/applications/uk.co.kalkman.beamer.desktop",
+        "sed -e \"s/@VERSION@/$(cat VERSION)/\" -e \"s/@TIMESTAMP@/$(date +%s)/\" flatpak/uk.co.kalkman.beamer.metainfo.xml > metainfo.xml",
+        "install -Dm644 metainfo.xml /app/share/metainfo/uk.co.kalkman.beamer.metainfo.xml",
+        "install -Dm644 Beamer.svg /app/share/icons/hicolor/scalable/apps/uk.co.kalkman.beamer.svg",
+        "install -Dm644 LICENSE /app/share/licenses/uk.co.kalkman.beamer/LICENSE",
+        "/app/cleanup-BaseApp.sh"
+      ],
+      "sources": [
+        {"type": "dir", "path": "core", "dest": "core", "skip": ["tests", "__pycache__"]},
+        {"type": "dir", "path": "win_app", "dest": "win_app", "skip": ["tests", "__pycache__", ".venv", "build", "dist", "Output"]},
+        {"type": "dir", "path": "flatpak", "dest": "flatpak"},
+        {"type": "file", "path": "tools/flatpak_import_probe.py", "dest": "tools"},
+        {"type": "file", "path": "tools/wayland_proof.py", "dest": "tools"},
+        {"type": "file", "path": "VERSION"},
+        {"type": "file", "path": "LICENSE"},
+        {"type": "file", "path": "Beamer.svg"}
+      ]
+    }
+  ]
+}

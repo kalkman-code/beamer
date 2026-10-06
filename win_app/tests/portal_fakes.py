@@ -28,6 +28,7 @@ class FakeBus:
     def __init__(self, versions=None) -> None:
         self.unique_name = ":1.42"
         self.versions = versions or {}
+        self.failures = {}
         self.answers = {}
         self.returns = {}
         self.calls = []
@@ -42,6 +43,8 @@ class FakeBus:
             raise portal.PortalError("the connection is closed")
         with self._lock:
             self.calls.append((interface, method, body))
+        if method in self.failures:
+            raise self.failures[method]
         if interface == portal.PROPERTIES and method == "Get":
             version = self.versions.get(body[0])
             if version is None:

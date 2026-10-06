@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+set -euo pipefail
+# Flatpak renames the socket to wayland-0 inside; external peers need the compositor's host name.
+exec flatpak run --command=python3 \
+    --talk-name=org.gnome.Mutter.RemoteDesktop --talk-name=org.freedesktop.Flatpak \
+    --filesystem="$BEAMER_PROOF_DIR" --filesystem="$BEAMER_FLATPAK_PROOF_TOOLS:ro" \
+    --env="BEAMER_PROOF_DIR=$BEAMER_PROOF_DIR" \
+    --env="BEAMER_FLATPAK_PROOF_TOOLS=$BEAMER_FLATPAK_PROOF_TOOLS" \
+    --env="BEAMER_PROOF_WAYLAND_DISPLAY=$WAYLAND_DISPLAY" \
+    --env="WAYLAND_DISPLAY=$WAYLAND_DISPLAY" --env=XDG_SESSION_TYPE=wayland \
+    --env="XDG_STATE_HOME=$BEAMER_PROOF_DIR/state" \
+    --env="OBSERVER_PYTHON=$BEAMER_FLATPAK_PROOF_TOOLS/flatpak-proof/observer" \
+    --env="PATH=$BEAMER_FLATPAK_PROOF_TOOLS/flatpak-proof:/app/bin:/usr/bin" \
+    uk.co.kalkman.beamer /app/share/beamer/tools/wayland_proof.py "${@:2}"

@@ -96,6 +96,7 @@ PALETTES = {
     "ocean": ("#288cff", "#6446ff", "#1eb9aa", "#3c6eff"),
     "sunset": ("#ff7828", "#ff3264", "#ffb43c", "#f03278"),
     "mono": ("#ebebeb", "#969696", "#ebebeb"),
+    "aurora": ("#53dc91", "#9572eb", "#43c5b4"),
 }
 
 # Letter spacing as a fraction of the font size, for the uppercase tracked labels.
@@ -117,6 +118,16 @@ RACK_GAP = 1.0
 MIN_WINDOW = {"mac": (640, 540), "windows": (640, 600)}
 READING_WIDTH = 560.0
 PAGE_CONTENT_WIDTH = 960.0
+# The page column is this share of the free width (window minus sidebar), clamped between the
+# minimum and the maximum, centred, and never wider than the free width itself.
+PAGE_CONTENT_MIN = 960.0
+PAGE_CONTENT_MAX = 1600.0
+PAGE_CONTENT_SHARE = 0.75
+SIDE_BY_SIDE_GAP = 24.0
+CROSSING_ARRANGEMENT_MIN_WIDTH = 254.0
+CROSSING_WAYS_MIN_WIDTH = 354.0
+DESIGN_TILE_SETS_MIN_WIDTH = 258.0
+DESIGN_STYLE_CONTROLS_MIN_WIDTH = 240.0
 
 # Mass-spring parameters (mass 1) for everything that moves. The notch island integrates two of
 # these, width and depth; a trackpad tick adds `tick_velocity` points per second to the width.

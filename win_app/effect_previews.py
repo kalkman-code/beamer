@@ -6,8 +6,9 @@ from __future__ import annotations
 
 import logging
 import time
+import math
 
-from PySide6.QtCore import QEvent, QObject, QRectF, Qt, QTimer
+from PySide6.QtCore import QEvent, QObject, QRectF, QSize, Qt, QTimer
 from PySide6.QtGui import QColor, QImage, QPainter, QPainterPath, QPen
 from PySide6.QtWidgets import QSizePolicy, QWidget
 
@@ -27,7 +28,7 @@ _LAYERS = {}
 STILL_HEIGHT = 56
 # A tile shows where the style plays rather than the whole scene too small to see: this many scene
 # points across, centred on the crossing at each place, the corner framed with room above the screens.
-STILL_VIEW_W = 480.0
+STILL_VIEW_W = 240.0
 STILL_CENTRE = {"edge": (effects.PREVIEW_SCREEN[0] + effects.PREVIEW_GAP / 2.0, effects.PREVIEW_SCREEN[1] * 0.45),
                 "corner": (effects.PREVIEW_SCREEN[0] + effects.PREVIEW_GAP / 2.0, 40.0)}
 # A switch plays round a still pointer on one screen: its tile shows that part of the scene part-way
@@ -76,6 +77,7 @@ def paint_scene(painter: QPainter, rect: QRectF, view: QRectF, scene: dict, poin
     top = rect.y() + (rect.height() - height * scale) / 2.0
     painter.save()
     painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+    local_transform = painter.transform()
     painter.setClipRect(QRectF(left, top, width * scale, height * scale))
     painter.translate(left, top)
     painter.scale(scale, scale)
@@ -84,7 +86,10 @@ def paint_scene(painter: QPainter, rect: QRectF, view: QRectF, scene: dict, poin
     for x, y, w, h, os_name in scene["screens"]:
         painter.setPen(QPen(QColor(theme.colour("rule")), 1.0 / scale))
         painter.setBrush(QColor(theme.colour("well")))
-        painter.drawRoundedRect(QRectF(x, y, w, h), radius, radius)
+        screen = QRectF(x, y, w, h)
+        if not labels:
+            screen = screen.intersected(view).adjusted(1 / scale, 1 / scale, -1 / scale, -1 / scale)
+        painter.drawRoundedRect(screen, radius, radius)
         if labels:
             painter.setPen(QColor(theme.colour("ink_3")))
             painter.setFont(theme.eyebrow_font())
@@ -119,7 +124,7 @@ def paint_scene(painter: QPainter, rect: QRectF, view: QRectF, scene: dict, poin
     finally:
         layer_painter.end()
     painter.save()
-    painter.resetTransform()
+    painter.setTransform(local_transform)
     painter.translate(left, top)
     painter.drawImage(0, 0, layer)
     painter.restore()
@@ -162,9 +167,19 @@ class EffectStill(QWidget):
         self.effect_size = "medium"
         self._image = None
         self.playing_since = None
-        self.setFixedHeight(STILL_HEIGHT)
-        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        policy = QSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        policy.setHeightForWidth(True)
+        self.setSizePolicy(policy)
         self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+
+    def hasHeightForWidth(self) -> bool:
+        return True
+
+    def heightForWidth(self, width: int) -> int:
+        return max(1, round(width / 2))
+
+    def sizeHint(self):
+        return QSize(STILL_HEIGHT * 2, STILL_HEIGHT)
 
     def set_palette(self, palette) -> None:
         if tuple(palette) != self.palette:
@@ -206,8 +221,8 @@ class EffectStill(QWidget):
             painter.end()
             return
         ratio = self.devicePixelRatioF()
-        size = self.size() * ratio
-        if self._image is None or self._image.size() != size:
+        size = QSize(math.ceil(self.width() * ratio), math.ceil(self.height() * ratio))
+        if self._image is None or self._image.size() != size or self._image.devicePixelRatio() != ratio:
             self._image = QImage(size, QImage.Format.Format_ARGB32_Premultiplied)
             self._image.setDevicePixelRatio(ratio)
             self._image.fill(Qt.GlobalColor.transparent)
@@ -223,8 +238,15 @@ class EffectStill(QWidget):
         painter.end()
 
     def _paint_still(self, painter: QPainter, t: float) -> None:
+        if self.playing_since is None and self.effect_id == "beam" and self.place == "edge":
+            t = 1.45
         scene = effects.preview_scene(effects.preview_effect(self.effect_id), t, self.place, self.palette,
                                       system_reduced_motion(), theme.is_dark(), self.pace, self.effect_size)
+        if self.playing_since is None and self.effect_id not in ("glow", "beam"):
+            # A representative still includes the landing; hover keeps the real timed loop.
+            arrival = effects.preview_scene(effects.preview_effect(self.effect_id), 2.35, self.place, self.palette,
+                                            system_reduced_motion(), theme.is_dark(), self.pace, self.effect_size)
+            scene["pens"] += arrival["pens"][1:]
         width = STILL_VIEW_W
         view_h = min(effects.PREVIEW_SCREEN[1], width * self.height() / max(1, self.width()))
         centre = STILL_CENTRE[self.place]

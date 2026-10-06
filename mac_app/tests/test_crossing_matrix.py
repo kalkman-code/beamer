@@ -284,7 +284,7 @@ class WhatIsSharedTests(unittest.TestCase):
 
         line = pages.SCOPE["crossing"]
         self.assertNotIn("Two are shared", line)
-        self.assertIn("Only which side each machine is on is shared", line)
+        self.assertIn("Its side is shared with that machine", line)
 
 
 def pc_at_edge(duo, edge):

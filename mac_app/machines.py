@@ -27,6 +27,7 @@ class Row:
     in_use: bool
     drives: bool
     driven: bool
+    phone: bool = False
 
 
 def platform_name(platform: str) -> str:
@@ -43,7 +44,7 @@ def row(entry: dict, label: str, live: bool, kind: str, status: str, here: bool,
     return Row(
         entry["token"], label, platform_name(entry.get("platform", "")), address,
         _state(entry, label, live, kind, status, here, driving, inbound, has_link), entry.get("in_use", True) is True,
-        entry.get("send") is True, entry.get("allow_drive") is True,
+        entry.get("send") is True, entry.get("allow_drive") is True, port == 0,
     )
 
 

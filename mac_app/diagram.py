@@ -4,6 +4,7 @@ far the pointer is pushed past the edge before it gives."""
 
 from __future__ import annotations
 
+import math
 import AppKit
 import Quartz
 import objc
@@ -33,6 +34,21 @@ def _text_layer(size, ink, align=Quartz.kCAAlignmentCenter):
     layer.setTruncationMode_(Quartz.kCATruncationEnd)
     layer.setContentsScale_(2.0)
     return layer
+
+
+def _text_height(text, font, width):
+    return AppKit.NSAttributedString.alloc().initWithString_attributes_(
+        text, {AppKit.NSFontAttributeName: font}
+    ).boundingRectWithSize_options_((max(1, width), 10000), AppKit.NSStringDrawingUsesLineFragmentOrigin).size.height
+
+
+def _fit_text(layer, text, frame):
+    x, y, width, height = frame
+    layer.setString_(text)
+    layer.setWrapped_(True)
+    layer.setTruncationMode_(Quartz.kCATruncationNone)
+    text_height = _text_height(text, layer.font(), width)
+    layer.setFrame_(((x, y + max(0, (height - text_height) / 2)), (width, text_height)))
 
 
 def _box(fill=None, stroke=None, radius=0.0):
@@ -148,15 +164,19 @@ class ArrangementDiagram(AppKit.NSView):
         bounds = self.bounds().size
         if bounds.width <= 0:
             return
-        this, frames = pages.diagram_layout(bounds.width, bounds.height - self.LEGEND, [pages.placement(m) for m in machines])
+        font = theme.font(theme.TYPE["small"], 500)
+        width = min(bounds.width - 24, 24 + _text_width(key_text, theme.font(theme.TYPE["small"], 600)))
+        how = _text_width(key_how, font) + 4
+        stacked = bool(shortcut and width + 8 + how > bounds.width - 24)
+        legend = self.LEGEND + (20 if stacked else 0)
+        this, frames = pages.diagram_layout(bounds.width, bounds.height - legend, [pages.placement(m) for m in machines])
         # With one machine nothing is chosen between, and it looks as the one-machine drawing did.
         several = len(machines) > 1
         motion.transaction(animate)
         self.this.setFrame_(_rect(this))
-        self.this_label.setString_("This Mac")
         line = theme.TYPE["small"] + 4
         x, y, w, h = this
-        self.this_label.setFrame_(((x + 6, y + (h - line) / 2 + (4 if has_notch else 0)), (w - 12, line)))
+        _fit_text(self.this_label, "This Mac", (x + 6, y + (4 if has_notch else 0), w - 12, h))
         keys = {machine["key"] for machine in machines}
         for key in [key for key in self.screens if key not in keys]:
             for layer in self.screens.pop(key):
@@ -172,9 +192,8 @@ class ArrangementDiagram(AppKit.NSView):
             theme.tint(label, foreground="ink" if strong else "ink_3")
             label.setFont_(theme.font(theme.TYPE["small"], 600 if strong else 500))
             screen.setFrame_(_rect(frame))
-            label.setString_(machine["label"])
             fx, fy, fw, fh = frame
-            label.setFrame_(((fx + 4, fy + (fh - line) / 2), (fw - 8, line)))
+            _fit_text(label, machine["label"], (fx + 4, fy, fw - 8, fh))
         marks, notch = pages.diagram_marks(this, machines)
         for key in [key for key in self.marks if key not in marks]:
             self.marks.pop(key).removeFromSuperlayer()
@@ -196,19 +215,18 @@ class ArrangementDiagram(AppKit.NSView):
         shortcut = shortcut and bool(key_text)
         self.key_label.setString_(key_text)
         self.key_how.setString_(key_how)
-        font = theme.font(theme.TYPE["small"], 500)
-        width = min(bounds.width - 20, 24 + _text_width(key_text, theme.font(theme.TYPE["small"], 600)))
-        top = bounds.height - 36
+        top = bounds.height - legend
         self.key.setFrame_(((12, top), (width, 24)))
         self.key_label.setFrame_(((0, (24 - line) / 2), (width, line)))
-        how = _text_width(key_how, font) + 4
-        self.key_how.setFrame_(((12 + width + 8, top + (24 - line) / 2), (how, line)))
+        how_left = 12 if stacked else 12 + width + 8
+        how_top = top + 26 if stacked else top + (24 - line) / 2
+        self.key_how.setFrame_(((how_left, how_top), (min(how, bounds.width - 12 - how_left), line)))
         for layer in (self.key, self.key_how):
             layer.setOpacity_(1.0 if shortcut else 0.0)
         # The machines with no side, on the key cap's line, from wherever the legend ends.
-        start = 12 + width + 8 + how + 16 if shortcut else 12
+        start = how_left + how + 16 if shortcut else 12
         self.not_placed.setString_(pages.not_placed(machines))
-        self.not_placed.setFrame_(((start, top + (24 - line) / 2), (max(0, bounds.width - 12 - start), line)))
+        self.not_placed.setFrame_(((min(start, bounds.width - 12), how_top), (max(0, bounds.width - 12 - start), line)))
         Quartz.CATransaction.commit()
 
     @objc.python_method
@@ -264,7 +282,8 @@ class PushStrip(AppKit.NSView):
     @objc.python_method
     def setup(self):
         self.setTranslatesAutoresizingMaskIntoConstraints_(False)
-        self.heightAnchor().constraintEqualToConstant_(self.HEIGHT).setActive_(True)
+        self.minimum_height = self.heightAnchor().constraintEqualToConstant_(self.HEIGHT)
+        self.minimum_height.setActive_(True)
         self.setWantsLayer_(True)
         root = self.layer()
         root.setCornerRadius_(3)
@@ -324,18 +343,19 @@ class PushStrip(AppKit.NSView):
         width, height = self.bounds().size.width, self.bounds().size.height
         if width <= 0:
             return
-        edge = round(width * self.EDGE_AT)
+        edge = max(round(width * self.EDGE_AT), 20 + _text_width("THIS MAC", self.this_label.font()))
+        needed_height = max(self.HEIGHT, math.ceil(_text_height(
+            self.other_name.upper(), self.other_label.font(), width - edge - 20)) + 8)
+        if self.minimum_height.constant() != needed_height:
+            self.minimum_height.setConstant_(needed_height)
         # The full 500 px stops short of the other machine's name, so the name is never under the push.
-        room = width - edge - 120
+        room = max(0, width - edge - min(120, _text_width(self.other_name.upper(), self.other_label.font()) + 20))
         depth = room * self.fraction
         motion.transaction(animate)
         self.this.setFrame_(((0, 0), (edge, height)))
         self.edge.setFrame_(((edge - 1, 0), (2, height)))
         self.fill.setFrame_(((edge, 0), (depth, height)))
         self.pointer.setPosition_((edge + depth - 1, (height - 16) / 2))
-        line = theme.TYPE["eyebrow"] + 4
-        self.this_label.setString_("THIS MAC")
-        self.other_label.setString_(self.other_name.upper())
-        self.this_label.setFrame_(((10, (height - line) / 2), (edge - 20, line)))
-        self.other_label.setFrame_(((edge + 10, (height - line) / 2), (width - edge - 20, line)))
+        _fit_text(self.this_label, "THIS MAC", (10, 0, edge - 20, height))
+        _fit_text(self.other_label, self.other_name.upper(), (edge + 10, 0, width - edge - 20, height))
         Quartz.CATransaction.commit()

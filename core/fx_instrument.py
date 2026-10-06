@@ -727,6 +727,8 @@ EFFECTS = [
 ]
 
 PACKS = {
+    "ruby": ("Ruby", ["#ef4471", "#d32859", "#ff9ab5"]),
+    "cobalt": ("Cobalt", ["#478df5", "#2a6dd3", "#a4caff"]),
     "phosphor": ("Phosphor", ["#3dff7f", "#1f9e52", "#caffdc"]),
     "sodium": ("Sodium", ["#ffa51f", "#c46a12", "#ffe0a3"]),
     "contrast": ("Contrast", ["#f0e442", "#56b4e9", "#ffffff"]),

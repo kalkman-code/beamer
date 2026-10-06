@@ -499,6 +499,16 @@ class SavingTests(Folder):
         super().setUp()
         self.config = app_config.load_config(self.path)
 
+    def test_trigger_changes_cannot_overwrite_an_existing_jump_key(self):
+        settings = app_config.load_settings(self.path)
+        settings["peers"][0]["jump_key"] = "alt+f13"
+        app_config.write_settings(self.path, settings)
+        before = self.path.read_bytes()
+        for key in ("alt_r", "f13"):
+            with self.subTest(key=key), self.assertRaises(app_config.ConfigError):
+                app_config.save_config(self.path, replace(self.config, trigger_key=key))
+            self.assertEqual(self.path.read_bytes(), before)
+
     def test_a_save_round_trips_every_field_the_app_keeps(self):
         changed = replace(self.config, glow_style="glow", glow_colour="mono",
                           crossing_methods=["part", "shortcut"], crossing_edge_parts=["middle"],

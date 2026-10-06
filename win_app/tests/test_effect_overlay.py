@@ -3,6 +3,7 @@ to draw and in what state, and the overlay window's attributes."""
 
 import math
 import os
+import subprocess
 import unittest
 from dataclasses import replace
 from types import SimpleNamespace
@@ -79,6 +80,17 @@ class ReplayTests(unittest.TestCase):
         pen = effects.Pen()
         pen.ops = list(ops)
         return pen
+
+    @unittest.skipUnless(sys.platform == "win32", "Windows raster budget")
+    def test_replay_sets_serial_rasterisation_before_the_first_paint(self):
+        env = dict(os.environ)
+        env.pop("QT_NO_GUI_THREADPOOL", None)
+        result = subprocess.run(
+            [sys.executable, "-c", "import sys; sys.path.insert(0, 'win_app'); import effect_overlay, os; print(os.environ.get('QT_NO_GUI_THREADPOOL'))"],
+            cwd=os.path.dirname(os.path.dirname(effect_overlay.__file__)), env=env,
+            capture_output=True, text=True, check=True,
+        )
+        self.assertEqual(result.stdout.strip(), "1")
 
     def test_every_op_restores_opacity_and_composition(self):
         linear = gradient("linear", (0, 0, 10, 0))

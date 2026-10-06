@@ -91,8 +91,10 @@ class DesignGroupsTest(unittest.TestCase):
 
     def test_colours_are_grouped_as_the_styles_are(self):
         groups = pages_win.colour_groups()
-        self.assertEqual([title for title, _items in groups], [title for title, _items in pages_win.style_groups()])
-        self.assertEqual(tuple(value for _t, items in groups for value, _name in items), app_config.GLOW_COLOURS)
+        self.assertEqual([title for title, _items in groups], ['Light', 'Mono', 'Membrane', 'Sparks', 'Instrument', 'Folio', 'Selvedge', 'Bright'])
+        self.assertEqual(dict(groups)['Mono'], tuple((key, name) for key, (name, _stops) in effects.MONO_PACKS.items()))
+        self.assertTrue(all(len(items) == 5 for title, items in groups))
+        self.assertEqual(set(value for _t, items in groups for value, _name in items), set(app_config.GLOW_COLOURS))
 
     def test_effects_that_cannot_load_leave_only_the_classic_choices(self):
         real = effects._load
@@ -106,7 +108,7 @@ class DesignGroupsTest(unittest.TestCase):
         finally:
             effects._load = real
         self.assertEqual([title for title, _items in styles], ["Light"])
-        self.assertEqual([title for title, _items in colours], ["Light"])
+        self.assertEqual([title for title, _items in colours], ["Light", "Mono"])
 
     def test_only_the_new_effects_count_as_effects(self):
         self.assertFalse(pages_win.is_effect("glow"))
@@ -356,13 +358,15 @@ class CrossingPageTest(unittest.TestCase):
     def test_crossing_controls_and_diagram_stay_in_a_capped_column(self):
         from PySide6.QtWidgets import QApplication
 
+        import tokens
+
         self.page.resize(2560, 1440)
         self.page.show()
         self.page._select_page("crossing")
         QApplication.processEvents()
 
-        self.assertLessEqual(self.page.arrangement_diagram.width(), 960)
-        self.assertLessEqual(max(button.width() for button in self.page.edge_choice._buttons.values()), 240)
+        self.assertLessEqual(self.page.arrangement_diagram.width(), tokens.PAGE_CONTENT_MAX)
+        self.assertLessEqual(max(button.width() for button in self.page.edge_choice._buttons.values()), tokens.PAGE_CONTENT_MAX / 4)
 
     def test_jump_placeholder_uses_body_text_with_the_hint_below(self):
         from PySide6.QtWidgets import QApplication
@@ -416,7 +420,7 @@ class CrossingPageTest(unittest.TestCase):
         self.assertTrue(line(True, True, False, False, True, False, None).startswith("This PC does not drive the other machine"))
         self.assertTrue(line(True, True, True, False, True, False, None).startswith("Not connected to the other machine"))
         self.assertTrue(line(True, True, True, True, False, False, None).startswith("Only the shortcut"))
-        self.assertTrue(line(True, True, True, True, True, True, None).startswith("Paused."))
+        self.assertTrue(line(True, True, True, True, True, True, None).startswith("Pauses pointer crossing"))
         self.assertEqual(line(True, True, True, True, True, False, "Keynote"),
                          "Held: an app is full screen.")
         self.assertEqual(line(True, True, True, True, True, False, None), "On. Pause it to lean on an edge without switching.")

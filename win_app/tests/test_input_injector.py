@@ -278,6 +278,21 @@ class PlanKeyInputsNamedKeyTests(unittest.TestCase):
         plan = plan_key_inputs("not_a_real_key", True, set(), {}, fake_vk_lookup, fake_scan_lookup)
         self.assertEqual(plan, [])
 
+    def test_release_all_releases_a_held_named_non_modifier_key(self):
+        sent = []
+        input_injector._mods_down.clear()
+        input_injector._char_vk_down.clear()
+        input_injector._named_down.clear()
+        input_injector._buttons_down.clear()
+        with mock.patch.object(input_injector, "_vk_key_scan", lambda _ch: -1), \
+             mock.patch.object(input_injector, "_map_virtual_key", lambda _vk: 0x48), \
+             mock.patch.object(input_injector, "_send_input", lambda *items: sent.extend(items)):
+            input_injector.inject_key("left", True)
+            input_injector.release_all()
+        self.assertEqual(len(sent), 2)
+        self.assertEqual(sent[0].union.ki.dwFlags, KEYEVENTF_EXTENDEDKEY)
+        self.assertEqual(sent[1].union.ki.dwFlags, KEYEVENTF_EXTENDEDKEY | KEYEVENTF_KEYUP)
+
 
 class PlanScrollUnitsLineModeTests(unittest.TestCase):
     def test_line_mode_scales_by_120_and_never_carries_a_remainder(self):

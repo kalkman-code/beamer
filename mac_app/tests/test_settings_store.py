@@ -15,6 +15,20 @@ from settings_store import SettingsError, SettingsStore, config_to_raw
 
 
 class SettingsStoreTests(unittest.TestCase):
+    def test_all_original_saved_colours_keep_their_id_and_stops(self):
+        import notch_beam
+        fixture = Path(__file__).resolve().parents[2] / 'core/tests/colour_packs_rc3.json'
+        palettes = json.loads(fixture.read_text())
+        with tempfile.TemporaryDirectory() as directory:
+            store = SettingsStore(Path(directory) / 'settings.json')
+            for value, stops in palettes.items():
+                with self.subTest(value=value):
+                    raw = {**self.valid_raw(), 'crossing': {'glow_colour': value}}
+                    store.save(raw)
+                    saved = store.load().crossing['glow_colour']
+                    self.assertEqual(saved, value)
+                    self.assertEqual(notch_beam.palette_values(saved), stops)
+
     def valid_raw(self):
         return {
             "host": "192.0.2.10",
@@ -175,6 +189,18 @@ class SettingsStoreTests(unittest.TestCase):
             self.assertEqual(loaded.trigger_style, "double_tap")
             self.assertEqual(loaded.crossing, config_module.DEFAULT_CROSSING)
             self.assertIsNot(loaded.crossing, config_module.DEFAULT_CROSSING)
+
+    def test_fresh_and_partial_crossing_use_colourful_but_keep_saved_signal(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "settings.json"
+            store = SettingsStore(path)
+            fresh = store.save(self.valid_raw())
+            self.assertEqual(fresh.crossing["glow_colour"], "colourful")
+
+            raw = config_to_raw(fresh)
+            raw["crossing"]["glow_colour"] = "signal"
+            store.save(raw)
+            self.assertEqual(SettingsStore(path).load().crossing["glow_colour"], "signal")
 
     def test_showing_where_the_pointer_lands_is_on_for_an_old_config_and_round_trips_off(self):
         with tempfile.TemporaryDirectory() as directory:

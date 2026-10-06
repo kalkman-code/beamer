@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+set -euo pipefail
+exec flatpak-spawn --host --directory="$BEAMER_FLATPAK_PROOF_TOOLS" \
+    --env="WAYLAND_DISPLAY=$BEAMER_PROOF_WAYLAND_DISPLAY" --env=XDG_SESSION_TYPE=wayland \
+    /usr/bin/python3 "$BEAMER_FLATPAK_PROOF_TOOLS/wayland_observer.py" "${@:2}"

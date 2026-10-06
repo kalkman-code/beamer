@@ -12,6 +12,7 @@ import threading
 import time
 import types
 import unittest
+from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
@@ -317,6 +318,47 @@ class ControllerTests(unittest.TestCase):
         returned = self._tap(FakeQuartz.kCGEventKeyDown, event)
         self.assertIs(returned, event)
         self.assertTrue(self.controller.outbound.empty())
+
+    def test_shortcut_off_passes_the_key_without_switching_in_each_input_state(self):
+        for style in ("double_tap", "hold"):
+            for state in ("local", "receiving", "redirected"):
+                with self.subTest(style=style, state=state):
+                    cfg = crossing_config(PAIRED_TOKEN, methods=["edge"])
+                    cfg.trigger_style = style
+                    controller = make_controller(self.clock, cfg)
+                    self.addCleanup(controller.stop_event.set)
+                    bring_up(controller)
+                    homes = []
+                    controller.send_peer_home = lambda: homes.append(True) or True
+                    if state == "receiving":
+                        controller.receiving = True
+                    elif state == "redirected":
+                        redirect_to(controller)
+                    for flags in (FakeQuartz.kCGEventFlagMaskAlternate, 0) * 2:
+                        event = {FakeQuartz.kCGKeyboardEventKeycode: 0x3D, "flags": flags}
+                        returned = controller._event_tap_callback(None, FakeQuartz.kCGEventFlagsChanged, event, None)
+                        if state == "redirected":
+                            self.assertIsNone(returned)
+                        else:
+                            self.assertIs(returned, event)
+                    self.assertEqual(controller.receiving, state == "receiving")
+                    self.assertEqual(controller.redirecting, state == "redirected")
+                    self.assertEqual(homes, [])
+                    messages = drain(controller)
+                    expected = [{"type": kind, "data": {"key": "alt_r"}}
+                                for kind in (protocol.MSG_KEYDOWN, protocol.MSG_KEYUP) * 2]
+                    self.assertEqual(messages, expected if state == "redirected" else [])
+
+    def test_switching_shortcut_off_discards_an_unfinished_double_tap(self):
+        bring_up(self.controller)
+        down = {FakeQuartz.kCGKeyboardEventKeycode: 0x3D, "flags": FakeQuartz.kCGEventFlagMaskAlternate}
+        up = {FakeQuartz.kCGKeyboardEventKeycode: 0x3D, "flags": 0}
+        self._tap(FakeQuartz.kCGEventFlagsChanged, down)
+        self._tap(FakeQuartz.kCGEventFlagsChanged, up)
+        self.controller.apply_settings(crossing_config(PAIRED_TOKEN, methods=["edge"]))
+        self.controller.apply_settings(crossing_config(PAIRED_TOKEN, methods=["shortcut", "edge"]))
+        self.assertIs(self._tap(FakeQuartz.kCGEventFlagsChanged, down), down)
+        self.assertFalse(self.controller.redirecting)
 
     def test_redirected_event_is_queued_and_swallowed(self):
         event = {
@@ -1319,6 +1361,28 @@ class CrossingWiringTests(unittest.TestCase):
         self.controller.update_config(crossing_config(PAIRED_TOKEN))
         self.assertFalse(self.controller._crossing_failed)
 
+    def test_a_failed_cursor_read_skips_that_event_without_disabling_crossing(self):
+        original = FakeQuartz.__dict__["CGEventGetLocation"]
+        reads = iter([PermissionError("access denied"), PermissionError("access denied")])
+
+        def cursor_position(_quartz, event):
+            try:
+                result = next(reads)
+            except StopIteration:
+                return event.get("location", FakeQuartz.cursor_pin_location)
+            raise result
+
+        FakeQuartz.CGEventGetLocation = classmethod(cursor_position)
+        self.addCleanup(setattr, FakeQuartz, "CGEventGetLocation", original)
+        with mock.patch.object(self.controller.logger, "warning") as warning:
+            self._move(1727.0, 558.0, 30)
+            self._move(1727.0, 558.0, 30)
+            _event, returned = self._push(10)
+
+        self.assertIsNone(returned)
+        self.assertTrue(self.controller.redirecting)
+        self.assertEqual(warning.call_count, 1)
+
     def test_a_passing_failure_in_the_crossing_path_heals_by_itself(self):
         self.controller.desktop_bounds = lambda: (_ for _ in ()).throw(RuntimeError("no displays"))
         self.controller._bounds_cache = None
@@ -1583,6 +1647,59 @@ class RoundTripTests(unittest.TestCase):
         self.controller.set_redirecting(True)
         self.link.down(self.controller)
         self.assertIsNone(self.controller.round_trip_ms)
+
+
+class HeldKeyMappingTests(unittest.TestCase):
+    def test_key_release_keeps_the_mapping_used_for_its_press(self):
+        controller = KVMController.__new__(KVMController)
+        controller.cfg = types.SimpleNamespace(key_map=config.KEY_MAP_STYLES["semantic"])
+        controller._sent_names = {}
+        peer = types.SimpleNamespace(peer_id=b"peer", peer_platform="windows", caps=set())
+        press = controller._for_peer(
+            {"type": protocol.MSG_KEYDOWN, "data": {"key": "cmd"}}, peer
+        )
+        controller.cfg = types.SimpleNamespace(key_map=config.KEY_MAP_STYLES["positional"])
+        release = controller._for_peer(
+            {"type": protocol.MSG_KEYUP, "data": {"key": "cmd"}}, peer
+        )
+        self.assertEqual(press["data"]["key"], release["data"]["key"])
+
+    def test_shared_semantic_modifier_stays_down_until_both_physical_keys_release(self):
+        controller = KVMController.__new__(KVMController)
+        controller.cfg = types.SimpleNamespace(key_map=config.KEY_MAP_STYLES["semantic"])
+        controller._sent_names = {}
+        peer = types.SimpleNamespace(peer_id=b"peer", peer_platform="windows", caps=set())
+        events = []
+        for kind, key in (
+            (protocol.MSG_KEYDOWN, "ctrl"),
+            (protocol.MSG_KEYDOWN, "ctrl_r"),
+            (protocol.MSG_KEYUP, "ctrl"),
+        ):
+            event = controller._for_peer({"type": kind, "data": {"key": key}}, peer)
+            if event is not None:
+                events.append(event)
+        held_on_peer = set()
+        for event in events:
+            key = event["data"]["key"]
+            if event["type"] == protocol.MSG_KEYDOWN:
+                held_on_peer.add(key)
+            else:
+                held_on_peer.discard(key)
+        self.assertEqual(held_on_peer, {"cmd"})
+        final_release = controller._for_peer(
+            {"type": protocol.MSG_KEYUP, "data": {"key": "ctrl_r"}}, peer
+        )
+        self.assertEqual(final_release["data"]["key"], "cmd")
+        held_on_peer.discard(final_release["data"]["key"])
+        self.assertEqual(held_on_peer, set())
+
+    def test_a_dropped_peer_forgets_its_held_key_names(self):
+        controller = KVMController.__new__(KVMController)
+        controller._sent_names = {(b"peer", "cmd"): "ctrl", (b"other", "cmd"): "ctrl"}
+        controller._clip_lock = threading.Lock()
+        controller._clip_wait = {}
+        controller._forget_held(b"peer")
+        self.assertEqual(controller._sent_names, {(b"other", "cmd"): "ctrl"})
 
 
 if __name__ == "__main__":

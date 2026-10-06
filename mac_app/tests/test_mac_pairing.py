@@ -3,7 +3,6 @@ peers the app hands the service are the ones the pairing is checked and kept in.
 
 import json
 import logging
-import socket
 import sys
 import tempfile
 import unittest
@@ -15,7 +14,7 @@ import bridge
 import settings_store
 from bridge_fakes import PAIRED_TOKEN
 from core import pairing
-from core.tests.test_pairing_service import Machine, free_port, wait_until
+from core.tests.test_pairing_service import Machine, wait_until
 from core.tests.test_pairing_v3 import entry
 
 PC_ID = bytes(range(101, 117))
@@ -34,19 +33,19 @@ class MacPairingTests(unittest.TestCase):
         self.store.load()
         self.book, self.identity = bridge.links_from_store(self.store, "1.5.0")
         self.paired = []
-        udp, tcp = free_port(socket.SOCK_DGRAM), free_port(socket.SOCK_STREAM)
-        self.tcp_port = tcp
         ident = self.identity()
         logger = logging.getLogger("test-mac-pairing")
         logger.handlers = [logging.NullHandler()]
         self.service = pairing.PairingService(
             ident["name"], bytes(ident["id"]), ident["platform"], lambda: 24820, self.book.peers, self.store.add_peer,
-            on_paired=self.paired.append, logger=logger, bind_port=udp, tcp_port=tcp,
-            announce_to=("127.0.0.1", free_port(socket.SOCK_DGRAM)),
+            on_paired=self.paired.append, logger=logger, bind_port=0, tcp_port=0,
+            announce_to=("127.0.0.1", 0),
         )
         self.service.start()
         self.addCleanup(self.service.stop)
-        self.pc = Machine(self, "Desk PC", PC_ID, "windows")
+        self.assertTrue(wait_until(lambda: self.service.listening_port is not None))
+        self.pc = Machine(self, "Desk PC", PC_ID, "windows", peer_udp=self.service.listening_port)
+        self.service.announce_to = ("127.0.0.1", self.pc.udp_port)
 
     def test_a_pairing_this_mac_enters_replaces_the_1_4_entry_at_that_address_in_the_store(self):
         before = self.store.current()["peers"][0]
@@ -70,7 +69,7 @@ class MacPairingTests(unittest.TestCase):
         settings["peers"][0]["host"] = "192.0.2.20"
         self.store.save_settings(settings)
         code = self.service.begin_pairing()
-        saved = self.pc.service.pair_by_address("127.0.0.1", code, port=self.tcp_port)
+        saved = self.pc.service.pair_by_address("127.0.0.1", code, port=self.service.tcp_port)
         self.assertTrue(wait_until(lambda: self.paired))
         peers = self.store.current()["peers"]
         self.assertEqual([peer["token"] for peer in peers], [PAIRED_TOKEN, saved["token"]])

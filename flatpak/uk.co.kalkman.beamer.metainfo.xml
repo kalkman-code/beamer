@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>uk.co.kalkman.beamer</id>
+  <name>Beamer</name>
+  <summary>Share one keyboard and mouse between your computers</summary>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>GPL-3.0-only</project_license>
+  <developer id="uk.co.kalkmancode"><name>Kalkman Code</name></developer>
+  <description>
+    <p>Beamer shares your keyboard, mouse and clipboard between paired computers on your network. Move through a screen edge to control another computer.</p>
+    <p>On Linux, Beamer uses the desktop's input capture, remote desktop and clipboard portals on Wayland, or X11. Wayland support depends on the portals your desktop provides. Crossing effects are unavailable on Wayland.</p>
+  </description>
+  <launchable type="desktop-id">uk.co.kalkman.beamer.desktop</launchable>
+  <url type="homepage">https://kalkmancode.co.uk/beamer</url>
+  <url type="bugtracker">https://github.com/kalkman-code/beamer/issues</url>
+  <content_rating type="oars-1.1"/>
+  <releases><release version="@VERSION@" timestamp="@TIMESTAMP@"/></releases>
+</component>

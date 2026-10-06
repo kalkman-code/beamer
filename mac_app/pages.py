@@ -10,6 +10,7 @@ import re
 
 from core import effects
 from core import peerlist
+from core.ways import part_names, parts_phrase, toggle_part
 
 # (key, name, SF Symbol, what the page is for), in sidebar order, which is the order a new Mac is
 # set up in after the Overview; Cmd+1 is the first.
@@ -18,7 +19,7 @@ PAGES = (
      "Where input is, whether each link is up, and the controls you reach for every day. Pair your "
      "machines here first."),
     ("permissions", "Permissions", "lock.shield",
-     "macOS must allow Beamer to read this keyboard and trackpad before it can send them anywhere."),
+     "macOS must allow Beamer to read this Mac's input and to move its pointer and type when another machine drives it."),
     ("crossing", "Crossing", "cursorarrow.motionlines",
      "Choose how the pointer or a key moves input to each machine, and how hard the edge pushes back first."),
     ("keyboard", "Keyboard", "keyboard",
@@ -27,17 +28,15 @@ PAGES = (
     ("design", "Design", "paintpalette",
      "How crossing looks and feels on this Mac: the edge, the corner, the notch and the trackpad."),
     ("connection", "Connection", "network",
-     "Where the first machine you paired is. Pairing fills these in."),
+     "Local connection details for the first machine you paired. Pair again to change another machine's entry."),
 )
 KEYS = tuple(page[0] for page in PAGES)
 # Under the purpose on the pages whose settings are this Mac's alone, so nobody looks for the other
 # machine's on the Mac: each app sets only its own machine, and the other's are in Beamer there.
 SCOPE = {
-    "crossing": "For this Mac only; every other machine keeps its own. Only which side each machine is on is shared, "
-                "with that machine. This Mac's resistance is also what its pointer meets at another machine's edge on "
-                "the way back.",
-    "design": "For this Mac's screen only; every other machine keeps its own.",
-    "keyboard": "For this Mac's keyboard only; every other machine keeps its own.",
+    "crossing": "Ways below lead to the selected machine. Its side is shared with that machine. Resistance, drag protection and Shortcut apply to this Mac's input for every destination.",
+    "design": "Used on this screen. Shared animation settings may follow another machine; Animate, window appearance, notch and trackpad controls stay on this Mac.",
+    "keyboard": "Modifier keys and Stays here belong to this Mac's input. Pointer speed and scrolling belong to this screen when another machine drives it. Every machine keeps its own.",
 }
 # With Same on all machines on, under each row of the shared pages that stays this Mac's own.
 OWN_ROW = "This Mac only."
@@ -130,32 +129,12 @@ def switch_style_groups(with_effects=True):
 
 def colour_groups(today_colours, with_effects=True):
     """[(group, [(colour id, name)])] for the swatches; `today_colours` is crossing.GLOW_COLOURS."""
-    groups = [(TODAY, [(name, name.capitalize()) for name in today_colours])]
-    for _module, direction, _effects, pack_ids in effects.DIRECTIONS if with_effects else ():
-        groups.append((direction, [(pack_id, effects.pack(pack_id)[0]) for pack_id in pack_ids]))
-    return groups
+    return effects.colour_groups([(name, name.capitalize()) for name in today_colours] + [('aurora', 'Aurora')], with_effects)
 
 
 def notch_style_applies(style):
     """A crossing effect draws the notch itself, so the notch style only matters under Glow and Beam."""
     return style not in effects.EFFECT_IDS
-
-
-def part_names(edge):
-    """The names of return_edge.PARTS along `edge`, as the page shows them: top to bottom on a side
-    edge, left to right along the top or bottom."""
-    if edge in ("left", "right"):
-        return {"start": "Top", "middle": "Middle", "end": "Bottom"}
-    return {"start": "Left", "middle": "Middle", "end": "Right"}
-
-
-def parts_phrase(edge, parts):
-    """The chosen thirds in a sentence: "the top and middle of the right edge"."""
-    names = part_names(edge)
-    # No third, or none known, is never saved, but a sentence must not be what fails on it.
-    chosen = [names[part].lower() for part in ("start", "middle", "end") if part in parts] or ["middle"]
-    joined = chosen[0] if len(chosen) == 1 else ", ".join(chosen[:-1]) + " and " + chosen[-1]
-    return f"the {joined} of the {edge} edge"
 
 
 def share_sentence(holders, side, name):
@@ -180,15 +159,6 @@ def toggle_way(methods, way, on):
     if on:
         chosen = (chosen | {way}) - {_EXCLUSIVE.get(way)}
     return [name for name in WAYS if name in chosen]
-
-
-def toggle_part(parts, part, on):
-    """The thirds after `part` is ticked or unticked. The last one cannot be unticked: no thirds
-    would be a way in that never crosses; switching Part of the edge off is how to have none."""
-    chosen = set(parts) | {part} if on else set(parts) - {part}
-    if not chosen:
-        chosen = set(parts)
-    return [name for name in ("start", "middle", "end") if name in chosen]
 
 
 # The Crossing page's diagram: this Mac's screen at 16:10 and the other machine's at 16:9, a gap between.
@@ -334,6 +304,10 @@ def where_caption(label):
     return f"Where {label} is" if label else "Where the other machine is"
 
 
+def corner_note():
+    return "This corner crosses its left or right edge."
+
+
 def shown_side(side, machines):
     """The side the page shows for a machine. With one machine paired, or none, one not placed yet
     shows Right as it always has; with several, nothing, so no two default onto one side."""
@@ -387,7 +361,7 @@ def crossing_state_sentence(paired, sending, connected, armed, paused, full_scre
     if not armed:
         return "Only the shortcut is switched on; there is nothing to pause."
     if paused:
-        return "Paused. Edges, corners and the notch do nothing until you resume; the shortcut still works."
+        return "Pauses pointer crossing through this screen, including another machine's pointer. Shortcuts and jump keys still work. Resets when Beamer restarts."
     if full_screen_app is not None:
         return "Held: an app is full screen."
     return "On. Pause it to lean on an edge without switching."

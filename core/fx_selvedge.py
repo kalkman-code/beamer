@@ -88,6 +88,8 @@ EFFECTS = [
 ]
 
 PACKS = {
+    "woad": ("Woad", ["#8277b3", "#7268a4", "#c3b9df"]),
+    "saffron": ("Saffron", ["#d48238", "#976025", "#efc18a"]),
     "flax": ("Flax", ["#cfb885", "#8a9c84", "#efdfb8"]),
     "madder": ("Madder", ["#c45b68", "#873d57", "#e5b09b"]),
     "tide": ("Tide", ["#58a9a3", "#547498", "#b1d1c1"]),

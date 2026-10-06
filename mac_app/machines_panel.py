@@ -22,7 +22,7 @@ import motion
 import qr
 import theme
 import widgets
-from core import pairing, peerlist, protocol, ways as core_ways
+from core import feature_flags, pairing, peerlist, ways as core_ways
 
 QR_SIDE = 176
 CODE_GROUP = 3
@@ -67,8 +67,12 @@ class MachinesPanel:
     # Building
 
     def _machines_module(self):
-        module = widgets.Module(spacing=10)
-        module.add(widgets.eyebrow("Machines"))
+        module = widgets.Module()
+        header = widgets.stack(spacing=12)
+        widgets.add(header, widgets.eyebrow("Machines"))
+        self.pair_button = widgets.action_button("Pair a machine", self._toggle_sheet, style="primary")
+        widgets.add(header, self.pair_button.view, full_width=False)
+        module.add(header)
         self.list = widgets.stack(spacing=8)
         module.add(self.list)
         self.empty = widgets.note("No machines paired yet.")
@@ -76,8 +80,6 @@ class MachinesPanel:
         line = widgets.stack(vertical=False, spacing=10)
         self.list_note = widgets.note("Beamer connects to each machine on its own whenever both are running.", reading=False)
         line.addArrangedSubview_(self.list_note.view)
-        self.pair_button = widgets.action_button("Pair a machine", self._toggle_sheet, scale="small")
-        line.addArrangedSubview_(self.pair_button.view)
         module.add(line)
         return module
 
@@ -104,11 +106,13 @@ class MachinesPanel:
         ).view)
         self.show_button = widgets.action_button("Show a code", self._show_code, style="primary")
         half.addArrangedSubview_(self.show_button.view)
-        self.code_label = widgets.Label("", theme.TYPE["readout"], 700, mono=True, tracking=theme.TIGHT["readout"])
-        widgets.add(half, self.code_label.view)
+        self.shown_code_boxes = widgets.CodeBoxes(pairing.CODE_DIGITS, None, editable=False)
+        for control in self.shown_code_boxes.fields:
+            control.setFont_(theme.mono_font(theme.TYPE["readout"], 700))
+        widgets.add(half, self.shown_code_boxes.view)
         self.code_expiry = widgets.Label("", theme.TYPE["small"], mono=True, ink="ink_3")
         widgets.add(half, self.code_expiry.view)
-        self.code_address = widgets.Label("", theme.TYPE["small"], mono=True, ink="ink_3")
+        self.code_address = widgets.Label("", theme.TYPE["small"], ink="ink_3")
         widgets.add(half, self.code_address.view)
         self.qr_view = widgets._autolayout(AppKit.NSImageView.alloc().init())
         # Whole points to a module already: scaling would soften the edges.
@@ -220,7 +224,7 @@ class MachinesPanel:
         wanted = self.open or not rows
         motion.set_hidden(self.sheet.view, not wanted)
         self.pair_button.set_title("Cancel" if self.open and rows else "Pair a machine")
-        self.pair_button.view.setHidden_(not rows)
+        self.pair_button.view.setHidden_(False)
         if wanted:
             self._refresh_sheet(hide)
         elif self._showing:
@@ -266,28 +270,31 @@ class MachinesPanel:
         led = widgets.LED()
         led.set(state.led, state.blink)
         head.addArrangedSubview_(led.view)
-        name = widgets.Label(label, theme.TYPE["body"], 600)
+        name = widgets.Label(label, theme.TYPE["body"], 600, wrap=True)
         head.addArrangedSubview_(widgets.hug(widgets.squeeze(name.view), AppKit.NSLayoutPriorityDefaultLow))
         tag = widgets.Label(self._shown(state.word), theme.TYPE["eyebrow"], 700, state.tone, tracking=theme.TRACKING["eyebrow"], upper=True)
-        head.addArrangedSubview_(tag.view)
+        if self.wide:
+            head.addArrangedSubview_(tag.view)
         widgets.add(body, head)
+        if not self.wide:
+            widgets.add(body, tag.view)
         remove = self._removal(row)
-        where = "  ".join((row.platform, self._shown(row.address)))
-        place = widgets.stack(vertical=False, spacing=10)
-        place.addArrangedSubview_(widgets.hug(widgets.squeeze(widgets.Label(where, theme.TYPE["small"], mono=True, ink="ink_3").view),
-                                              AppKit.NSLayoutPriorityDefaultLow))
-        if not self.wide and self.removing != row.token:
-            place.addArrangedSubview_(remove)
-        widgets.add(body, place)
+        where = row.platform if row.phone else "  ".join((row.platform, self._shown(row.address)))
+        widgets.add(body, widgets.Label(where, theme.TYPE["small"], ink="ink_3", wrap=True).view)
         widgets.add(body, widgets.note(self._shown(state.detail)).view)
         in_use = widgets.Switch("In use", on_change=lambda on, t=row.token: self._direction(t, in_use=on))
         in_use.value = row.in_use
+        in_use.view.setToolTip_(f"Off: no input or settings link to {label}. Pairing, directions, ways and jump key are kept. Turn it back on here to reconnect.")
+        if row.phone:
+            in_use.view.setToolTip_(f"Off: {label} cannot connect or drive this Mac. Turn it back on here to reconnect.")
         in_use.view.focus_id = (row.token, "in_use")
         drives = widgets.Switch("This Mac drives it", on_change=lambda on, t=row.token: self._direction(t, send=on))
         drives.value = row.drives
+        drives.view.setToolTip_(f"Input moves only when this Mac enables this switch and {label} enables It drives this Mac.")
         drives.view.focus_id = (row.token, "drives")
         driven = widgets.Switch("It drives this Mac", on_change=lambda on, t=row.token: self._direction(t, allow_drive=on))
         driven.value = row.driven
+        driven.view.setToolTip_(f"Input moves only when {label} enables This machine drives it and this Mac enables this switch.")
         driven.view.focus_id = (row.token, "driven")
         opened = row.token in self.directions_open
         disclosure = self._chip("Hide directions" if opened else "Directions", lambda t=row.token: self._toggle_directions(t),
@@ -314,20 +321,22 @@ class MachinesPanel:
             for view in (remove,):
                 widgets.add(column, view)
             return column
-        line = widgets.stack(vertical=False, spacing=16)
-        line.addArrangedSubview_(widgets.hug(in_use.view, AppKit.NSLayoutPriorityRequired))
-        line.addArrangedSubview_(widgets.hug(widgets.box(), AppKit.NSLayoutPriorityDefaultLow))
-        line.addArrangedSubview_(disclosure)
+        line = widgets.stack(vertical=not self.wide, spacing=12)
+        if not self.wide:
+            line.setAlignment_(AppKit.NSLayoutAttributeTrailing)
         if self.wide:
-            line.addArrangedSubview_(remove)
+            line.addArrangedSubview_(widgets.hug(widgets.box(), AppKit.NSLayoutPriorityDefaultLow))
+        widgets.add(line, in_use.view, full_width=not self.wide)
+        if not row.phone:
+            line.addArrangedSubview_(disclosure)
+        line.addArrangedSubview_(remove)
         column = widgets.stack(spacing=4)
-        column.addArrangedSubview_(line)
-        if row.token in self.directions_open:
-            directions = widgets.stack(vertical=False, spacing=24)
+        widgets.add(column, line)
+        if not row.phone and row.token in self.directions_open:
+            directions = widgets.stack(vertical=not self.wide, spacing=12)
             for view in (drives.view, driven.view):
-                directions.addArrangedSubview_(view)
-                widgets.hug(view, AppKit.NSLayoutPriorityRequired)
-            column.addArrangedSubview_(directions)
+                widgets.add(directions, view, full_width=not self.wide)
+            widgets.add(column, directions)
         return column
 
     def _toggle_directions(self, token):
@@ -420,7 +429,7 @@ class MachinesPanel:
 
     def _show_code_widgets(self, showing):
         self.show_button.view.setHidden_(showing)
-        for view in (self.code_label.view, self.code_expiry.view, self.code_address.view, self.qr_view,
+        for view in (self.shown_code_boxes.view, self.code_expiry.view, self.code_address.view, self.qr_view,
                      self.qr_caption.view, self.cancel_button.view):
             view.setHidden_(not showing)
 
@@ -454,7 +463,8 @@ class MachinesPanel:
         if code is not None:
             self._showing = True
             self._show_code_widgets(True)
-            self.code_label.set(grouped(code))
+            for control, digit in zip(self.shown_code_boxes.fields, code):
+                control.setStringValue_(digit)
             self.code_expiry.set(seconds(service.seconds_left))
             address = pairing.pairing_address()
             qr_text = service.qr_text(address)
@@ -480,7 +490,10 @@ class MachinesPanel:
         self.hosted_status.view.setHidden_(not self.hosted_status.text)
 
     def _set_qr(self, text, caption):
+        if not feature_flags.PAIRING_QR_VISIBLE:
+            text, caption = None, ""
         self.qr_caption.set(caption)
+        self.qr_caption.view.setHidden_(not caption)
         self.qr_view.setHidden_(text is None)
         if text == self._qr_for:
             return
@@ -563,12 +576,19 @@ class MachinesPanel:
         led = widgets.LED()
         led.set("amber" if older else "signal" if showing else "off")
         line.addArrangedSubview_(led.view)
-        name = widgets.Label(self._shown(item["name"]), theme.TYPE["note"], 600 if picked else 400)
+        name_text = self._shown(item["name"])
+        name = widgets.Label(name_text, theme.TYPE["note"], 600 if picked else 400)
+        name.view.setToolTip_(name_text)
+        name.view.setAccessibilityLabel_(name_text)
         line.addArrangedSubview_(widgets.hug(widgets.squeeze(name.view), AppKit.NSLayoutPriorityDefaultLow))
+        name.view.widthAnchor().constraintGreaterThanOrEqualToConstant_(100).setActive_(True)
         # A current machine's row always says where it is; an older one's only where its name is shared.
         where = self._shown(item["address"]) if shared_name or not older else ""
         detail = " · ".join(part for part in ("Older Beamer" if older else platform, where) if part)
-        line.addArrangedSubview_(widgets.Label(detail, theme.TYPE["small"], mono=True, ink="amber" if older else "ink_3").view)
+        detail_label = widgets.Label(detail, theme.TYPE["small"], ink="amber" if older else "ink_3")
+        detail_label.view.setToolTip_(detail)
+        detail_label.view.setAccessibilityLabel_(detail)
+        line.addArrangedSubview_(widgets.squeeze(detail_label.view, AppKit.NSLayoutPriorityDefaultLow))
         row.addSubview_(line)
         widgets.pin(line, row, (7, 10, 7, 10))
         widgets.add(self.heard_list, row)

@@ -46,6 +46,15 @@ class LabelTests(unittest.TestCase):
         self.assertEqual(labels[A * 3], "10.1.1.2")
         self.assertEqual(labels[B * 3], "Unnamed machine")
 
+    def test_a_phone_without_a_token_is_not_labelled_as_a_machine(self):
+        phone = {"id": "phone", "name": "Toby's phone", "port": 0}
+        labels = peerlist.labels([peer(A, "Desk"), phone])
+        self.assertEqual(labels, {A * 3: "Desk"})
+
+    def test_a_paired_phone_keeps_its_label_for_input_sent_to_this_machine(self):
+        phone = {"id": "phone", "name": "Toby's phone", "port": 0, "token": "phone-token"}
+        self.assertEqual(peerlist.labels([phone]), {"phone-token": "Toby's phone"})
+
 
 class AddPeerTests(unittest.TestCase):
     def test_a_new_entry_goes_on_the_end(self):
@@ -198,6 +207,10 @@ class LabelForTests(unittest.TestCase):
         self.assertEqual(peerlist.label_for([first, second], peer_id=first["id"]), labels[first["token"]])
         self.assertEqual(peerlist.label_for([first, second], host="192.0.2.11"), labels[second["token"]])
         self.assertIn("(", peerlist.label_for([first, second], token=first["token"]))
+
+    def test_a_phone_without_a_token_has_no_machine_label(self):
+        phone = {"id": "phone", "name": "Toby's phone", "port": 0}
+        self.assertEqual(peerlist.label_for([peer(A, "Desk"), phone], peer_id="phone"), "")
 
     def test_a_machine_nobody_knows_has_no_label(self):
         self.assertEqual(peerlist.label_for([peer(A, "Desk")], token="nope"), "")

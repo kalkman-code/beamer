@@ -60,6 +60,19 @@ class SenderTests(unittest.TestCase):
         self.assertFalse(self.sender.on_key("f13", False, VK_F13))
         self.assertEqual(self.sent(), [])
 
+    def test_local_release_after_return_clears_the_kept_key_for_its_next_press(self):
+        self.sender.on_key("f13", True, VK_F13)
+        self.sender.set_redirecting(False)
+        self.sender.on_key("f13", False, VK_F13)
+        self.configure([])
+        self.sender.set_redirecting(True)
+        self.assertTrue(self.sender.on_key("f13", True, VK_F13))
+        self.assertTrue(self.sender.on_key("f13", False, VK_F13))
+        self.assertEqual(self.sent(), [
+            (protocol.MSG_KEYDOWN, {"key": "f13"}),
+            (protocol.MSG_KEYUP, {"key": "f13"}),
+        ])
+
     def test_any_other_key_still_goes_to_the_peer(self):
         self.assertTrue(self.sender.on_key("a", True, VK_A))
         self.assertTrue(self.sender.on_key("a", False, VK_A))

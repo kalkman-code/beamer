@@ -1,0 +1,119 @@
+{
+  "signal": [
+    "#5fd4f4"
+  ],
+  "colourful": [
+    "#ff3264",
+    "#ff7828",
+    "#f032b4",
+    "#b428f0",
+    "#6446ff",
+    "#288cff",
+    "#1eb9aa",
+    "#32c850"
+  ],
+  "ocean": [
+    "#288cff",
+    "#6446ff",
+    "#1eb9aa",
+    "#3c6eff"
+  ],
+  "sunset": [
+    "#ff7828",
+    "#ff3264",
+    "#ffb43c",
+    "#f03278"
+  ],
+  "mono": [
+    "#ebebeb",
+    "#969696",
+    "#ebebeb"
+  ],
+  "oil_slick": [
+    "#8a4dff",
+    "#2f7dff",
+    "#16c6b0",
+    "#9fdc4a",
+    "#f0c23c",
+    "#e8477f"
+  ],
+  "soap_bubble": [
+    "#ffd98e",
+    "#ff9cc2",
+    "#c3a6ff",
+    "#8fcfff",
+    "#9ef2cf"
+  ],
+  "pearl": [
+    "#fbf4e8",
+    "#f2c9d6",
+    "#c6dcf2",
+    "#d9f0dc",
+    "#ffffff"
+  ],
+  "ember": [
+    "#ffe4ad",
+    "#ffb04a",
+    "#ff6a24",
+    "#d8321a",
+    "#8e1a10"
+  ],
+  "forge": [
+    "#fff4dc",
+    "#ffc15e",
+    "#ff7f2a",
+    "#b8c4d2",
+    "#5d7896"
+  ],
+  "sparkler_gold": [
+    "#ffffff",
+    "#fff1bf",
+    "#ffd35c",
+    "#f0a531"
+  ],
+  "phosphor": [
+    "#3dff7f",
+    "#1f9e52",
+    "#caffdc"
+  ],
+  "sodium": [
+    "#ffa51f",
+    "#c46a12",
+    "#ffe0a3"
+  ],
+  "contrast": [
+    "#f0e442",
+    "#56b4e9",
+    "#ffffff"
+  ],
+  "vellum": [
+    "#c69a60",
+    "#f0ddac",
+    "#88674c"
+  ],
+  "carbon_copy": [
+    "#6688ae",
+    "#bbcad9",
+    "#344d72"
+  ],
+  "marbled": [
+    "#bd6858",
+    "#6c9691",
+    "#e1bb78"
+  ],
+  "flax": [
+    "#cfb885",
+    "#8a9c84",
+    "#efdfb8"
+  ],
+  "madder": [
+    "#c45b68",
+    "#873d57",
+    "#e5b09b"
+  ],
+  "tide": [
+    "#58a9a3",
+    "#547498",
+    "#b1d1c1"
+  ]
+}

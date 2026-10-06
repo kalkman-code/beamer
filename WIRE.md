@@ -575,7 +575,7 @@ Either way:
   in `paired_with` (section 5, the Crossing page).
 - **Announcements.** After the handshake each end sends `paired` when the rule above allows,
   `arrangement` when this pair has a side, and `settings` when the other's capabilities list
-  `settings`.
+  `settings`, except for a zero-port phone: phones never take part in shared settings or Match design.
 - **Which link.** Between two desktops with a link each way, `arrangement`, `settings` and
   `paired` go on the link this machine opened when it is up, else on the other. When neither
   machine may send to the other there is no link, and nothing passes until one exists.
@@ -863,6 +863,8 @@ names a machine sends input there, from home or straight from the machine it is 
 
 - A phone is an initiator only. A desktop's entry for a phone has `port` 0, `host` `""` and
   `send` false, and is never dialled; its `allow_drive` is the switch that lets the phone drive.
+- A phone has no side, zones, jump key or wake-on-LAN address. Desktops ignore its `arrangement`
+  and `settings` messages, even if it advertises `settings` or `design_sync`.
 - A phone's entries for desktops have `send` true and `allow_drive` false. It learns from each
   `welcome`'s `accepts` which desktops it may drive, and leaves the others out of `reach`.
 - A `switch` whose `next` is the phone means stop: the phone lets go with
@@ -1270,7 +1272,7 @@ every peer.
   "on": true, "set_at": 1790000000, "by": "<b64>",
   "crossing": {"resistance_px": 120, "block_while_dragging": true, "shortcut": true,
                "trigger_key": "alt_r", "trigger_style": "double_tap", "double_tap_ms": 300},
-  "design": {"glow_style": "glow", "glow_colour": "signal", "effect_length": "normal",
+  "design": {"glow_style": "glow", "glow_colour": "colourful", "effect_length": "normal",
              "shortcut_arrival": true, "shortcut_arrival_style": "match"}}}
 ```
 
@@ -1317,8 +1319,10 @@ every peer.
 
 **Follow a machine's design.** Each machine's Design page has **Match design with**: None, or one
 paired machine advertising both `settings` and `design_sync`. The selection is local; there is no
-group object and the selection is never sent. A machine that does not advertise `design_sync` is
-shown unavailable with “Needs beta.6 or later”.
+group object and the selection is never sent. Only machines linked now are listed, plus the one
+followed while it is away; with none, the page says so in one line. A linked machine that does not
+advertise `design_sync` is shown unavailable with “Needs beta.6 or later”. Eligibility is the
+capability alone; the `app` version string is never compared.
 
 The optional `design_sync` member is independent of `on`. A capable machine sends its own current
 Design state to each directly linked capable peer after link-up and whenever its Design changes,
@@ -1327,7 +1331,7 @@ even while Same on all machines is off. The state is:
 ```json
 {"type":"settings","data":{"on":false,"set_at":1790000000,"by":"<b64>",
   "design_sync":{"set_at":1790000001,"by":"<b64>","values":{
-    "glow_style":"glow","glow_colour":"signal","effect_length":"normal",
+    "glow_style":"glow","glow_colour":"colourful","effect_length":"normal",
     "effect_size":"medium","shortcut_arrival":true,"shortcut_arrival_style":"match"}}}}
 ```
 
@@ -1343,7 +1347,9 @@ when their initial announcements cross in flight. If applying a state leaves eve
 identical, it is not a change and nothing is announced; the newer stamp is still kept locally, so an
 older state cannot replace it.
 
-Editing any Design control on a follower turns following off and the page says so. Turning off
+While a machine follows another, its followed Design controls (style, landing animation, colour,
+length and size) are locked, dimmed under a “Following <name>'s design” banner whose Stop
+following button ends it and keeps the design shown; local controls stay live. Turning off
 Same on all machines resumes following from the selected machine's latest received state. Removing
 or unpairing the selected machine resets the selection to None. An offline followed machine leaves
 the last look in place; the next link-up sends its current state and catches the follower up.

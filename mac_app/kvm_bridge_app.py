@@ -4,11 +4,8 @@ import fcntl
 import logging
 import logging.handlers
 import os
-import re
-import socket
 import subprocess
 import sys
-import threading
 import time
 from dataclasses import replace
 from pathlib import Path
@@ -28,6 +25,7 @@ import crossing
 from core import return_edge
 import desktop_mac
 from core import effects
+from core.locale import americanise
 import effects_overlay
 import gestures
 import hardware_mac
@@ -59,7 +57,7 @@ from settings_store import (
     editable_default_config,
 )
 import theme
-from wake import WakingController, lookup_mac
+from wake import WakingController
 import widgets
 from windows_input import WindowsInput
 from core.receiver import ServerState
@@ -669,6 +667,7 @@ class EdgeGlow:
             self.fill.setColors_(notch_beam.palette_colours(feel["glow_colour"], dark=self.dark_appearance()))
             fade = self._taper()
             ends = (lambda at: 1.0) if fade is None else (lambda at: min(1.0, at / fade, (1.0 - at) / fade))
+            notch_beam.mask_edge_falloff(self.comet, self.mac_edge, beam)
             if beam:
                 stops = [index / 24 for index in range(25)]
                 self.comet.setLocations_(stops)
@@ -765,7 +764,7 @@ class EdgeGlow:
         Quartz.CATransaction.begin()
         Quartz.CATransaction.setDisableActions_(True)
         try:
-            for layer, mask, frame, (start, end), path in walls:
+            for wall, (layer, mask, frame, (start, end), path) in zip((vertical, horizontal), walls):
                 layer.setHidden_(False)
                 layer.setFrame_(frame)
                 layer.setStartPoint_(start)
@@ -781,6 +780,7 @@ class EdgeGlow:
                     ).CGColor()
                     for u in stops
                 ])
+                notch_beam.mask_edge_falloff(mask, wall, beam)
                 layer.setMask_(mask)
                 layer.setOpacity_(min(1.0, strength) if beam else min(1.0, 0.3 + 0.7 * level + 0.6 * flash))
         finally:
@@ -868,7 +868,7 @@ def install_main_menu(control_window):
     key equivalent of the Quit item in the application menu — so with no main menu the app could
     not be quit from the keyboard, and Cmd+C/V/A in the token field did nothing either."""
     def item(menu, title, action, key, modifiers=None, target=None):
-        entry = menu.addItemWithTitle_action_keyEquivalent_(title, action, key)
+        entry = menu.addItemWithTitle_action_keyEquivalent_(americanise(title), action, key)
         if modifiers is not None:
             entry.setKeyEquivalentModifierMask_(modifiers)
         if target is not None:
@@ -929,12 +929,11 @@ def install_main_menu(control_window):
     AppKit.NSApp.setMainMenu_(main_menu)
 
 
-class FlippedView(AppKit.NSView):
-    """A plain view that lays out top-down, so the scrolling page starts at the top of the window
-    rather than the bottom of the document."""
+class FlippedView(AppKit.NSTableRowView):
+    """A native flipped container avoids Python callbacks for every descendant's frame change.
 
-    def isFlipped(self):
-        return True
+    The row supplies native top-left coordinates; the settings column owns its layout.
+    """
 
 
 def window_fill_frame(window):
@@ -942,13 +941,45 @@ def window_fill_frame(window):
     return screen.visibleFrame()
 
 
+def page_column_width(free):
+    return max(0, min(880, free - 48))
+
+
+def settings_normal_frame(saved, work):
+    import math
+    try:
+        x, y, width, height = map(float, saved)
+        if not all(math.isfinite(value) for value in (x, y, width, height)):
+            raise ValueError
+    except (TypeError, ValueError):
+        width, height = 900, 640
+        x = work.origin.x + (work.size.width - min(width, work.size.width)) / 2
+        y = work.origin.y + (work.size.height - min(height, work.size.height)) / 2
+    width = min(work.size.width, max(320, width))
+    height = min(work.size.height, max(300, height))
+    x = min(max(x, work.origin.x), work.origin.x + work.size.width - width)
+    y = min(max(y, work.origin.y), work.origin.y + work.size.height - height)
+    return x, y, width, height
+
+
+def ordinary_window_frame(window):
+    if (not window.isVisible() or window.isZoomed()
+            or window.styleMask() & AppKit.NSWindowStyleMaskFullScreen
+            or '"tilingState"' in window.stringWithSavedFrame()):
+        return None
+    frame = window.frame()
+    return [frame.origin.x, frame.origin.y, frame.size.width, frame.size.height]
+
+
 def titlebar_action(setting):
     value = (setting or "").strip().casefold()
-    if value in {"fill", "zoom"}:
+    if value in {"fill", "zoom", "maximize"}:
         return "fill"
     if value in {"minimise", "minimize"}:
         return "minimise"
-    return None
+    if value in {"none", "do nothing"}:
+        return None
+    return "fill"
 
 
 def perform_titlebar_double_click(window, setting=None):
@@ -968,10 +999,88 @@ def perform_titlebar_drag(window, event):
 
 class TitlebarStrip(AppKit.NSView):
     def mouseDown_(self, event):
-        if event.clickCount() >= 2:
-            perform_titlebar_double_click(self.window())
-        else:
+        if event.clickCount() == 1:
             perform_titlebar_drag(self.window(), event)
+
+
+class SettingsWindow(AppKit.NSWindow):
+    @objc.python_method
+    def refresh_input_focus(self):
+        responder = self.firstResponder()
+        if isinstance(responder, widgets.Pressable):
+            responder._ring(True)
+        elif isinstance(responder, widgets._RulerView):
+            responder.refresh_keyboard_focus()
+        delegate = self.delegate()
+        if delegate is not None and hasattr(delegate, 'sidebar'):
+            delegate.sidebar.refresh_focus()
+
+    @objc.python_method
+    def navigate_key_view(self, backwards, sender):
+        self.keyboard_navigation = True
+        sidebar = self.delegate().sidebar
+        sidebar_rows = [values[1] for values in sidebar.rows.values()]
+        previous = self.firstResponder()
+        advance = (objc.super(SettingsWindow, self).selectPreviousKeyView_ if backwards
+                   else objc.super(SettingsWindow, self).selectNextKeyView_)
+        advance(sender)
+        current = self.firstResponder()
+        if previous == self or (current in sidebar_rows and previous not in sidebar_rows):
+            self.makeFirstResponder_(sidebar.rows[sidebar.selected][1])
+        elif previous in sidebar_rows:
+            for _ in sidebar_rows:
+                if self.firstResponder() not in sidebar_rows:
+                    break
+                advance(sender)
+        self.refresh_input_focus()
+
+    def selectNextKeyView_(self, sender):
+        self.navigate_key_view(False, sender)
+
+    def selectPreviousKeyView_(self, sender):
+        self.navigate_key_view(True, sender)
+
+    @objc.python_method
+    def titlebar_background(self, point):
+        content = self.contentView()
+        height = content.bounds().size.height
+        in_top = (0 <= point.x <= content.bounds().size.width
+                  and height - 18 <= point.y <= self.frame().size.height)
+        delegate = self.delegate()
+        header = getattr(getattr(delegate, "sidebar", None), "header", None)
+        in_header = header is not None and AppKit.NSPointInRect(
+            header.convertPoint_fromView_(point, None), header.bounds()
+        )
+        if not (in_top or in_header):
+            return False
+        # Title text is a non-editable NSTextField. Traffic lights and other controls keep
+        # their own clicks even when they lie inside one of the draggable backgrounds.
+        hit = content.superview().hitTest_(point)
+        while hit is not None:
+            if isinstance(hit, (AppKit.NSButton, widgets.Pressable)):
+                return False
+            if isinstance(hit, AppKit.NSTextField) and hit.isEditable():
+                return False
+            hit = hit.superview()
+        return True
+
+    def sendEvent_(self, event):
+        if event.type() == AppKit.NSEventTypeKeyDown and widgets.is_navigation_key(event):
+            self.keyboard_navigation = True
+        elif event.type() in (AppKit.NSEventTypeLeftMouseDown, AppKit.NSEventTypeRightMouseDown):
+            self.keyboard_navigation = False
+        self.refresh_input_focus()
+        # Native titlebar and sidebar events never visit TitlebarStrip. All three
+        # backgrounds must use the same preference fallback, once, on mouse-up.
+        if (event.type() in (AppKit.NSEventTypeLeftMouseDown, AppKit.NSEventTypeLeftMouseUp)
+                and event.clickCount() == 2
+                and self.titlebar_background(event.locationInWindow())):
+            # Consume the second down too: native tracking may otherwise handle the up itself
+            # before it reaches sendEvent:, or apply its own action as well as this one.
+            if event.type() == AppKit.NSEventTypeLeftMouseUp:
+                perform_titlebar_double_click(self)
+            return
+        objc.super(SettingsWindow, self).sendEvent_(event)
 
 
 class ControlWindow(AppKit.NSObject):
@@ -1009,6 +1118,8 @@ class ControlWindow(AppKit.NSObject):
         self._apply_serial = 0
         self._save_pending = False
         self._design_states = {}
+        self._followed_version = None
+        self._design_path = []
         # The machine the Crossing page shows and writes the ways of: an id ("" is the entry
         # migrated from 1.4.x), None while nothing is paired.
         self.chosen_peer = None
@@ -1016,7 +1127,8 @@ class ControlWindow(AppKit.NSObject):
         self.machine_select = None
         self.page = None
         self.opened = False
-        self.window = AppKit.NSWindow.alloc().initWithContentRect_styleMask_backing_defer_(
+        self.side_by_side = []
+        self.window = SettingsWindow.alloc().initWithContentRect_styleMask_backing_defer_(
             ((0, 0), (900, 640)),
             AppKit.NSWindowStyleMaskTitled
             | AppKit.NSWindowStyleMaskClosable
@@ -1027,15 +1139,20 @@ class ControlWindow(AppKit.NSObject):
         )
         self.window.setTitle_("Beamer")
         self.window.setReleasedWhenClosed_(False)
-        self.window.setDelegate_(self)
-        self.window.setContentMinSize_(AppKit.NSMakeSize(*theme.MIN_WINDOW))
+        self.window.setMinSize_((320, 300))
+        self.window.keyboard_navigation = False
         # The window always carries the palette's own appearance, never nil: the title bar's
         # buttons and text then match the palette whatever the Mac is set to, and the transparent
         # title bar takes the window's ground.
         self.window.setAppearance_(theme.appearance_named(theme.is_dark()))
         self.window.setBackgroundColor_(theme.colour("ground"))
         self.window.setTitlebarAppearsTransparent_(True)
-        self.window.center()
+        screen = self.window.screen() or AppKit.NSScreen.mainScreen()
+        x, y, width, height = settings_normal_frame(
+            self.settings_store.current().get("settings_window_frame"), screen.visibleFrame())
+        self.window.setFrame_display_(((x, y), (width, height)), False)
+        self._normal_frame = [x, y, width, height]
+        self._frame_transition = False
         content = self.window.contentView()
         content.setWantsLayer_(True)
         theme.tint(content.layer(), background="ground")
@@ -1056,6 +1173,7 @@ class ControlWindow(AppKit.NSObject):
             footer_label="Open Beamer's website, kalkmancode.co.uk/beamer",
             on_footer=self._open_beamer_site,
         )
+        self.sidebar.footer_icon.setImage_(menu_bar_glyph("local"))
         divider = widgets.box("rule")
         pane = widgets.stack(spacing=0)
         for view in (top, self.sidebar.view, divider, pane):
@@ -1085,7 +1203,9 @@ class ControlWindow(AppKit.NSObject):
         ])
         # The page host is the only part of the pane that gives way when the window is resized;
         # the commit bar keeps its height on every page.
-        host = widgets.box()
+        host = widgets.stack(spacing=0)
+        host.setAlignment_(AppKit.NSLayoutAttributeWidth)
+        host.setDetachesHiddenViews_(True)
         host.setContentHuggingPriority_forOrientation_(
             AppKit.NSLayoutPriorityDefaultLow, AppKit.NSLayoutConstraintOrientationVertical
         )
@@ -1093,14 +1213,16 @@ class ControlWindow(AppKit.NSObject):
             AppKit.NSLayoutPriorityDefaultLow, AppKit.NSLayoutConstraintOrientationVertical
         )
         widgets.add(pane, host)
+        self.page_host = host
         widgets.add(pane, widgets.hairline())
         widgets.add(pane, self._commit())
 
-        self.page_titles = []
+        self.page_titles = {}
         # Same on all machines: each shared page's scope line, and the notes on this Mac's own rows.
         self.scope_labels = {}
         self.own_notes = []
-        self.page_paddings = []
+        self.page_paddings = {}
+        self.page_width_constraints = {}
         self.pages = {}
         builders = {
             "overview": self._overview_page,
@@ -1112,24 +1234,78 @@ class ControlWindow(AppKit.NSObject):
         }
         for key, name, _symbol, purpose in pages.PAGES:
             scroll, body = self._page(name, purpose, pages.SCOPE.get(key), key)
-            host.addSubview_(scroll)
-            widgets.pin(scroll, host)
+            host.addArrangedSubview_(scroll)
             scroll.setHidden_(True)
             self.pages[key] = scroll
             builders[key](body)
 
         self._load(config_to_raw(controller.cfg))
         self._select_page(pages.opening_page(None, accessibility_granted(), input_monitoring_granted()))
+        self.window.setDelegate_(self)
         self.windowDidResize_(None)
         self.refresh()
         return self
 
     def windowDidResize_(self, _notification):
+        self._remember_normal_frame()
         width = self.window.contentView().frame().size.width
-        low, high = theme.SIDEBAR_WIDTH
-        sidebar = min(high, max(low, width * 0.25))
+        if width == getattr(self, "_last_resize_width", None):
+            return
+        self._last_resize_width = width
+        sidebar = 56 if width < 640 else 144 if width < 800 else 176
         self.sidebar_width.setConstant_(sidebar)
-        self._apply_width(width - sidebar - 1)
+        self.sidebar.set_collapsed(width < 640)
+        page_width = width - sidebar - 1 - 16
+        self._apply_width(page_width)
+        body_width = page_column_width(page_width)
+        if self.page == "design":
+            inner_width = body_width - 32
+            for choices in (self.glow_style_select, self.switch_style_select, self.glow_colour_select):
+                for row in choices.rows:
+                    if not row.view.isHiddenOrHasHiddenAncestor():
+                        row.grid.arrange(inner_width)
+            for row in (self.length_row, self.size_row, self.style_for_row, self.effect_method_view,
+                        self.tick_steps_pair):
+                if not row.isHiddenOrHasHiddenAncestor():
+                    row.field_owner.arrange(inner_width)
+        self.page_width_constraints[self.page].setConstant_(body_width)
+        self.page_width_constraints[self.page].setPriority_(499)
+        for pair in self.side_by_side:
+            if not pair.view.enclosingScrollView().isHidden():
+                pair.update_orientation(body_width - 2 * theme.MODULE_PADDING[1])
+
+    @objc.python_method
+    def _remember_normal_frame(self):
+        if self._frame_transition:
+            return
+        frame = ordinary_window_frame(self.window)
+        if frame is not None:
+            self._normal_frame = frame
+
+    def windowDidMove_(self, _notification):
+        self._remember_normal_frame()
+
+    def windowWillEnterFullScreen_(self, _notification):
+        self._remember_normal_frame()
+        self._frame_transition = True
+
+    def windowWillExitFullScreen_(self, _notification):
+        self._frame_transition = True
+
+    def windowDidExitFullScreen_(self, _notification):
+        screen = self.window.screen() or AppKit.NSScreen.mainScreen()
+        x, y, width, height = settings_normal_frame(self._normal_frame, screen.visibleFrame())
+        self.window.setFrame_display_(((x, y), (width, height)), False)
+        self._frame_transition = False
+
+    def windowDidFailToEnterFullScreen_(self, _window):
+        self._frame_transition = False
+
+    def windowDidFailToExitFullScreen_(self, _window):
+        self._frame_transition = False
+
+    def windowDidBecomeKey_(self, _notification):
+        self.sidebar.refresh_focus()
 
     def windowWillUseStandardFrame_defaultFrame_(self, window, _default_frame):
         return window_fill_frame(window)
@@ -1138,43 +1314,60 @@ class ControlWindow(AppKit.NSObject):
     def _apply_width(self, width):
         """Two layouts, not a continuous reflow. Wide, Pairing puts the machine list beside the code;
         narrow, it stacks and the large figures step down a size."""
-        wide = width >= WIDE_WIDTH
+        threshold = WIDE_WIDTH if self.wide is None else WIDE_WIDTH + (-16 if self.wide else 16)
+        wide = width >= threshold
         if wide == self.wide:
             return
         self.wide = wide
+        self._apply_page_width(self.page, wide)
+
+    @objc.python_method
+    def _apply_page_width(self, key, wide):
+        if key == "design":
+            return
         narrow = not wide
-        top, leading, bottom, trailing = theme.PAGE_PADDING_NARROW if narrow else theme.PAGE_PADDING
-        for constraints in self.page_paddings:
-            for constraint, constant in zip(constraints, (top, leading, bottom, trailing)):
-                constraint.setConstant_(constant)
-        for title in self.page_titles:
-            title.set(size=theme.PAGE_TITLE_NARROW if narrow else theme.PAGE_TITLE)
-        self.state_word.set(size=theme.TYPE["status_word_narrow" if narrow else "status_word"])
-        for readout in (self.round_trip, self.peer):
-            readout.set_narrow(narrow)
-        numeral = theme.TYPE["numeral_narrow" if narrow else "numeral"]
-        self.resistance_numeral.set(size=numeral)
-        self.double_tap_numeral.set(size=numeral)
-        # Stacked, each half takes the full width; side by side, FillEqually shares it. The
-        # distribution runs along the orientation, so stacked it must go back to Fill.
-        self._show_peer()
-        panel = self.panel
-        panel.wide = wide
-        AppKit.NSLayoutConstraint.deactivateConstraints_(panel.pair_stacked)
-        panel.pair_grid.setOrientation_(
-            AppKit.NSUserInterfaceLayoutOrientationHorizontal if wide else AppKit.NSUserInterfaceLayoutOrientationVertical
-        )
-        panel.pair_grid.setDistribution_(
-            AppKit.NSStackViewDistributionFillEqually if wide else AppKit.NSStackViewDistributionFill
-        )
-        if narrow:
-            AppKit.NSLayoutConstraint.activateConstraints_(panel.pair_stacked)
+        top, leading, bottom, trailing = (24, 24, 24, 24)
+        constraints = self.page_paddings[key]
+        for constraint, constant in zip(constraints, (top, leading, bottom, trailing)):
+            constraint.setConstant_(constant)
+        constraints[-1].setConstant_(-(leading + trailing))
+        self.page_titles[key].set(size=theme.PAGE_TITLE_NARROW if narrow else theme.PAGE_TITLE)
+        if key == "overview":
+            self.state_word.set(size=theme.TYPE["status_word_narrow" if narrow else "status_word"])
+            for readout in (self.round_trip, self.peer):
+                readout.set_narrow(narrow)
+            self._show_peer()
+            panel = self.panel
+            if panel.wide != wide:
+                panel.wide = wide
+                # Stacked, each half takes the full width; side by side, FillEqually shares it.
+                AppKit.NSLayoutConstraint.deactivateConstraints_(panel.pair_stacked)
+                panel.pair_grid.setOrientation_(
+                    AppKit.NSUserInterfaceLayoutOrientationHorizontal if wide else AppKit.NSUserInterfaceLayoutOrientationVertical
+                )
+                panel.pair_grid.setDistribution_(
+                    AppKit.NSStackViewDistributionFillEqually if wide else AppKit.NSStackViewDistributionFill
+                )
+                if narrow:
+                    AppKit.NSLayoutConstraint.activateConstraints_(panel.pair_stacked)
+                panel.refresh()
+        elif key == "crossing":
+            self.resistance_numeral.set(size=theme.TYPE["numeral_narrow" if narrow else "numeral"])
+            self.double_tap_numeral.set(size=theme.TYPE["numeral_narrow" if narrow else "numeral"])
 
     @objc.python_method
     def _select_page(self, key):
         self.page = key
         for name, scroll in self.pages.items():
             scroll.setHidden_(name != key)
+            if name != key and scroll.superview() is not None:
+                self.page_host.removeArrangedSubview_(scroll)
+                scroll.removeFromSuperview()
+        if self.pages[key].superview() is None:
+            self.page_host.addArrangedSubview_(self.pages[key])
+        self._last_resize_width = None
+        self.windowDidResize_(None)
+        self._apply_page_width(key, self.wide)
         self.sidebar.select(key)
         self._say(pages.footer(key))
         # Both recorders listen application-wide; left armed, they would take the first key typed on
@@ -1264,7 +1457,8 @@ class ControlWindow(AppKit.NSObject):
         for key, view in (("edge", self.edge_row), ("parts", self.parts_row), ("corner", self.corner_row),
                           ("dragging", self.dragging_box.view), ("resistance", self.resistance_module.view),
                           ("shortcut", self.shortcut_module.view)):
-            motion.set_hidden(view, not rows[key])
+            visible = rows[key] or key == "shortcut" and bool(getattr(self, "_trigger_conflict", ""))
+            motion.set_hidden(view, not visible)
         if not rows["shortcut"]:
             # Hidden, an armed recorder would still take the next key typed anywhere on the page.
             self.key_recorder.cancel()
@@ -1348,8 +1542,7 @@ class ControlWindow(AppKit.NSObject):
         )
         after = (self.notch_after_select.value or 1200) / 1000
         self.notch_note.set(
-            f"Once the pointer is through to another machine the notch keeps playing for {after:g} seconds, so the "
-            "animation finishes instead of cutting off."
+            f"Once the pointer is through to another machine the notch keeps playing for {after:g} seconds. Outline and Island apply to Glow and Beam; other styles draw their own notch."
         )
         self._run_previews()
         notch_range = self.controller.notch_range
@@ -1365,21 +1558,22 @@ class ControlWindow(AppKit.NSObject):
         hold = self.style_select.value == "hold"
         motion.set_hidden(self.double_tap_head, hold)
         self.style_hint.set(
-            "Input is on another machine for as long as the key is held."
+            getattr(self, "_trigger_conflict", "") or ("Input is on another machine for as long as the key is held. If you jump while holding the shortcut, releasing it brings input home."
             if hold
-            else "Tap twice to switch; tap twice again to come back."
+            else "Tap twice to switch; tap twice again to come back."),
+            ink="amber" if getattr(self, "_trigger_conflict", "") else "ink_2",
         )
         resistance = self.resistance_ruler.value
         self.resistance_numeral.set(str(resistance))
         self.push_strip.show(resistance / 500.0, self._chosen_label())
         side = self.edge_select.value
         self.resistance_hint.set(
-            "Switches the moment the pointer touches the edge."
+            "Switches the moment this Mac's pointer touches the edge. Each screen supplies its own zones."
             if resistance == 0
-            else "How far to push past the edge before it gives. It applies as you drag, and lights the "
-            f"{side} edge of this screen so you can feel the size of it."
+            else "Follows this Mac's mouse or trackpad on every screen; each screen supplies its own zones. "
+            f"This screen's {side} edge lights to show the resistance."
             if side
-            else "How far to push past the edge before it gives. It applies as you drag."
+            else "Follows this Mac's mouse or trackpad on every screen; each screen supplies its own zones."
         )
         self.modifier_note.set({
             "semantic": "On a PC, Command arrives as Control, so Command-C copies there too, and Control arrives as the Windows key. "
@@ -1394,7 +1588,7 @@ class ControlWindow(AppKit.NSObject):
         with nothing active, from `flat`, the crossing settings as 1.4.x kept them. A chosen machine
         no longer paired or in use gives way to the first active machine."""
         settings = self.settings_store.current()
-        peers = settings["peers"]
+        peers = peerlist.desktops(settings["peers"])
         available = [entry for entry in peers if entry.get("in_use", True) is True]
         if self.chosen_peer not in {entry["id"] for entry in available}:
             self.chosen_peer = available[0]["id"] if available else None
@@ -1416,7 +1610,7 @@ class ControlWindow(AppKit.NSObject):
         """The machine picker, shown with more than one machine paired and built again when the
         machines or their names change, and the words on the page that name the chosen one."""
         settings = self.settings_store.current()
-        peers = settings["peers"]
+        peers = peerlist.desktops(settings["peers"])
         available = [entry for entry in peers if entry.get("in_use", True) is True]
         if self.chosen_peer not in {entry["id"] for entry in available} and (available or self.chosen_peer is not None):
             self._load_ways()
@@ -1439,6 +1633,7 @@ class ControlWindow(AppKit.NSObject):
         if self.machine_select is not None and self.machine_select.value != self.chosen_peer:
             self.machine_select.value = self.chosen_peer
         label = self._chosen_label() if several else None
+        self.ways_heading.setStringValue_(f"Ways from this screen to {self._chosen_label()}" if self.chosen_peer else "Ways from this screen")
         caption = pages.where_caption(label)
         if self.edge_caption.text != caption:
             self.edge_caption.set(caption)
@@ -1527,7 +1722,7 @@ class ControlWindow(AppKit.NSObject):
         """Every machine as the drawing shows it: the chosen one as the controls have it, which may
         be a moment ahead of the settings, the rest as saved."""
         settings = self.settings_store.current()
-        peers = settings["peers"]
+        peers = peerlist.desktops(settings["peers"])
         live = {
             "side": self.edge_select.value or "",
             "methods": [name for name in methods if name != "shortcut"],
@@ -1616,7 +1811,8 @@ class ControlWindow(AppKit.NSObject):
         settings read; until the controller has them, a save from this window would write the old
         first machine back over it."""
         peers = self.controller.book.peers()
-        first = peers[0]["token"] if peers else ""
+        desktop = peerlist.first_desktop(peers)
+        first = desktop["token"] if desktop is not None else ""
         if first != (self.controller.cfg.auth_token or ""):
             self.peers_changed()
 
@@ -1707,6 +1903,14 @@ class ControlWindow(AppKit.NSObject):
         AppHelper.callLater(0.3, lambda: serial == self._apply_serial and self._apply_settings())
 
     def windowWillClose_(self, _notification):
+        self._remember_normal_frame()
+        try:
+            with self.settings_store.lock:
+                settings = dict(self.settings_store.current())
+                settings["settings_window_frame"] = self._normal_frame
+                self.settings_store.save_settings(settings)
+        except SettingsError as exc:
+            self.logger.warning("Could not save settings window frame: %s", exc)
         self.key_recorder.cancel()
         self.jump_recorder.cancel()
         self.ignored_recorder.cancel()
@@ -1718,10 +1922,9 @@ class ControlWindow(AppKit.NSObject):
 
     @objc.python_method
     def _head(self, title, figure):
-        line = widgets.stack(vertical=False, spacing=12)
-        line.setAlignment_(AppKit.NSLayoutAttributeTop)
-        line.addArrangedSubview_(widgets.hug(widgets.eyebrow(title), AppKit.NSLayoutPriorityDefaultLow))
-        line.addArrangedSubview_(figure)
+        line = widgets.stack(spacing=12)
+        widgets.add(line, widgets.eyebrow(title))
+        widgets.add(line, figure, full_width=False)
         return line
 
     @objc.python_method
@@ -1741,24 +1944,35 @@ class ControlWindow(AppKit.NSObject):
         scroll.setHasVerticalScroller_(True)
         # Nothing scrolls sideways, at any width.
         scroll.setHasHorizontalScroller_(False)
-        scroll.setAutohidesScrollers_(True)
+        scroll.setAutohidesScrollers_(False)
+        scroll.setScrollerStyle_(AppKit.NSScrollerStyleLegacy)
         page = FlippedView.alloc().init()
+        page.setBackgroundColor_(AppKit.NSColor.clearColor())
+        page.setSelectionHighlightStyle_(AppKit.NSTableViewSelectionHighlightStyleNone)
+        page.setAccessibilityRole_(AppKit.NSAccessibilityGroupRole)
+        page.setAccessibilityLabel_(title)
         page.setTranslatesAutoresizingMaskIntoConstraints_(False)
-        body = widgets.stack(spacing=theme.MODULE_GAP)
+        body = widgets.stack(spacing=20)
         page.addSubview_(body)
-        top, leading, bottom, trailing = theme.PAGE_PADDING
+        top, leading, bottom, trailing = (24, 24, 24, 24)
         padding = [
             body.topAnchor().constraintEqualToAnchor_constant_(page.topAnchor(), top),
             body.leadingAnchor().constraintGreaterThanOrEqualToAnchor_constant_(page.leadingAnchor(), leading),
             page.bottomAnchor().constraintGreaterThanOrEqualToAnchor_constant_(body.bottomAnchor(), bottom),
             page.trailingAnchor().constraintGreaterThanOrEqualToAnchor_constant_(body.trailingAnchor(), trailing),
             body.centerXAnchor().constraintEqualToAnchor_(page.centerXAnchor()),
-            body.widthAnchor().constraintLessThanOrEqualToConstant_(theme.PAGE_CONTENT_WIDTH),
+            body.widthAnchor().constraintLessThanOrEqualToConstant_(880),
         ]
-        available_width = body.widthAnchor().constraintEqualToAnchor_constant_(page.widthAnchor(), -(leading + trailing))
-        # Below WindowSizeStayPut (500): above it, the column's 960 pt cap became the window's.
-        available_width.setPriority_(AppKit.NSLayoutPriorityDragThatCannotResizeWindow)
+        available_width = body.widthAnchor().constraintLessThanOrEqualToAnchor_constant_(
+            page.widthAnchor(), -(leading + trailing)
+        )
+        column_width = body.widthAnchor().constraintEqualToConstant_(640)
+        # Keep the fill preference below WindowSizeStayPut so page contents cannot cap the window.
+        # Stronger than child fills (490), below native frame preservation (500).
+        column_width.setPriority_(499)
+        self.page_width_constraints[key] = column_width
         padding.append(available_width)
+        padding.append(column_width)
         # The page ends where its body does, unless motion props it up with the floor while a
         # module folds away, so the scroll offset eases down rather than snapping. Only the
         # page is pulled short; pulling the body would stretch a module into the held space.
@@ -1768,17 +1982,21 @@ class ControlWindow(AppKit.NSObject):
         shrink.setPriority_(1)
         shrink.setActive_(True)
         AppKit.NSLayoutConstraint.activateConstraints_(padding)
-        self.page_paddings.append(padding)
+        self.page_paddings[key] = padding[:4] + [available_width]
         scroll.setDocumentView_(page)
         clip = scroll.contentView()
-        AppKit.NSLayoutConstraint.activateConstraints_([
+        document_bridge = [
             page.topAnchor().constraintEqualToAnchor_(clip.topAnchor()),
             page.leadingAnchor().constraintEqualToAnchor_(clip.leadingAnchor()),
             page.widthAnchor().constraintEqualToAnchor_(clip.widthAnchor()),
-        ])
+        ]
+        for constraint in document_bridge:
+            # A scrolling document must not contribute its fitting size to the outer window.
+            constraint.setPriority_(490)
+        AppKit.NSLayoutConstraint.activateConstraints_(document_bridge)
         header = widgets.stack(spacing=6)
         heading = widgets.Label(title, theme.PAGE_TITLE, 700, tracking=-0.01)
-        self.page_titles.append(heading)
+        self.page_titles[key] = heading
         widgets.add(header, heading.view)
         purpose_label = widgets.Label(purpose, theme.TYPE["body"], ink="ink_2", wrap=True)
         purpose_label.view.widthAnchor().constraintLessThanOrEqualToConstant_(theme.READING_WIDTH).setActive_(True)
@@ -1796,36 +2014,33 @@ class ControlWindow(AppKit.NSObject):
 
     @objc.python_method
     def _overview_page(self, body):
-        # The machines and the pairing sheet lead until there is one, since nothing else here works
-        # without it; once paired they sit under the controls (see _place_machines).
+        # Pairing stays at the top even when machines are already paired.
         self.overview_body = body
-        widgets.add(body, self._status_module().view)
-        widgets.add(body, self._keyboard_module().view)
         widgets.add(body, self.panel.machines_module.view)
         widgets.add(body, self.panel.sheet.view)
+        widgets.add(body, self._status_module().view)
+        widgets.add(body, self._keyboard_module().view)
         widgets.add(body, self._same_module().view)
         widgets.add(body, self._login_module().view)
         widgets.add(body, self._updates_module().view)
 
     @objc.python_method
     def _place_machines(self, first):
-        """The machines list and the pairing sheet at the top of Overview while nothing is paired,
-        under Keyboard and pointer once something is."""
-        if first == self._machines_first:
+        """Keep the primary pairing action immediately below the Overview title."""
+        if self._machines_first is True:
             return
-        self._machines_first = first
+        self._machines_first = True
         body = self.overview_body
         views = (self.panel.machines_module.view, self.panel.sheet.view)
         for view in views:
             body.removeArrangedSubview_(view)
-        # Under the page's title block, which is the first view; after Keyboard and pointer otherwise.
-        at = 1 if first else 3
+        at = 1
         for offset, view in enumerate(views):
             body.insertArrangedSubview_atIndex_(view, at + offset)
 
     @objc.python_method
     def _same_module(self):
-        module = widgets.Module(spacing=10)
+        module = widgets.Module()
         module.add(widgets.eyebrow("Settings"))
         self.same_switch = widgets.Switch("Same on all machines", on_change=self._set_same)
         module.add(self.same_switch.view)
@@ -1857,10 +2072,11 @@ class ControlWindow(AppKit.NSObject):
         if self.same_switch.value != on:
             self.same_switch.value = on
         self.same_switch.set_enabled(not old)
-        who = settings_sync.who(list(peerlist.labels(self.controller.book.peers()).values()))
+        who = settings_sync.who(list(peerlist.labels(peerlist.desktops(self.controller.book.peers())).values()))
         self.same_note.set(settings_sync.switch_note(who, cfg.same_on_both, old), ink="amber" if old else "ink_2")
+        self.same_note.view.setToolTip_(settings_sync.switch_detail("mac"))
         for key, label in self.scope_labels.items():
-            text = settings_sync.scope(key, who, on, pages.SCOPE.get(key))
+            text = settings_sync.scope(key, who, on, pages.SCOPE.get(key), "mac")
             if label.text != text:
                 label.set(text)
         for note in self.own_notes:
@@ -1884,7 +2100,7 @@ class ControlWindow(AppKit.NSObject):
         self.controller.apply_settings(cfg)
         self._send_same()
         if not on:
-            self._apply_followed_design()
+            self._apply_followed_design(force=True)
         self._show_same()
 
     @objc.python_method
@@ -1897,40 +2113,55 @@ class ControlWindow(AppKit.NSObject):
             "set_at": cfg.design_set_at,
             "by": cfg.design_by or self.own_id(),
             "values": {key: values[key] for key in settings_sync.DESIGN_KEYS},
+            "path": (self._design_path or [self.own_id()])
+                    if cfg.design_follow_peer and not cfg.same_on_both else [self.own_id()],
         }
         return settings_sync.message_data(cfg.same_on_both, cfg.same_set_at,
                                           values, by=cfg.same_by or self.own_id(), design_state=design_state)
 
     @objc.python_method
-    def _apply_followed_design(self):
+    def _apply_followed_design(self, force=False):
         cfg = self.controller.cfg
         peer = cfg.design_follow_peer
         state = self._design_states.get(peer)
         if not peer or state is None or cfg.same_on_both:
             return
         current = settings_sync.mac_values(config_to_raw(cfg))
+        cursor = self._followed_version
+        stamp, author = cursor[1:] if cursor and cursor[0] == peer else (-1, "")
         taken = settings_sync.followed_design(current, state, peer, peer, cfg.same_on_both,
-                                              cfg.design_set_at, cfg.design_by)
+                                              stamp, author, own_id=self.own_id(), force=force)
         if taken is None:
             return
-        raw = settings_sync.apply_mac(config_to_raw(cfg), taken["values"])
-        raw["design_set_at"] = taken["set_at"]
-        raw["design_by"] = taken["by"]
+        cycle = taken.get("cycle", False)
+        path = [self.own_id()] if cycle else taken["path"]
+        announce = cycle or taken["changed"] or path != self._design_path or force
+        raw = config_to_raw(cfg) if cycle else settings_sync.apply_mac(config_to_raw(cfg), taken["values"])
+        if cycle:
+            raw["design_follow_peer"] = ""
+        if announce:
+            raw["design_set_at"] = settings_sync.next_stamp(cfg.design_set_at, time.time())
+            raw["design_by"] = self.own_id()
         try:
             cfg = self.settings_store.save(raw)
         except (SettingsError, TypeError, ValueError):
             self.logger.exception("could not save followed Design from %s", peer)
             return
         self.controller.apply_settings(cfg)
+        self._design_path = path
+        self._followed_version = None if cycle else (peer, taken["set_at"], taken["by"])
         self._load_shared(config_to_raw(cfg))
-        if taken["changed"]:
+        if announce:
             self._send_same()
+        self._refresh_design_follow()
 
     @objc.python_method
-    def _receive_design(self, data, peer):
+    def _receive_design(self, data, peer, apply=True):
         if peer is None:
             return
         peer_id = protocol.id_text(peer) if isinstance(peer, bytes) else peer
+        if peer_id not in {entry.get("id") for entry in peerlist.desktops(self.controller.book.peers())}:
+            return
         state = settings_sync.read_design_state(data, KEY_NAME_TO_CODE)
         if state is None:
             return
@@ -1938,7 +2169,7 @@ class ControlWindow(AppKit.NSObject):
         if held is None or settings_sync.design_arrived(state, held["set_at"], held["by"]):
             self._design_states[peer_id] = state
             self._refresh_design_follow()
-        if peer_id == self.controller.cfg.design_follow_peer:
+        if apply and peer_id == self.controller.cfg.design_follow_peer:
             self._apply_followed_design()
 
     @objc.python_method
@@ -1960,6 +2191,9 @@ class ControlWindow(AppKit.NSObject):
         """A peer's settings message, over either link, on the main thread. Its state stands only
         when it is newer than this Mac's; then its values replace the shared ones here, and it is
         sent on, unchanged, to every other machine that keeps it."""
+        peer_id = protocol.id_text(peer) if isinstance(peer, bytes) else peer
+        if peer_id is not None and peer_id not in {entry.get("id") for entry in peerlist.desktops(self.controller.book.peers())}:
+            return
         cfg = self.controller.cfg
         was_on = cfg.same_on_both
         taken = settings_sync.arrived(data, cfg.same_set_at, KEY_NAME_TO_CODE, by_here=cfg.same_by)
@@ -1968,6 +2202,9 @@ class ControlWindow(AppKit.NSObject):
             raw = config_to_raw(cfg)
             design_stamp = None
             if on:
+                values, conflict = core_ways.shared_trigger_values(self.settings_store.current(), values)
+                if conflict is not None:
+                    self._show_trigger_conflict(conflict)
                 design_stamp = settings_sync.design_change_stamp(
                     settings_sync.mac_values(raw), values, cfg.design_set_at,
                     settings_sync.read_design_state(data, KEY_NAME_TO_CODE), self.own_id(),
@@ -1996,13 +2233,14 @@ class ControlWindow(AppKit.NSObject):
             self.logger.info("settings from %s applied (same on all machines %s)", peer, "on" if on else "off")
             self._load_shared(config_to_raw(cfg))
             self.refresh()
-        self._receive_design(data, peer)
-        if taken is not None and was_on and not on:
-            self._apply_followed_design()
+        resuming = taken is not None and was_on and not on
+        self._receive_design(data, peer, apply=not resuming)
+        if resuming:
+            self._apply_followed_design(force=True)
 
     @objc.python_method
     def _login_module(self):
-        module = widgets.Module(spacing=10)
+        module = widgets.Module()
         module.add(widgets.eyebrow("At login"))
         self.login_switch = widgets.Switch("Start Beamer when you log in", on_change=self._set_login)
         module.add(self.login_switch.view)
@@ -2013,7 +2251,7 @@ class ControlWindow(AppKit.NSObject):
 
     @objc.python_method
     def _updates_module(self):
-        module = widgets.Module(spacing=10)
+        module = widgets.Module()
         module.add(widgets.eyebrow("Updates"))
         self.updates_switch = widgets.Switch("Check for updates", on_change=self._set_check_updates)
         self.updates_switch.value = self.controller.cfg.check_updates
@@ -2103,7 +2341,7 @@ class ControlWindow(AppKit.NSObject):
         for module in (self._on_screen_module(), self.style_module, self.colour_module,
                        self._trackpad_module(), self._appearance_module()):
             widgets.add(body, module.view)
-        self.follow_module = widgets.Module(spacing=10)
+        self.follow_module = widgets.Module()
         self.follow_module.add(widgets.eyebrow("Match design with"))
         self.follow_host = widgets.stack(spacing=0)
         self.follow_module.add(self.follow_host)
@@ -2113,59 +2351,79 @@ class ControlWindow(AppKit.NSObject):
         self._refresh_design_follow()
 
     @objc.python_method
+    def _design_peer_caps(self):
+        desktops = {entry.get("id") for entry in peerlist.desktops(self.controller.book.peers())}
+        caps = {peer: link.caps for peer, link in list(self.controller._peers_up.items()) if peer in desktops and link.live()}
+        if self.windows_input is not None:
+            server = self.windows_input.server
+            for peer in server.links():
+                if protocol.id_text(peer) not in desktops:
+                    continue
+                known = server.caps_of(peer)
+                if known is not None:
+                    caps[protocol.id_text(peer)] = known
+        return caps
+
+    @objc.python_method
     def _refresh_design_follow(self):
         if not hasattr(self, "follow_host"):
             return
         for view in self.follow_host.arrangedSubviews():
             self.follow_host.removeArrangedSubview_(view)
             view.removeFromSuperview()
-        peers = self.settings_store.current()["peers"]
+        peers = peerlist.desktops(self.settings_store.current()["peers"])
         labels = peerlist.labels(peers)
         choices = [("", "None")]
-        unsupported = set()
-        for entry in peers:
-            peer = entry.get("id", "")
-            if not peer:
-                continue
+        caps = self._design_peer_caps()
+        rows = settings_sync.follow_rows(peers, caps, self._design_states, self.controller.cfg.design_follow_peer)
+        unsupported = {entry["id"]: why_not for entry, why_not in rows if why_not is not None}
+        for entry, why_not in rows:
             title = labels.get(entry.get("token", ""), entry.get("name") or "Machine")
-            if peer not in self._design_states:
-                title += " — Needs beta.6 or later"
-                unsupported.add(peer)
-            choices.append((peer, title))
-        self.follow_select = widgets.Segmented(choices, columns=min(2, len(choices)),
-                                               on_change=self._set_design_follow)
+            if why_not == settings_sync.NEEDS_DESIGN_SYNC:
+                title += f" — {why_not}"
+            choices.append((entry["id"], title))
+        self.follow_select = widgets.MenuChoice(choices, on_change=self._set_design_follow)
         self.follow_select.value = self.controller.cfg.design_follow_peer
-        for value, cell, _words in self.follow_select.cells:
+        for value, cell in self.follow_select.items:
             if value in unsupported:
-                cell.enabled = False
-                cell.setAlphaValue_(0.45)
-                cell.setToolTip_("Needs beta.6 or later")
-        widgets.add(self.follow_host, self.follow_select.view)
+                cell.setEnabled_(False)
+                cell.setToolTip_(unsupported[value])
+        widgets.add(self.follow_host, self.follow_select.view, full_width=False)
         peer = self.controller.cfg.design_follow_peer
+        entry = next((item for item in peers if item.get("id") == peer), {}) if peer else {}
+        name = labels.get(entry.get("token", ""), entry.get("name") or "that machine")
         if peer:
-            entry = next((item for item in peers if item.get("id") == peer), {})
-            name = labels.get(entry.get("token", ""), entry.get("name") or "that machine")
             if self.controller.cfg.same_on_both:
-                self.follow_note.set(f"Following {name}, paused while Same on all machines is on.")
+                note = f"Following {name}, paused while Same on all machines is on."
+            elif peer not in caps:
+                note = f"Keeping the last design received from {name} until it reconnects."
             else:
-                self.follow_note.set(f"Following {name}. Change a Design setting to stop following.")
-        elif unsupported:
-            self.follow_note.set("A paired machine is unavailable until it has beta.6 or later.")
+                note = ""
         else:
-            self.follow_note.set("None: this machine keeps its own Design.")
+            note = settings_sync.follow_note(rows) or "None: this machine keeps its own Design."
+        self.follow_note.set(note)
+        self.follow_note.view.setHidden_(not note)
+        self._lock_followed_design(settings_sync.follow_lock(peer, self.controller.cfg.same_on_both, peers), name)
 
     @objc.python_method
     def _set_design_follow(self, peer):
         raw = config_to_raw(self.controller.cfg)
         raw["design_follow_peer"] = peer or ""
+        if not peer:
+            raw["design_set_at"] = settings_sync.next_stamp(raw["design_set_at"], time.time())
+            raw["design_by"] = self.own_id()
         try:
             cfg = self.settings_store.save(raw)
         except (SettingsError, TypeError, ValueError):
             self.logger.exception("could not save Match design with")
             return
         self.controller.apply_settings(cfg)
+        self._followed_version = None
+        if not peer:
+            self._design_path = [self.own_id()]
+            self._send_same()
         self._refresh_design_follow()
-        self._apply_followed_design()
+        self._apply_followed_design(force=True)
 
     @objc.python_method
     def _appearance_module(self):
@@ -2202,6 +2460,12 @@ class ControlWindow(AppKit.NSObject):
         theme.set_dark(dark)
         self.window.setAppearance_(theme.appearance_named(dark))
         theme.repaint(content)
+        # _select_page takes every page but the open one out of the window, so the walk above
+        # never reaches them; their layers would keep the old palette's CGColors while their text,
+        # which resolves as it draws, took the new one (05-10-2026, Light over dark cards).
+        for scroll in self.pages.values():
+            if scroll.superview() is None:
+                theme.repaint(scroll)
         Quartz.CATransaction.commit()
         if self.previews is not None:
             # The renderers take the palette as they draw, which a held still does not do again.
@@ -2254,7 +2518,7 @@ class ControlWindow(AppKit.NSObject):
 
     @objc.python_method
     def _status_module(self):
-        module = widgets.Module(spacing=10)
+        module = widgets.Module()
         head = widgets.stack(vertical=False, spacing=7)
         head.addArrangedSubview_(widgets.hug(widgets.eyebrow("Link"), AppKit.NSLayoutPriorityDefaultLow))
         self.link_led = widgets.LED()
@@ -2298,10 +2562,11 @@ class ControlWindow(AppKit.NSObject):
         self.hold_box = widgets.Switch("Hold this Mac's edges while an app on it is full screen", on_change=self._hold_changed)
         module.add(self.hold_box.view)
         module.add(self._own_note())
-        module.add(widgets.note(
-            "Off, your pointer can leave a full-screen game or video, and another machine's pointer can go home "
-            "through this Mac's edge. Useful if your keyboard has no key for the shortcut."
-        ).view)
+        self.hold_note = widgets.note(
+            "This screen decides, including when another machine drives it. On, a full-screen app here holds pointer crossings; shortcuts and jump keys still work. Off, another machine's pointer can go home or onward through the configured ways."
+        )
+        module.add(self.hold_note.view)
+        self.hold_box.view.setToolTip_("This screen's setting applies to every pointer on it.")
         return module
 
     @objc.python_method
@@ -2323,8 +2588,9 @@ class ControlWindow(AppKit.NSObject):
     @objc.python_method
     def _ways_module(self):
         module = widgets.Module()
-        module.add(widgets.eyebrow("Ways in"))
+        self.ways_heading = widgets.eyebrow("Ways from this screen")
         # With several machines paired, which one everything per machine below shows and writes.
+        module.add(self.ways_heading)
         self.machine_row = widgets.stack(spacing=0)
         self.machine_row.setHidden_(True)
         module.add(self.machine_row)
@@ -2333,8 +2599,6 @@ class ControlWindow(AppKit.NSObject):
         self.ways_note = widgets.note()
         module.add(self.ways_note.view)
         self.arrangement_diagram = diagram.ArrangementDiagram.alloc().init().setup()
-        module.add(self.arrangement_diagram)
-        module.body.setCustomSpacing_afterView_(16, self.arrangement_diagram)
         # The pointer's ways first, the shortcut on its own row above its settings.
         ways = (
             ("edge", "Edge", "One whole side"),
@@ -2347,12 +2611,23 @@ class ControlWindow(AppKit.NSObject):
             way: widgets.WayTile(title, detail, on_change=lambda on, way=way: self._way_toggled(way, on))
             for way, title, detail in ways
         }
-        module.add(widgets.grid([tile.view for tile in self.method_boxes.values()], 2))
+        ways_list = widgets.stack(spacing=0)
+        widgets.add(ways_list, widgets.grid([tile.view for tile in self.method_boxes.values()], 2))
+        self.ways_pair = widgets.SideBySide(
+            self.arrangement_diagram,
+            ways_list,
+            theme.tokens.CROSSING_ARRANGEMENT_MIN_WIDTH,
+            theme.tokens.CROSSING_WAYS_MIN_WIDTH,
+        )
+        self.side_by_side.append(self.ways_pair)
+        module.add(self.ways_pair.view)
+        module.body.setCustomSpacing_afterView_(16, self.ways_pair.view)
         module.add(self._own_note(pages.OWN_NOTCH))
         # The values are the side of this Mac the chosen machine is on, which is also the edge that crosses.
         self.edge_select = widgets.Segmented(
             [("left", "Left"), ("right", "Right"), ("top", "Above"), ("bottom", "Below")], on_change=self._changed
         )
+        self.edge_select.view.setToolTip_("Changing a side updates the other end's side; it can turn overlapping ways off, with a notice.")
         self.edge_row, self.edge_caption = widgets.field_row(pages.where_caption(None), self.edge_select.view)
         module.add(self.edge_row)
         # A group within Ways, never a panel of its own: a panel inside a panel also forced the
@@ -2392,6 +2667,7 @@ class ControlWindow(AppKit.NSObject):
             columns=2,
             on_change=self._changed,
         )
+        self.corner_select.view.setToolTip_(pages.corner_note())
         self.corner_row = widgets.field_row("Corner", self.corner_select.view)[0]
         module.add(self.corner_row)
         # What stops a way working, under the ways it is about: a side another machine's edge holds,
@@ -2403,10 +2679,12 @@ class ControlWindow(AppKit.NSObject):
         for note in (self.blocked_note, self.missing_note, self.no_way_back_note):
             note.view.setHidden_(True)
             module.add(note.view)
-        self.dragging_box = widgets.Switch("Don't cross while dragging", on_change=self._changed)
+        self.dragging_box = widgets.Switch("Don't cross while dragging with this Mac's pointer", on_change=self._changed)
+        self.dragging_box.view.setToolTip_("Applies when this physical pointer pushes through this screen's ways; visiting pointers are not protected by this switch.")
         module.add(self.dragging_box.view)
         self.jump_box = widgets.stack(spacing=8)
-        widgets.add(self.jump_box, widgets.eyebrow("Jump straight here"))
+        self.jump_heading = widgets.eyebrow("Jump to this machine")
+        widgets.add(self.jump_box, self.jump_heading)
         self.jump_recorder = widgets.JumpKeyRecorder(on_change=self._record_jump_key, on_arm=self._jump_arming)
         jump_controls = widgets.stack(vertical=False, spacing=8)
         jump_controls.addArrangedSubview_(self.jump_recorder.view)
@@ -2429,7 +2707,14 @@ class ControlWindow(AppKit.NSObject):
             return
         self.jump_recorder.set_value(entry.get("jump_key", ""))
         name = self._shown(peerlist.label_for(peers, peer_id=self.chosen_peer) or "this machine")
-        self.jump_note.set(f"sends input to {name}")
+        self.jump_heading.setStringValue_(f"Jump to {name}")
+        self.jump_recorder.view.setAccessibilityLabel_(f"Jump to {name} key, {self.jump_recorder._title()}")
+        chord = self.jump_recorder._title()
+        if entry.get("jump_key"):
+            self.jump_note.set(f"Press {chord} to send input to {name}; press again to bring it home.")
+        else:
+            self.jump_note.set(f"Choose a key combination to jump to {name} and back.")
+        self.jump_note.view.setToolTip_(f"Works while edges are held. Needs In use, This Mac drives it and permission from {name} to drive it.")
         self.jump_clear.view.setAccessibilityLabel_(f"Clear jump key for {name}")
 
     @objc.python_method
@@ -2475,19 +2760,15 @@ class ControlWindow(AppKit.NSObject):
     def _shortcut_module(self):
         module = widgets.Module()
         module.add(widgets.eyebrow("Shortcut"))
-        self.key_recorder = widgets.KeyRecorder("alt_r", on_change=self._changed)
+        self.key_recorder = widgets.KeyRecorder("alt_r", on_change=self._trigger_chosen)
         module.add(self.key_recorder.view)
         self.style_select = widgets.Segmented([("double_tap", "Double-tap"), ("hold", "Hold")], on_change=self._changed)
         module.add(widgets.field_row("How you press it", self.style_select.view)[0])
         # The figure sits on the ruler's own line, so it reads as the ruler's value rather than as
         # a heading for the whole module, and the two hide together under Hold.
         self.double_tap_head = widgets.stack(spacing=6)
-        caption = widgets.stack(vertical=False, spacing=12)
-        caption.setAlignment_(AppKit.NSLayoutAttributeLastBaseline)
-        caption.addArrangedSubview_(widgets.hug(widgets.label("Time between taps", theme.TYPE["note"], ink="ink_2"),
-                                                AppKit.NSLayoutPriorityDefaultLow))
         figure, self.double_tap_numeral = self._numeral("ms")
-        caption.addArrangedSubview_(figure)
+        caption, _ = widgets.field_row("Time between taps", figure)
         widgets.add(self.double_tap_head, caption)
         # The stored window runs 50 to 2000 ms, but only about 150 to 600 is useful, so the ruler
         # shows 50 to 1000 on a square-root scale; a stored value past 1000 pins the thumb.
@@ -2500,6 +2781,23 @@ class ControlWindow(AppKit.NSObject):
         self.style_hint = widgets.note()
         module.add(self.style_hint.view)
         return module
+
+    @objc.python_method
+    def _show_trigger_conflict(self, note):
+        self._trigger_conflict = note
+        if note:
+            self.style_hint.set(note, ink="amber")
+
+    @objc.python_method
+    def _trigger_chosen(self, key):
+        try:
+            core_ways.check_trigger_key(self.settings_store.current(), key)
+        except ValueError as exc:
+            self.key_recorder.set_value(self.controller.cfg.trigger_key)
+            self._show_trigger_conflict(str(exc))
+            return
+        self._show_trigger_conflict("")
+        self._changed()
 
     @objc.python_method
     def _ignored_module(self):
@@ -2575,30 +2873,32 @@ class ControlWindow(AppKit.NSObject):
 
     @objc.python_method
     def _on_screen_module(self):
-        module = widgets.Module(spacing=8)
+        module = widgets.Module()
         module.add(widgets.eyebrow("On screen"))
         self.glow_box = widgets.Switch("Animate crossings on this Mac", on_change=self._changed)
         module.add(self.glow_box.view)
         module.add(self._own_note())
         module.add(widgets.note(
-            "Lights the edge, the corner or the notch as you push toward another machine. Switched off, crossing "
-            "still works; you feel it rather than see it. Each machine sets how its own edge looks."
+            "Turns crossing and landing animations on or off on this screen. Saved style choices stay in place."
         ).view)
         self.landing_box = widgets.Switch("Show where the pointer lands", on_change=self._changed)
         self.landing_row = widgets.stack(spacing=8)
         widgets.add(self.landing_row, self.landing_box.view)
         widgets.add(self.landing_row, widgets.note(
-            "When the shortcut or the menu brings input to this Mac, an animation plays around the "
-            "pointer. Choose it under Style, for Shortcut and menu."
+            "For shortcut, menu and jump arrivals; requires Animate crossings on this screen."
         ).view)
         module.add(self.landing_row)
         return module
 
     @objc.python_method
-    def _preview_tile(self, base, value, title, detail, notch, **overrides):
+    def _preview_tile(self, base, value, title, detail, notch, flexible=False, **overrides):
         """One tile's preview: its own screen, a feed pinned to the style the tile shows, and the
         real renderer hosted on it, registered with the page's loop."""
-        screen = widgets.size(previews.PreviewScreen.alloc().init().setup(notch), height=84)
+        screen = previews.PreviewScreen.alloc().init().setup(notch)
+        if flexible:
+            screen.widthAnchor().constraintEqualToAnchor_multiplier_(screen.heightAnchor(), 2.0).setActive_(True)
+        else:
+            screen = widgets.size(screen, height=84)
         feed = previews.PreviewFeed(self.controller, **overrides)
         if notch is None:
             renderer = previews.hosted_edge(base)(feed, self.logger, screen)
@@ -2622,6 +2922,9 @@ class ControlWindow(AppKit.NSObject):
                 self._preview_tile(NotchIsland, "island", "Island", "The notch grows as you push, with a meter inside, and flashes as you go through.", notch),
             ],
             on_change=self._changed,
+            vertical=True,
+            responsive=True,
+            aspect=False,
         )
         self._hover(self.notch_style_select)
         widgets.add(row, self.notch_style_select.view)
@@ -2635,12 +2938,45 @@ class ControlWindow(AppKit.NSObject):
         return row
 
     @objc.python_method
+    def _follow_banner(self):
+        """Shown at the top of Style while this Mac follows another machine's design, whose
+        followed controls are locked until Stop following (settings_sync.follow_lock)."""
+        self.follow_banner = widgets.stack(spacing=8)
+        self.follow_banner.setWantsLayer_(True)
+        widgets.paint(self.follow_banner, "well", "rule", theme.RADIUS["button"])
+        self.follow_banner.setEdgeInsets_(AppKit.NSEdgeInsetsMake(10, 12, 10, 12))
+        self.follow_banner_label = widgets.Label("", theme.TYPE["body"], 600, wrap=True)
+        widgets.add(self.follow_banner, self.follow_banner_label.view)
+        self.stop_follow_button = widgets.Button(settings_sync.STOP_FOLLOWING, self, "stopFollowing:", scale="small")
+        widgets.add(self.follow_banner, self.stop_follow_button.view, full_width=False)
+        self.follow_banner.setHidden_(True)
+        return self.follow_banner
+
+    def stopFollowing_(self, _sender):
+        self._set_design_follow("")
+
+    @objc.python_method
+    def _lock_followed_design(self, entry, name):
+        """Followed controls dimmed and deaf while `entry` is followed; the local ones stay live."""
+        if not hasattr(self, "follow_banner"):
+            return
+        locked = entry is not None
+        for control in (self.glow_style_select, self.switch_style_select, self.glow_colour_select,
+                        self.length_select, self.size_select, self.landing_box):
+            control.set_enabled(not locked)
+        self.follow_banner_label.set(settings_sync.following_banner(name) if locked else "")
+        self.follow_banner.setHidden_(not locked)
+
+    @objc.python_method
     def _edge_module(self):
         """Every style, grouped as effects.DIRECTIONS groups them: today's Glow and Beam first with
         stills like the rest, then each direction's quiet, medium and showpiece effect; every tile shows
         its style at the place chosen above them, and plays while the pointer is over it."""
         module = widgets.Module()
         module.add(widgets.eyebrow("Style"))
+        module.add(self._follow_banner())
+        self.style_preview_hint = widgets.note("Hover to preview", ink="ink_2")
+        module.add(self.style_preview_hint.view)
         self.style_for_select = widgets.Segmented(
             [("crossing", "Crossing"), ("switch", "Shortcut and menu")], on_change=self._changed
         )
@@ -2654,17 +2990,16 @@ class ControlWindow(AppKit.NSObject):
         self.effect_method_view = widgets.field_row("Show at", self.effect_method_select.view)[0]
         module.add(self.effect_method_view)
         self.place_note = widgets.note()
-        module.add(self.place_note.view)
         module.body.setCustomSpacing_afterView_(6, self.effect_method_view)
         self.notch_row = self._notch_row()
-        module.add(self.notch_row)
-        module.body.setCustomSpacing_afterView_(22, self.notch_row)
         colour = lambda: self.glow_colour_select.value or "signal"
         place = lambda: self.place
         pace = lambda: effects.pace(self.length_select.value)
         effect_size = lambda: self.size_select.value or "medium"
         # The two sets of tiles, one per mode; only the chosen mode's shows.
         self.crossing_styles_box = widgets.stack(spacing=0)
+        tile_sets = widgets.stack(spacing=6)
+        widgets.add(tile_sets, self.crossing_styles_box)
         rows = []
         for group, choices in pages.style_groups(self.effects_ready):
             # Glow and Beam as stills of the same scene as the effects, so every tile reads alike.
@@ -2678,16 +3013,17 @@ class ControlWindow(AppKit.NSObject):
                 notch = previews.notch_size()
                 stacked = []
                 for value, title, detail, still in tiles:
-                    screens = {style: self._preview_tile(base, style, "", "", notch)[3]
+                    screens = {style: self._preview_tile(base, style, "", "", notch, flexible=True)[3]
                                for style, base in (("beam", NotchBeam), ("island", NotchIsland))}
                     stack = previews.TileStack.alloc().init().setup([still, *screens.values()])
                     self.classic_pictures.append((stack, still, screens))
                     stacked.append((value, title, detail, stack))
                 tiles = stacked
             rows.append(self._style_group(self.crossing_styles_box, group, tiles))
-        module.add(self.crossing_styles_box)
         self.glow_style_select = widgets.Linked(rows, on_change=self._changed, host=self.crossing_styles_box)
+        self._style_grid(self.crossing_styles_box)
         self.switch_styles_box = widgets.stack(spacing=0)
+        widgets.add(tile_sets, self.switch_styles_box)
         rows = []
         for group, choices in pages.switch_style_groups(self.effects_ready):
             tiles = []
@@ -2697,12 +3033,12 @@ class ControlWindow(AppKit.NSObject):
                     fx, colour, self.logger, pace=pace, effect_size=effect_size)))
             self.effect_stills.extend(tile[3] for tile in tiles)
             rows.append(self._style_group(self.switch_styles_box, group, tiles))
+        self._style_grid(self.switch_styles_box)
         widgets.add(self.switch_styles_box, widgets.note(
-            "What plays around the pointer when the shortcut or the menu brings input to this Mac. "
-            "Same as crossing follows the style you chose for crossing, with a ring for Glow and Beam."
+            "What plays around the pointer for shortcut, menu and jump arrivals. Same as crossing uses this screen's crossing style."
         ).view)
-        module.add(self.switch_styles_box)
         self.switch_style_select = widgets.Linked(rows, on_change=self._changed, host=self.switch_styles_box)
+        module.add(tile_sets)
         # The chosen style's name and what it does, under the tiles that chose it.
         self.chosen_box = widgets.stack(spacing=6)
         self.effect_name = widgets.Label("", theme.TYPE["body"], 600)
@@ -2710,19 +3046,19 @@ class ControlWindow(AppKit.NSObject):
         self.effect_blurb = widgets.note()
         widgets.add(self.chosen_box, self.effect_blurb.view)
         module.add(self.chosen_box)
-        module.body.setCustomSpacing_afterView_(18, self.chosen_box)
+        module.body.setCustomSpacing_afterView_(12, self.chosen_box)
         # Every style and every switch plays at this length, so it follows the tiles either way.
         self.length_select = widgets.Segmented(effects.LENGTHS, on_change=self._changed)
         self.size_select = widgets.Segmented(effects.SIZES, on_change=self._changed)
-        length_size = widgets.stack(vertical=False, spacing=14)
-        length_size.setDistribution_(AppKit.NSStackViewDistributionFillEqually)
-        length_size.addArrangedSubview_(widgets.field_row("Length", self.length_select.view)[0])
-        length_size.addArrangedSubview_(widgets.field_row("Size", self.size_select.view)[0])
-        widgets.add(module.body, length_size)
+        self.length_row = widgets.field_row("Length", self.length_select.view)[0]
+        self.size_row = widgets.field_row("Size", self.size_select.view)[0]
+        module.add(self.length_row)
+        module.add(self.size_row)
         module.add(widgets.note(
-            "Length sets how long each animation takes to play through once the pointer crosses, and to land. "
-            "Size sets the depth of the edge band."
+            "Length changes effect playback time, not crossing resistance or key timing. Size changes depth for styles that support it; it does not change resistance."
         ).view)
+        module.add(self.place_note.view)
+        module.add(self.notch_row)
         return module
 
     @objc.python_method
@@ -2744,14 +3080,19 @@ class ControlWindow(AppKit.NSObject):
 
     @objc.python_method
     def _style_group(self, box, group, tiles):
+        group_box = widgets.stack(spacing=8)
+        group_box.setAlignment_(AppKit.NSLayoutAttributeWidth)
         heading = widgets.label(group, theme.TYPE["note"], 600, ink="ink_2")
-        widgets.add(box, heading)
-        row = widgets.ChoiceTiles(tiles, columns=3)
+        widgets.add(group_box, heading)
+        row = widgets.ChoiceTiles(tiles, vertical=True, responsive=True)
+        widgets.add(group_box, row.view)
         self._hover(row)
-        widgets.add(box, row.view)
-        box.setCustomSpacing_afterView_(8, heading)
-        box.setCustomSpacing_afterView_(22, row.view)
+        widgets.add(box, group_box)
         return row
+
+    @objc.python_method
+    def _style_grid(self, box):
+        box.setSpacing_(20)
 
     @objc.python_method
     def _colour_module(self):
@@ -2763,7 +3104,7 @@ class ControlWindow(AppKit.NSObject):
                 choices = [(value, title, effects_overlay.palette(value)) for value, title in choices]
             heading = module.add(widgets.label(group, theme.TYPE["note"], 600, ink="ink_2"))
             module.body.setCustomSpacing_afterView_(8, heading)
-            row = widgets.Swatches(choices, columns=len(crossing.GLOW_COLOURS))
+            row = widgets.Swatches(choices, responsive=True)
             module.add(row.view)
             module.body.setCustomSpacing_afterView_(18, row.view)
             rows.append(row)
@@ -2782,7 +3123,9 @@ class ControlWindow(AppKit.NSObject):
             [("quarters", "Every quarter"), ("halves", "Halfway"), ("breakthrough", "Only when through")],
             on_change=self._changed,
         )
-        module.add(widgets.field_row("Ticks at", self.tick_steps_select.view)[0])
+        ticks, _caption = widgets.field_row("Ticks at", self.tick_steps_select.view)
+        self.tick_steps_pair = ticks
+        module.add(ticks)
         # On the press, not the release: macOS plays nothing once the finger has left the trackpad.
         self.try_button = widgets.Button("Try it", self, "tryTick:", scale="small")
         self.try_button.view.sendActionOn_(AppKit.NSEventMaskLeftMouseDown)
@@ -2819,7 +3162,7 @@ class ControlWindow(AppKit.NSObject):
 
     @objc.python_method
     def _connection_module(self):
-        module = widgets.Module(spacing=10)
+        module = widgets.Module()
         # The page edits the first machine paired; any other is changed by pairing it again.
         self.connection_note = widgets.note()
         module.add(self.connection_note.view)
@@ -2840,8 +3183,8 @@ class ControlWindow(AppKit.NSObject):
         for control in (self.host_field, self.host_secret):
             control.setAccessibilityLabel_("Address")
         port_box, self.port_field = widgets.field()
-        module.add(widgets.field_row("Port", port_box)[0])
-        self.port_field.setAccessibilityLabel_("Port")
+        module.add(widgets.field_row("First paired machine's port", port_box)[0])
+        self.port_field.setAccessibilityLabel_("First paired machine's port")
         self.wake_state = widgets.Label("", theme.TYPE["small"], mono=True)
         module.add(widgets.field_row("Wake-on-LAN", self.wake_state.view)[0])
         self.wake_hint = widgets.note()
@@ -2855,7 +3198,7 @@ class ControlWindow(AppKit.NSObject):
 
     @objc.python_method
     def _access_module(self):
-        module = widgets.Module(spacing=10)
+        module = widgets.Module()
         self.access_status, self.access_button = self._permission_row(
             module, "Accessibility", "Lets Beamer move this Mac's pointer and type on it when another machine drives.",
             "requestAccessibility:",
@@ -3046,7 +3389,6 @@ class ControlWindow(AppKit.NSObject):
             shared = self.controller.cfg.same_on_both and settings_sync.changed(before, after)
             design_changed = any(before.get(key) != after.get(key) for key in settings_sync.DESIGN_KEYS)
             if design_changed:
-                raw["design_follow_peer"] = ""
                 raw["design_set_at"] = settings_sync.next_stamp(
                     max(self.controller.cfg.design_set_at, self.controller.cfg.same_set_at), time.time())
                 raw["design_by"] = self.own_id()
@@ -3317,7 +3659,7 @@ class ControlWindow(AppKit.NSObject):
         self._show_peer()
         # The first machine by name, which the Connection page edits; peer_label follows the
         # machine in question instead.
-        peers = controller.book.peers()
+        peers = peerlist.desktops(controller.book.peers())
         first = peerlist.labels(peers)[peers[0]["token"]] if peers else None
         self.connection_note.set(self._shown(
             f"The address and port of {first}, the first machine paired. Another machine is changed by pairing it again."
@@ -3411,6 +3753,14 @@ class _LaunchWatch(AppKit.NSObject):
             self.tray.hidden = True
 
 
+def _tray_item(title, **kwargs):
+    return rumps.MenuItem(americanise(title), **kwargs)
+
+
+def _set_tray_title(item, title):
+    item.title = americanise(title)
+
+
 class TrayApp(rumps.App):
     def __init__(self, controller, settings_store, logger, hidden=False):
         self.hidden = hidden
@@ -3475,16 +3825,16 @@ class TrayApp(rumps.App):
         )
         self.control_window.update_checker = self.update_checker
         self._notch_failed = False
-        self.header_item = header = rumps.MenuItem(f"Beamer {VERSION}", callback=None)
+        self.header_item = header = _tray_item(f"Beamer {VERSION}", callback=None)
         self.update_url = None
-        self.status_item = rumps.MenuItem("Starting", callback=None)
-        self.toggle_item = rumps.MenuItem(TOGGLE_ITEM, callback=self.toggle_redirect)
+        self.status_item = _tray_item("Starting", callback=None)
+        self.toggle_item = _tray_item(TOGGLE_ITEM, callback=self.toggle_redirect)
         # With several machines to send to, one item each after the one above, keyed by machine id.
         self._send_keys = []
-        self.pause_item = rumps.MenuItem("Pause crossing", callback=self.toggle_pause)
+        self.pause_item = _tray_item("Pause crossing", callback=self.toggle_pause)
         # One tick per direction, so either can be switched off while the other keeps working.
-        self.send_item = rumps.MenuItem("This Mac drives other machines", callback=self.toggle_send_to_windows)
-        self.receive_item = rumps.MenuItem("Other machines drive this Mac", callback=self.toggle_windows_drives)
+        self.send_item = _tray_item("This Mac drives other machines", callback=self.toggle_send_to_windows)
+        self.receive_item = _tray_item("Other machines drive this Mac", callback=self.toggle_windows_drives)
         self._symbol = None
         super().__init__(
             "Beamer",
@@ -3499,12 +3849,12 @@ class TrayApp(rumps.App):
                 self.send_item,
                 self.receive_item,
                 rumps.separator,
-                rumps.MenuItem("Settings…", callback=self.open_window),
-                rumps.MenuItem("Reload configuration", callback=self.reload_config),
-                rumps.MenuItem("Open log folder", callback=self.open_log_folder),
+                _tray_item("Settings…", callback=self.open_window),
+                _tray_item("Reload configuration", callback=self.reload_config),
+                _tray_item("Open log folder", callback=self.open_log_folder),
                 rumps.separator,
-                rumps.MenuItem("About Beamer", callback=self.show_about),
-                rumps.MenuItem("Quit Beamer", callback=self.quit_app),
+                _tray_item("About Beamer", callback=self.show_about),
+                _tray_item("Quit Beamer", callback=self.quit_app),
             ],
             quit_button=None,
         )
@@ -3522,10 +3872,10 @@ class TrayApp(rumps.App):
         """On the main thread. The version line in the menu becomes the way to the download."""
         self.update_url = found[1] if found else None
         if found:
-            self.header_item.title = f"Beamer {found[0]} is available…"
+            _set_tray_title(self.header_item, f"Beamer {found[0]} is available…")
             self.header_item.set_callback(self.open_update)
         else:
-            self.header_item.title = f"Beamer {VERSION}"
+            _set_tray_title(self.header_item, f"Beamer {VERSION}")
             self.header_item.set_callback(None)
         self.control_window.show_update(found)
 
@@ -3582,14 +3932,14 @@ class TrayApp(rumps.App):
         )
         hide = controller.cfg.hide_addresses
         if controller.redirecting:
-            self.toggle_item.title = "Return input to Mac"
+            _set_tray_title(self.toggle_item, "Return input to Mac")
         else:
-            self.toggle_item.title = pages.redact(
-                f"Send input to {controller.peer_label}" if controller.peer_label else "Send input", hide)
-        self.pause_item.title = "Resume crossing" if controller.crossing_paused else "Pause crossing"
+            _set_tray_title(self.toggle_item, pages.redact(
+                f"Send input to {controller.peer_label}" if controller.peer_label else "Send input", hide))
+        _set_tray_title(self.pause_item, "Resume crossing" if controller.crossing_paused else "Pause crossing")
         self._machine_items()
         self._direction_items()
-        self.status_item.title = pages.redact(link_state.describe(controller).word, hide)
+        _set_tray_title(self.status_item, pages.redact(link_state.describe(controller).word, hide))
 
     def _machine_items(self):
         """With more than one machine to send to, Send input to each of them in place of the one
@@ -3604,11 +3954,11 @@ class TrayApp(rumps.App):
             anchor = TOGGLE_ITEM
             for ident in keys:
                 # Created under its id, which is its key in the menu, then given its words.
-                self.menu.insert_after(anchor, rumps.MenuItem(ident, callback=lambda _sender, ident=ident: self._send_to(ident)))
+                self.menu.insert_after(anchor, _tray_item(ident, callback=lambda _sender, ident=ident: self._send_to(ident)))
                 anchor = ident
             self._send_keys = keys
         for ident, title in wanted:
-            self.menu[ident].title = title
+            _set_tray_title(self.menu[ident], title)
         self.toggle_item.hidden = bool(keys)
 
     def _send_to(self, peer):
@@ -3636,9 +3986,15 @@ class TrayApp(rumps.App):
             send, receive = "This Mac drives every machine", "Every machine drives this Mac"
         else:
             send, receive = "This Mac drives other machines", "Other machines drive this Mac"
-        self.send_item.title, self.receive_item.title = send, receive
+        _set_tray_title(self.send_item, send)
+        _set_tray_title(self.receive_item, receive)
+        desktops = peerlist.desktops(peers)
+        send_labels = [pages.redact(label, hide) for label in peerlist.labels(desktops).values()]
+        _set_tray_title(self.send_item,
+                        f"This Mac drives {send_labels[0]}" if len(send_labels) == 1 else
+                        "This Mac drives every machine" if send_labels else "This Mac drives other machines")
         for item, name in ((self.send_item, "send"), (self.receive_item, "allow_drive")):
-            on = [peer.get(name) is True for peer in peers]
+            on = [peer.get(name) is True for peer in (desktops if name == "send" else peers)]
             item.state = 1 if on and all(on) else -1 if any(on) else 0
 
     def set_menu_bar_symbol(self, state):
@@ -3669,7 +4025,7 @@ class TrayApp(rumps.App):
 
     def toggle_send_to_windows(self, _sender):
         """The menu's tick covers every machine: all on turns them all off, anything else all on."""
-        peers = self.controller.book.peers()
+        peers = peerlist.desktops(self.controller.book.peers())
         self._switch([peer["token"] for peer in peers], send=not all(peer.get("send") is True for peer in peers))
 
     def toggle_windows_drives(self, _sender):

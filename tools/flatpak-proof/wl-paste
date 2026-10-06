@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+set -euo pipefail
+exec flatpak-spawn --host --directory="$BEAMER_FLATPAK_PROOF_TOOLS" \
+    --env="WAYLAND_DISPLAY=$BEAMER_PROOF_WAYLAND_DISPLAY" wl-paste "$@"

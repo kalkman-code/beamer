@@ -226,15 +226,29 @@ class HooksTest(unittest.TestCase):
         wait_for(lambda: h.releases(), what="the let-go")
         self.assertEqual(h.releases(), [(3, (0.0, 777.0))])
 
+    def test_a_paused_keyboard_releases_keys_held_by_that_device(self):
+        h = self.make()
+        h.start()
+        h.cross()
+        h.ei.feed(("key", h.keyboard, 29, True), ("frame", h.keyboard, 0))
+        wait_for(lambda: h.keys, what="the held key to be forwarded")
+        h.ei.feed(("device_paused", h.keyboard))
+        wait_for(lambda: len(h.keys) == 2, what="the paused device's held key to be released")
+        self.assertEqual([(name, down) for name, down, _vk in h.keys], [("cmd", True), ("cmd", False)])
+        self.assertEqual(h.hooks._names_down, {})
+
     def test_moving_back_into_the_screen_lets_go_there_and_sends_nothing(self):
         h = self.make()
         h.start()
-        h.activate()
-        h.ei.feed(("motion", h.pointer, -5.0, 2.0))
+        h.cross()
+        h.ei.feed(("key", h.keyboard, 29, True), ("frame", h.keyboard, 0))
+        wait_for(lambda: h.keys, what="the held key to be forwarded")
+        h.away = False
+        desktop_portal.set_cursor_position(0, 502)
         wait_for(lambda: h.releases(), what="the let-go")
-        self.assertEqual(h.releases(), [(3, (1914.0, 502.0))])
-        self.assertEqual(h.motions, [])
+        self.assertEqual(h.releases(), [(3, (0.0, 502.0))])
         self.assertFalse(h.hooks.holding)
+        self.assertEqual(h.hooks._names_down, {})
 
     def test_a_key_at_the_edge_lets_go_and_reaches_nobody(self):
         h = self.make()
@@ -360,11 +374,23 @@ class HooksTest(unittest.TestCase):
         wait_for(lambda: h.failures, what="the refusal")
         self.assertEqual(h.failures[0].sentence, capture_portal.REFUSED)
 
-    def test_no_input_capture_portal_fails_the_start_in_the_apps_words(self):
+    def test_an_input_capture_portal_reporting_zero_uses_v1_session_creation(self):
         h = self.make(version=0)
-        with self.assertRaises(capture_portal.CaptureUnavailable) as raised:
+        with self.assertLogs(capture_portal.LOGGER, level="INFO") as logs:
+            h.start()
+        self.assertEqual(len(h.bus.made("CreateSession")), 1)
+        self.assertEqual(h.bus.made("CreateSession2"), [])
+        self.assertIn("Requesting InputCapture session", "\n".join(logs.output))
+
+    def test_a_zero_version_input_capture_portal_reports_its_create_error(self):
+        h = self.make(version=0)
+        h.bus.failures = {"CreateSession": portal.PortalError("CreateSession: UnknownMethod")}
+        with self.assertLogs(capture_portal.LOGGER, level="ERROR") as logs:
             h.hooks.start()
-        self.assertEqual(raised.exception.sentence, capture_portal.NO_PORTAL)
+            wait_for(lambda: h.failures, what="the failed CreateSession")
+        self.assertIsInstance(h.failures[0], capture_portal.CaptureUnavailable)
+        self.assertIn("CreateSession: UnknownMethod", h.failures[0].sentence)
+        self.assertIn("CreateSession: UnknownMethod", "\n".join(logs.output))
 
     # Review fixes (Codex Sol and a cold Opus pass, 01-10-2026)
 

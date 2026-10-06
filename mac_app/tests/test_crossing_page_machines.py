@@ -130,6 +130,7 @@ class SharingSide(Page):
             [(BEE, token(100), "Bee", {"side": "right"}), (SEA, token(150), "Sea", {"side": "right"})],
             [{"peer": BEE, "kind": "edge"}, {"peer": SEA, "kind": "edge", "off": True}])
         window._machine_picked(SEA)
+        window._select_page("crossing")
         return window
 
     def test_the_panel_offers_thirds_under_the_side_picker_and_replaces_the_blocked_sentence(self):

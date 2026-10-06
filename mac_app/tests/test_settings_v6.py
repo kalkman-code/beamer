@@ -444,6 +444,17 @@ class SavingTests(Base):
         self.write_legacy(legacy_1_4_3())
         self.cfg = self.store.load()
 
+    def test_trigger_changes_cannot_overwrite_an_existing_jump_key(self):
+        settings = self.settings()
+        settings["peers"][0]["jump_key"] = "ctrl+f13"
+        self.write_settings(settings)
+        before = self.path.read_bytes()
+        for key in ("ctrl_r", "f13"):
+            with self.subTest(key=key), self.assertRaises(SettingsError):
+                self.store.save(config_to_raw(replace(self.cfg, trigger_key=key)))
+            self.assertEqual(self.path.read_bytes(), before)
+
+
     def test_saving_keeps_the_machine_id_and_the_id_of_the_peer_and_writes_privately(self):
         settings = self.settings()
         settings["peers"][0].update(id=PEER_ID, linked=True)
@@ -809,11 +820,10 @@ class PairedAndRemovedTests(Base):
         self.store.save(dict(empty, hide_addresses=True))
         self.assertEqual([peer["token"] for peer in self.settings()["peers"]], [OTHER_TOKEN])
 
-    def test_a_phone_is_not_paired_on_a_desktop_in_this_version(self):
-        # A port-0 first peer would make the flat settings, which read its port, unloadable.
-        with self.assertRaises(SettingsError):
-            self.store.add_peer(self.entry(SECOND_ID, OTHER_TOKEN, port=0, host=""))
-        self.assertEqual(len(self.settings()["peers"]), 1)
+    def test_a_phone_can_pair_without_changing_the_flat_desktop_view(self):
+        self.store.add_peer(self.entry(SECOND_ID, OTHER_TOKEN, platform="ios", port=0, host="", send=False))
+        self.assertEqual(len(self.settings()["peers"]), 2)
+        self.assertEqual(self.store.load().auth_token, TOKEN)
         self.store.load()
 
     def test_a_replaced_entry_that_has_linked_since_the_pairing_began_is_not_replaced(self):

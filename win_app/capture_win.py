@@ -43,7 +43,6 @@ import ctypes
 import logging
 import sys
 import threading
-import time
 import unicodedata
 from typing import Callable, Dict, List, Optional, Set, Tuple, Union
 

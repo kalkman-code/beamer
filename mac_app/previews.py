@@ -428,17 +428,24 @@ class TileStack(AppKit.NSView):
     Beam's still, or at the notch, where the notch style plays in their place, that style's own
     hosted preview."""
 
+    def layout(self):
+        objc.super(TileStack, self).layout()
+        if self.shown is not None:
+            self.shown.setFrame_(self.bounds())
+            self.shown.setNeedsLayout_(True)
+
     @objc.python_method
     def setup(self, children, height=84):
         self.setTranslatesAutoresizingMaskIntoConstraints_(False)
-        self.heightAnchor().constraintEqualToConstant_(height).setActive_(True)
+        self.widthAnchor().constraintEqualToAnchor_multiplier_(self.heightAnchor(), 2.0).setActive_(True)
         self.children = list(children)
         for child in self.children:
             child.setTranslatesAutoresizingMaskIntoConstraints_(False)
+            AppKit.NSLayoutConstraint.deactivateConstraints_([
+                c for c in child.constraints()
+                if c.firstItem() == child and c.secondItem() in (None, child)
+            ])
             self.addSubview_(child)
-            for a, b in ((child.leadingAnchor(), self.leadingAnchor()), (child.trailingAnchor(), self.trailingAnchor()),
-                         (child.topAnchor(), self.topAnchor()), (child.bottomAnchor(), self.bottomAnchor())):
-                a.constraintEqualToAnchor_(b).setActive_(True)
         self.shown = None
         self.show(self.children[0])
         return self
@@ -452,6 +459,7 @@ class TileStack(AppKit.NSView):
         self.shown = child
         for other in self.children:
             other.setHidden_(other is not child)
+        self.setNeedsLayout_(True)
 
     @objc.python_method
     def current(self):
@@ -481,12 +489,13 @@ class TileHover:
 
     def track(self, tile, preview):
         owner = _HoverOwner.alloc().init()
-        owner.entered = lambda: self.enter(preview)
-        owner.exited = lambda: self.leave(preview)
+        owner.entered = lambda: (tile.set_tile_state(hovered=True), self.enter(preview))
+        owner.exited = lambda: (tile.set_tile_state(hovered=False), self.leave(preview))
         options = (AppKit.NSTrackingMouseEnteredAndExited | AppKit.NSTrackingActiveInActiveApp
                    | AppKit.NSTrackingInVisibleRect)
         tile.addTrackingArea_(AppKit.NSTrackingArea.alloc().initWithRect_options_owner_userInfo_(
             AppKit.NSZeroRect, options, owner, None))
+        tile._tile_hover_owner = owner
         # A tracking area does not keep its owner.
         self.owners.append(owner)
 
@@ -556,7 +565,7 @@ def effect_still(effect_id, colour, logger, height=84, place=lambda: "edge", pac
     """A tile's still frame of `effect_id`, in the selected colour, place, length and size."""
     view = effects_overlay.EffectsCanvas.alloc().initWithFrame_(AppKit.NSMakeRect(0, 0, 1, 1))
     view.setTranslatesAutoresizingMaskIntoConstraints_(False)
-    view.heightAnchor().constraintEqualToConstant_(height).setActive_(True)
+    view.widthAnchor().constraintEqualToAnchor_multiplier_(view.heightAnchor(), 2.0).setActive_(True)
     view.setWantsLayer_(True)
     view.layer().setCornerRadius_(theme.RADIUS["field"])
     view.layer().setMasksToBounds_(True)
@@ -569,10 +578,14 @@ def effect_still(effect_id, colour, logger, height=84, place=lambda: "edge", pac
         fx = effects.preview_effect(effect_id)
         dark = theme.is_dark()
         where = place()
-        scene = effects.preview_scene(fx, _played(view, STILL_AT_S), where, effects_overlay.palette(colour()), dark=dark,
+        # Beam's comet crosses the cropped pointer at this time; the common still puts it off-tile.
+        held_at = 1.45 if effect_id == "beam" and where == "edge" else STILL_AT_S
+        scene = effects.preview_scene(fx, _played(view, held_at), where, effects_overlay.palette(colour()), dark=dark,
                                       pace=pace(), effect_size=effect_size())
         # A small pointer, so the effect rather than the arrow is what a tile shows.
-        effects_overlay.draw_scene(Quartz, ctx, scene, width, height, where, dark, crop=STILL_CROPS[where], pointer=11.0)
+        # A desktop-scale thin line would disappear below one pixel in the common crop.
+        crop = (730.0, 172.5, 120.0, 60.0) if effect_id == "beam" and where == "edge" else STILL_CROPS[where]
+        effects_overlay.draw_scene(Quartz, ctx, scene, width, height, where, dark, crop=crop, pointer=11.0)
 
     view.painter = paint
     return view

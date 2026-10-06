@@ -132,6 +132,45 @@ class MessageTests(unittest.TestCase):
         self.assertEqual((b["set_at"], b["by"], c["set_at"], c["by"]),
                          (100, a_id, 100, a_id))
 
+    def test_explicit_follow_adopts_all_six_values_despite_a_newer_local_stamp(self):
+        peer = b64(bytes([2]) * 16)
+        current = settings_sync.mac_values(mac_raw())
+        desired = dict(glow_style="beam", glow_colour="ocean", effect_length="long",
+                       effect_size="large", shortcut_arrival=False, shortcut_arrival_style="locator")
+        state = {"set_at": 10, "by": peer, "values": desired}
+        taken = settings_sync.followed_design(current, state, peer, peer, False, 500, "", force=True)
+        self.assertEqual({key: taken["values"][key] for key in settings_sync.DESIGN_KEYS}, desired)
+        self.assertEqual(taken["values"]["resistance_px"], 120)
+
+    def test_follow_path_detects_a_cycle_even_when_values_are_identical(self):
+        own, peer = b64(bytes([1]) * 16), b64(bytes([2]) * 16)
+        state = {"set_at": 10, "by": peer, "values": {"glow_style": "beam"}, "path": [own, peer]}
+        taken = settings_sync.followed_design({"glow_style": "beam"}, state, peer, peer, False,
+                                              0, "", own_id=own)
+        self.assertTrue(taken["cycle"])
+
+    def test_follow_path_survives_validation_and_invalid_paths_are_rejected(self):
+        own, peer = b64(bytes([1]) * 16), b64(bytes([2]) * 16)
+        for path in ([own, peer], [], ["garbage"], [own, own], [None]):
+            data = settings_sync.message_data(False, 10, design_state={
+                "set_at": 10, "by": peer, "values": {"glow_style": "beam"}, "path": path})
+            state = settings_sync.read_design_state(data, KEYS)
+            if path == [own, peer]:
+                self.assertEqual(state["path"], path)
+            else:
+                self.assertIsNone(state)
+
+    def test_legacy_padded_author_and_source_produce_a_valid_downstream_path(self):
+        from core import protocol
+        source, own = (protocol.id_text(bytes([value]) * 16) for value in (1, 2))
+        state = {"set_at": 10, "by": source + "==", "values": {"glow_style": "beam"}}
+        taken = settings_sync.followed_design({"glow_style": "glow"}, state, source, source, False,
+                                              0, "", own_id=own)
+        advertised = {"set_at": 20, "by": own, "values": taken["values"], "path": taken["path"]}
+        received = settings_sync.read_design_state(settings_sync.message_data(False, 20, design_state=advertised), KEYS)
+        self.assertIsNotNone(received)
+        self.assertEqual(len(received["path"]), 2)
+
     def test_follower_accepts_the_leaders_next_stamp_after_reannouncing_it(self):
         a_id, b_id = b64(b"\x01" * 16), b64(b"\x02" * 16)
         current = {"glow_style": "glow"}
@@ -432,19 +471,21 @@ class WordsTests(unittest.TestCase):
         everyone = settings_sync.who(["Studio", "Laptop"])
         self.assertEqual(settings_sync.scope("crossing", everyone, False, own), own)
         self.assertEqual(settings_sync.scope("design", everyone, True, own),
-                         "Kept the same as every paired machine. Change it on any machine.")
+                         "Style, colour, length, size and landing animation stay in step. Animation enable and window appearance stay local.")
         self.assertEqual(settings_sync.scope("keyboard", everyone, True, own), own)
 
     def test_one_machine_is_named_and_none_or_several_are_every_paired_machine(self):
         self.assertEqual(settings_sync.who(["Studio"]), "Studio")
         self.assertEqual(settings_sync.who([]), "every paired machine")
         self.assertEqual(settings_sync.who(["Studio", "Laptop"]), "every paired machine")
-        self.assertEqual(settings_sync.scope("design", "Studio", True, "x"), "Kept the same as Studio. Change it on any machine.")
+        self.assertEqual(settings_sync.scope("design", "Studio", True, "x"),
+                         "Style, colour, length, size and landing animation stay in step. Animation enable and window appearance stay local.")
 
-    def test_the_switch_note_names_both_pages_and_an_old_peer(self):
-        self.assertIn("Crossing and Design", settings_sync.switch_note("Studio", True, False))
-        self.assertIn("match Studio's", settings_sync.switch_note("Studio", False, False))
-        self.assertNotIn("Mac", settings_sync.switch_note("every paired machine", True, False))
+    def test_the_switch_note_names_shared_values_and_an_old_peer(self):
+        self.assertIn("resistance, drag protection, Shortcut", settings_sync.switch_note("Studio", True, False))
+        self.assertIn("previous separate values are not restored", settings_sync.switch_note("Studio", False, False))
+        self.assertIn("compatible paired machines", settings_sync.switch_note("every paired machine", True, False))
+        self.assertIn("catch up when they reconnect", settings_sync.switch_detail())
         self.assertIn("Studio's Beamer is too old", settings_sync.switch_note("Studio", True, True))
 
 
@@ -460,6 +501,50 @@ class RealIdTests(unittest.TestCase):
     def test_garbage_is_still_not_an_id(self):
         self.assertIsNone(settings_sync._id("not base64!"))
         self.assertIsNone(settings_sync._id(5))
+
+
+class FollowRowsTests(unittest.TestCase):
+    PC, LIVE, AWAY, OLD = (b64(bytes([n]) * 16) for n in (1, 2, 3, 4))
+
+    def entries(self, *ids):
+        return [{"id": ident} for ident in ids]
+
+    def test_only_connected_machines_are_listed_and_away_ones_never_set_the_note(self):
+        caps = {self.PC: frozenset({"settings", "design_sync"})}
+        rows = settings_sync.follow_rows(self.entries(self.PC, self.AWAY), caps, {self.PC: {}})
+        self.assertEqual(rows, [({"id": self.PC}, None)])
+        self.assertIsNone(settings_sync.follow_note(rows))
+
+    def test_the_followed_machine_stays_listed_while_away(self):
+        rows = settings_sync.follow_rows(self.entries(self.PC, self.AWAY), {}, {self.AWAY: {}}, following=self.AWAY)
+        self.assertEqual(rows, [({"id": self.AWAY}, None)])
+
+    def test_why_each_connected_machine_cannot_be_chosen(self):
+        caps = {self.LIVE: frozenset({"settings", "design_sync"}), self.OLD: frozenset({"settings"})}
+        rows = settings_sync.follow_rows(self.entries(self.LIVE, self.OLD), caps, {})
+        self.assertEqual([why for _entry, why in rows], [settings_sync.DESIGN_UNAVAILABLE, settings_sync.NEEDS_DESIGN_SYNC])
+        self.assertEqual(settings_sync.follow_note(rows), settings_sync.OLD_PEER_NOTE)
+        self.assertEqual(settings_sync.follow_note(rows[:1]), settings_sync.DESIGN_UNAVAILABLE)
+
+    def test_nothing_connected_is_one_quiet_line(self):
+        rows = settings_sync.follow_rows(self.entries(self.AWAY), {}, {self.AWAY: {}})
+        self.assertEqual(rows, [])
+        self.assertEqual(settings_sync.follow_note(rows), settings_sync.NO_MACHINE_CONNECTED)
+
+
+class FollowLockTests(unittest.TestCase):
+    PC, OTHER = (b64(bytes([n]) * 16) for n in (1, 2))
+
+    def test_following_a_paired_desktop_locks_its_design_controls(self):
+        desktops = [{"id": self.OTHER}, {"id": self.PC, "name": "DESK-PC"}]
+        self.assertEqual(settings_sync.follow_lock(self.PC, False, desktops), desktops[1])
+        self.assertEqual(settings_sync.following_banner("DESK-PC"), "Following DESK-PC's design")
+
+    def test_unlocked_with_no_selection_with_same_on_or_once_the_machine_is_unpaired(self):
+        desktops = [{"id": self.PC}]
+        self.assertIsNone(settings_sync.follow_lock("", False, desktops))
+        self.assertIsNone(settings_sync.follow_lock(self.PC, True, desktops))
+        self.assertIsNone(settings_sync.follow_lock(self.OTHER, False, desktops))
 
 
 if __name__ == "__main__":

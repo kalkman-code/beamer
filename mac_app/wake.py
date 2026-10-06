@@ -71,6 +71,8 @@ class WakingController(KVMController):
         if self._memory is not None:
             return self.cfg.mac_address, self.cfg.host
         entry = next((item for item in self.book.peers() if item.get("id") == peer), None) or {}
+        if entry.get("port") == 0:
+            return "", ""
         return entry.get("hw") or "", entry.get("host") or ""
 
     def _awake(self, peer):
@@ -111,6 +113,8 @@ class WakingController(KVMController):
         """Sends `peer` (the machine in question when not given) the packet and starts waiting,
         unless a wake is already in flight."""
         peer = peer or self._in_question()
+        if self._memory is None and any(entry.get("id") == peer and entry.get("port") == 0 for entry in self.book.peers()):
+            return False
         with self._wake_lock:
             if self._waking or self._awake(peer):
                 return False

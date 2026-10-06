@@ -5,7 +5,6 @@ settings layer calls `add_peer` from `PairingService`'s `store` and `remove_peer
 button, each under its own settings lock; neither touches a file.
 """
 
-import copy
 import time
 from typing import Optional
 
@@ -15,6 +14,45 @@ UNNAMED = "Unnamed machine"
 TAIL = 4
 
 
+def desktops(peers: list) -> list:
+    return [entry for entry in peers if isinstance(entry, dict) and entry.get("port") != 0]
+
+
+def first_desktop(peers: list) -> Optional[dict]:
+    return next(iter(desktops(peers)), None)
+
+
+def normalise_phones(settings: dict) -> bool:
+    """Discard receiving-only fields for zero-port senders; keep their trust and permissions."""
+    changed = False
+    phones = set()
+    for entry in settings.get("peers", []):
+        if not isinstance(entry, dict) or entry.get("port") != 0:
+            continue
+        if isinstance(entry.get("id"), str):
+            phones.add(entry["id"])
+        for key, value in (("send", False), ("host", ""), ("hw", ""), ("side", ""),
+                           ("side_set_at", 0), ("side_by", ""), ("jump_key", "")):
+            if entry.get(key, value) != value:
+                changed = True
+            if key in entry or key == "send":
+                entry[key] = value
+        for key in ("way_back", "way_back_by"):
+            if key in entry:
+                del entry[key]
+                changed = True
+    if isinstance(settings.get("zones"), list):
+        zones = [zone for zone in settings["zones"] if not isinstance(zone, dict)
+                 or not isinstance(zone.get("peer"), str) or zone["peer"] not in phones]
+        if zones != settings["zones"]:
+            settings["zones"] = zones
+            changed = True
+    if isinstance(settings.get("design_follow_peer"), str) and settings["design_follow_peer"] in phones:
+        settings["design_follow_peer"] = ""
+        changed = True
+    return changed
+
+
 def _name(entry: dict) -> str:
     return (entry.get("name") or "").strip()
 
@@ -22,7 +60,9 @@ def _name(entry: dict) -> str:
 def labels(peers: list) -> dict:
     """token -> what to call each machine: its name, and where two share one (ignoring case and
     surrounding space) the last four characters of its id too, so the two can be told apart. An
-    entry that has no id yet (the one migrated from 1.4.x) shows the name alone."""
+    entry that has no id yet (the one migrated from 1.4.x) shows the name alone. Paired phones keep
+    their labels for the direction that sends input here; incomplete entries without a token do not."""
+    peers = [entry for entry in peers if isinstance(entry, dict) and "token" in entry]
     counts = {}
     for entry in peers:
         key = _name(entry).casefold()
@@ -50,6 +90,7 @@ def label_for(peers: list, *, token: Optional[str] = None, peer_id: Optional[str
     """`labels()` for one machine, found by its token, its id (`b64`) or its address, in that order of
     preference; "" when none matches. What a status or a notice calls a machine, so two of one name
     are told apart there as they are in the list."""
+    peers = [entry for entry in peers if isinstance(entry, dict) and "token" in entry]
     shown = labels(peers)
     for key, value in (("token", token), ("id", peer_id), ("host", host)):
         if value:
@@ -61,8 +102,8 @@ def label_for(peers: list, *, token: Optional[str] = None, peer_id: Optional[str
 
 def add_peer(settings: dict, entry: dict, replaced: Optional[dict] = None) -> None:
     """Puts a newly paired `entry` in `settings` (WIRE.md section 6, item 5). `replaced`, an entry
-    as `peers()` gave it, is dropped by its token and the new one takes its place: the first entry
-    is the one the flat settings read, so the new machine must not slip behind. Zones that name
+    as `peers()` gave it, is dropped by its token and the new one takes its place: the first desktop
+    is the one the flat settings read, so its replacement must not slip behind. Zones that name
     an id no entry has any more go with it; a machine paired again under its own id keeps its zones.
     The entry migrated from 1.4.x (`id` empty) gives its side and zones to a pairing with the machine
     at its saved host on its platform (section 6, item 4): that is the machine the user meant to pair

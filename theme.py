@@ -24,7 +24,6 @@ RADIUS = tokens.RADIUS
 TRACKING = tokens.TRACKING
 MODULE_PADDING = tokens.MODULE_PADDING
 RACK_GAP = tokens.RACK_GAP
-PAGE_CONTENT_WIDTH = tokens.PAGE_CONTENT_WIDTH
 MIN_WINDOW = tokens.MIN_WINDOW["mac"]
 
 # Derived here rather than added to the shared tokens: the mock's negative tracking on the large

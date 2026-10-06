@@ -18,7 +18,7 @@ from unittest import mock
 from core import pairing
 from core.pairing import PairingError
 
-from .test_pairing_service import MAC_ID, PC_ID, Machine, free_port, wait_until
+from .test_pairing_service import MAC_ID, PC_ID, Machine, wait_until
 
 
 def _can_bind(address):
@@ -93,9 +93,9 @@ class AnswerSourceTests(unittest.TestCase):
 
 class RequesterTakesAnAnswerFromAnyAddressTests(unittest.TestCase):
     def setUp(self):
-        mac_udp, pc_udp = free_port(socket.SOCK_DGRAM), free_port(socket.SOCK_DGRAM)
-        self.mac = Machine(self, "Loop Mac", MAC_ID, "macos", peer_udp=pc_udp, udp_port=mac_udp)
-        self.pc = Machine(self, "Loop PC", PC_ID, "windows", peer_udp=mac_udp, udp_port=pc_udp)
+        self.mac = Machine(self, "Loop Mac", MAC_ID, "macos")
+        self.pc = Machine(self, "Loop PC", PC_ID, "windows", peer_udp=self.mac.udp_port)
+        self.mac.pair_with(self.pc)
 
     def _answer_from(self, address):
         """The PC's answers leave from `address`, as a VPN's route sent the laptop's."""
@@ -113,7 +113,12 @@ class RequesterTakesAnAnswerFromAnyAddressTests(unittest.TestCase):
 
     def _pair(self):
         code = self.pc.service.begin_pairing()
-        self.assertTrue(wait_until(lambda: any(m["pair_id"] for m in self.mac.service.machines())))
+        self.assertTrue(
+            wait_until(lambda: any(m["pair_id"] for m in self.mac.service.machines())),
+            f"pairing id not announced; mac error={self.mac.service.error!r}, "
+            f"pc error={self.pc.service.error!r}, "
+            f"ports={self.mac.service.bind_port!r}/{self.pc.service.bind_port!r}",
+        )
         seen = [m for m in self.mac.service.machines() if m["pair_id"]][0]
         return seen, code
 
@@ -273,14 +278,14 @@ class ReceiveTests(unittest.TestCase):
 
 class OversizedDatagramTests(unittest.TestCase):
     def test_a_datagram_too_large_for_the_buffer_does_not_stop_the_service(self):
-        mac_udp, pc_udp = free_port(socket.SOCK_DGRAM), free_port(socket.SOCK_DGRAM)
-        mac = Machine(self, "Loop Mac", MAC_ID, "macos", peer_udp=pc_udp, udp_port=mac_udp)
-        Machine(self, "Loop PC", PC_ID, "windows", peer_udp=mac_udp, udp_port=pc_udp)
+        mac = Machine(self, "Loop Mac", MAC_ID, "macos")
+        pc = Machine(self, "Loop PC", PC_ID, "windows", peer_udp=mac.udp_port)
+        mac.pair_with(pc)
         self.assertTrue(wait_until(lambda: mac.service.machines()))
         stranger = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.addCleanup(stranger.close)
         for _ in range(3):
-            stranger.sendto(b"x" * 4000, ("127.0.0.1", mac_udp))
+            stranger.sendto(b"x" * 4000, ("127.0.0.1", mac.udp_port))
         mac.service._seen.clear()
         self.assertTrue(wait_until(lambda: mac.service.machines()), "the PC's beacons are still heard")
         self.assertIsNone(mac.service.error)
@@ -288,18 +293,19 @@ class OversizedDatagramTests(unittest.TestCase):
 
 class HostAnswersFromTheRequesterSNetworkTests(unittest.TestCase):
     def test_both_ends_send_from_the_address_on_the_other_s_network(self):
-        mac_udp, pc_udp = free_port(socket.SOCK_DGRAM), free_port(socket.SOCK_DGRAM)
-        mac = Machine(self, "Loop Mac", MAC_ID, "macos", peer_udp=pc_udp, udp_port=mac_udp)
-        pc = Machine(self, "Loop PC", PC_ID, "windows", peer_udp=mac_udp, udp_port=pc_udp)
-        sent = {}
+        mac = Machine(self, "Loop Mac", MAC_ID, "macos")
+        pc = Machine(self, "Loop PC", PC_ID, "windows", peer_udp=mac.udp_port)
+        mac.pair_with(pc)
+        attempts = []
         real_sendto = socket.socket.sendto
 
         def sendto(sock, data, address):
-            result = real_sendto(sock, data, address)
             kind = (pairing.decode(data) or {}).get("type")
+            source = sock.getsockname()
             if kind in ("pair_start", "pair_confirm", "pair_answer", "pair_done"):
-                sent.setdefault(kind, []).append((sock.getsockname(), address))
-            return result
+                # The receiver can finish pairing before this thread resumes after sendto.
+                attempts.append((kind, source, address))
+            return real_sendto(sock, data, address)
 
         code = pc.service.begin_pairing()
         self.assertTrue(wait_until(lambda: any(m["pair_id"] for m in mac.service.machines())))
@@ -309,15 +315,16 @@ class HostAnswersFromTheRequesterSNetworkTests(unittest.TestCase):
                 mock.patch.object(pairing, "local_address_towards", return_value="192.0.2.1"), \
                 mock.patch.object(socket.socket, "sendto", sendto):
             saved = mac.service.pair(seen, code)
-        (start_from, start_to), = sent["pair_start"][:1]
-        self.assertEqual(start_to, ("127.0.0.1", pc_udp))
+        (start_from, start_to), = [(source, target) for kind, source, target in attempts if kind == "pair_start"][:1]
+        self.assertEqual(start_to, ("127.0.0.1", pc.udp_port))
         self.assertEqual(start_from[0], "127.0.0.1")
-        self.assertNotEqual(start_from[1], mac_udp, "the request went on a socket of its own")
-        self.assertEqual({source for source, _to in sent["pair_confirm"]}, {start_from})
-        for kind in ("pair_answer", "pair_done"):
-            for (address, port), to in sent[kind]:
+        self.assertNotEqual(start_from[1], mac.udp_port, "the request went on a socket of its own")
+        self.assertEqual({source for kind, source, _to in attempts if kind == "pair_confirm"}, {start_from})
+        self.assertIn("pair_done", [kind for kind, _source, _target in attempts])
+        for kind, (address, port), to in attempts:
+            if kind in ("pair_answer", "pair_done"):
                 self.assertEqual((address, to), ("127.0.0.1", start_from), kind)
-                self.assertNotEqual(port, pc_udp, "never bound beside the main socket, whose datagrams it could take")
+                self.assertNotEqual(port, pc.udp_port, "never bound beside the main socket, whose datagrams it could take")
         self.assertTrue(wait_until(lambda: pc.paired))
         self.assertEqual(pc.paired[0]["token"], saved["token"])
 

@@ -57,6 +57,13 @@ class ReadingOnePeer(unittest.TestCase):
 
 
 class JumpKeys(unittest.TestCase):
+    def test_changing_trigger_rejects_keys_used_in_an_existing_jump_chord(self):
+        held = settings(peer(A, "Ay", jump_key="ctrl+shift+f13"))
+        for trigger in ("ctrl", "ctrl_r", "shift_r", "f13"):
+            with self.subTest(trigger=trigger), self.assertRaises(ValueError):
+                ways.check_trigger_key(held, trigger)
+        ways.check_trigger_key(held, "alt_r")
+
     def test_missing_jump_key_is_none(self):
         self.assertIsNone(ways.jump_key(peer(A, "Ay")))
 

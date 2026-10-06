@@ -327,22 +327,24 @@ class Remote:
 
     def _open(self) -> None:
         portal_ = self.portal
-        if portal_.version(INTERFACE) < 2:
+        version = portal_.version(INTERFACE)
+        if version == 1:
             raise _Problem(NO_PORTAL, terminal=True)
         created = portal_.request(INTERFACE, "CreateSession", "a{sv}", lambda token: (
             {"handle_token": ("s", token), "session_handle_token": ("s", portal_.token())},), timeout=REQUEST_SECONDS)
         self.handle = created["session_handle"]
-        options = {"types": ("u", DEVICE_KEYBOARD | DEVICE_POINTER), "persist_mode": ("u", 2)}
-        token = self._tokens.read()
-        if token:
-            options["restore_token"] = ("s", token)
+        options = {"types": ("u", DEVICE_KEYBOARD | DEVICE_POINTER)}
+        if version >= 2:
+            options["persist_mode"] = ("u", 2)
+            token = self._tokens.read()
+            if token:
+                options["restore_token"] = ("s", token)
         portal_.request(INTERFACE, "SelectDevices", "oa{sv}", lambda handle_token: (
             self.handle, dict(options, handle_token=("s", handle_token))), timeout=REQUEST_SECONDS)
-        if portal_.version(CLIPBOARD) >= 1:
-            try:
-                portal_.call(CLIPBOARD, "RequestClipboard", "oa{sv}", (self.handle, {}))
-            except portal.PortalError:
-                LOGGER.info("The desktop offers no clipboard with remote control")
+        try:
+            portal_.call(CLIPBOARD, "RequestClipboard", "oa{sv}", (self.handle, {}))
+        except portal.PortalError:
+            LOGGER.info("The desktop offers no clipboard with remote control")
         try:
             started = portal_.request(INTERFACE, "Start", "osa{sv}", lambda handle_token: (
                 self.handle, "", {"handle_token": ("s", handle_token)}))

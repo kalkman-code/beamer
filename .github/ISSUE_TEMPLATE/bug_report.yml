@@ -2,43 +2,42 @@ name: Bug report
 description: Something in Beamer is not working as it should.
 labels: [bug]
 body:
-  - type: textarea
-    id: what
-    attributes:
-      label: What happened
-      description: What you did, what you expected, and what happened instead.
-    validations:
-      required: true
   - type: input
     id: beamer-version
     attributes:
       label: Beamer version
-      description: Shown in About Beamer on each machine. Say if the two differ.
-      placeholder: "1.4.0"
+      description: Shown in About Beamer on each machine. Say if they differ.
+      placeholder: "1.5.0"
     validations:
       required: true
-  - type: input
-    id: mac-version
+  - type: textarea
+    id: machines
     attributes:
-      label: macOS version
-      placeholder: "macOS 26.1"
+      label: Each machine's operating system and version
+      description: One line per machine you use with Beamer.
+      placeholder: |
+        MacBook: macOS 26.1
+        Desktop: Windows 11 24H2
+        Laptop: Fedora 44, GNOME on Wayland
     validations:
       required: true
-  - type: input
-    id: windows-version
+  - type: textarea
+    id: did
     attributes:
-      label: Windows version
-      placeholder: "Windows 11 24H2"
+      label: What you did
+      description: The steps, and which machine was driving which.
     validations:
       required: true
-  - type: dropdown
-    id: direction
+  - type: textarea
+    id: happened
     attributes:
-      label: Which way round
-      options:
-        - The Mac was driving the PC
-        - The PC was driving the Mac
-        - Both, or not sure
+      label: What happened
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected
     validations:
       required: true
   - type: textarea
@@ -46,7 +45,5 @@ body:
     attributes:
       label: Logs
       description: |
-        Attach Beamer.log from each machine, or paste the lines from around the time it went wrong.
-        Mac: ~/Library/Logs/Beamer/Beamer.log (in Finder, Go > Go to Folder and paste ~/Library/Logs/Beamer)
-        Windows: %LOCALAPPDATA%\Beamer\Beamer.log (paste %LOCALAPPDATA%\Beamer into File Explorer's address bar)
+        Attach Beamer.log from each machine, or paste the lines from around the time it went wrong. Open log folder in Beamer's menu shows where it is.
         The log holds your machines' names and local network addresses; remove them if you would rather not share them.

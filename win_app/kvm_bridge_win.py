@@ -23,12 +23,13 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QLayout,
     QMenu,
     QMessageBox,
     QPushButton,
     QScrollArea,
-    QSlider,
     QStackedWidget,
+    QStyle,
     QSystemTrayIcon,
     QVBoxLayout,
     QWidget,
@@ -61,7 +62,7 @@ import motion
 from core import pairing
 from core import keytable
 from core import peerlist
-from core.pairing import PAIRING_PORT, PairingService, local_address_towards
+from core.pairing import PairingService, local_address_towards
 import machines_win
 import pages_win
 import hardware_win
@@ -79,6 +80,8 @@ import theme
 import tokens
 from core import updates
 import widgets
+
+QPushButton = widgets.ActionButton
 
 LOGGER = logging.getLogger(__name__)
 
@@ -213,6 +216,36 @@ def status_icon(state: ServerState, size: int = 64) -> QPixmap:
     return pixmap
 
 
+def page_column_width(free: float) -> float:
+    """One centred section column, with a 24 DIP margin on either side."""
+    return min(880, max(1, free - 48))
+
+
+class ColumnFit(QObject):
+    """Keeps a page's column at page_column_width() of the free width, on every resize of its scroll
+    area. The free width is the scroll area less a scrollbar's width whether or not one shows: the
+    viewport's own width would move with the column, since a column's wrapped text sets whether the
+    page needs a scrollbar, so the column would chase its own tail."""
+
+    def __init__(self, scroll: QScrollArea, column: QWidget) -> None:
+        super().__init__(scroll)
+        self.scroll = scroll
+        self.column = column
+        self.timer = QTimer(self)
+        self.timer.setSingleShot(True)
+        self.timer.timeout.connect(self.fit)
+        scroll.installEventFilter(self)
+
+    def fit(self) -> None:
+        self.column.setFixedWidth(round(page_column_width(self.scroll.width() - 16)))
+
+    def eventFilter(self, watched, event) -> bool:
+        if event.type() in (QEvent.Type.Resize, QEvent.Type.Show):
+            # QScrollArea must finish resizing its document before its width constraints change.
+            self.timer.start(0)
+        return False
+
+
 class StatusBridge(QObject):
     """Marshals receiver-thread status callbacks onto the GUI thread."""
 
@@ -245,8 +278,16 @@ class StatusBridge(QObject):
 
 
 class WindowsApplication(QWidget):
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        if hasattr(self, "sidebar"):
+            self.sidebar.set_window_width(self.width())
+        if hasattr(self, "footer_note"):
+            self.footer_note.setVisible(self.width() >= 640)
+
     def __init__(self, config_path: Path) -> None:
         super().__init__()
+        widgets.install_text_localisation()
         self.config_path = config_path
         self._status_lock = threading.RLock()
         self._status = ServerState.STOPPED
@@ -361,6 +402,8 @@ class WindowsApplication(QWidget):
         self.own_notes: list = []
         self._same_seen = None
         self._design_states = {}
+        self._followed_version = None
+        self._design_path = []
         # Pause crossing and the full-screen hold are about this screen: a peer's pointer does
         # not go home through a held edge either.
         self.server.edges_held = lambda: self.sender.edges_held
@@ -421,8 +464,8 @@ class WindowsApplication(QWidget):
         theme.set_dark(theme.wants_dark(appearance, theme.system_dark()))
 
         self.setWindowTitle("Beamer")
-        self.resize(820, 720)
-        self.setMinimumSize(*tokens.MIN_WINDOW["windows"])
+        self.resize(900, 640)
+        self.setMinimumSize(320, 300)
         self.setWindowIcon(QIcon(str(ICON_PATH)))
         self.preview_loop = PreviewLoop(self)
         self.tile_hover = TileHover(self.preview_loop, self)
@@ -463,6 +506,7 @@ class WindowsApplication(QWidget):
             foot_tip=HOME_PAGE,
         )
         self.sidebar.setFixedWidth(theme.SIDEBAR_WIDTH)
+        self.sidebar.set_window_width(self.width())
         row_layout.addWidget(self.sidebar)
         row_layout.addWidget(widgets.rule())
 
@@ -505,23 +549,28 @@ class WindowsApplication(QWidget):
         scroll.setFrameShape(QFrame.Shape.NoFrame)
         # Nothing scrolls sideways, at any width.
         scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOn)
+        scroll.verticalScrollBar().setFixedWidth(16)
         page = QWidget()
         page.setProperty("vernier", "plain")
         page_layout = QVBoxLayout(page)
         page_layout.setContentsMargins(0, 0, 0, 0)
         page_layout.setSpacing(0)
+        page_layout.setSizeConstraint(QLayout.SizeConstraint.SetNoConstraint)
         centred = QHBoxLayout()
         centred.setContentsMargins(0, 0, 0, 0)
         centred.addStretch(1)
         content = QWidget()
+        content.setObjectName("page_column")
         content.setProperty("vernier", "plain")
-        content.setMaximumWidth(tokens.PAGE_CONTENT_WIDTH)
+        # Its width is set by ColumnFit on every resize; the stretches either side only centre it.
+        ColumnFit(scroll, content)
         centred.addWidget(content)
         centred.addStretch(1)
         page_layout.addLayout(centred)
         layout = QVBoxLayout(content)
-        layout.setContentsMargins(28, 24, 28, 24)
-        layout.setSpacing(16)
+        layout.setContentsMargins(0, 24, 0, 24)
+        layout.setSpacing(20)
         heading = widgets.label(title.upper(), "heading")
         heading.setFont(theme.font(theme.HEADING, 700))
         layout.addWidget(heading)
@@ -650,7 +699,7 @@ class WindowsApplication(QWidget):
         """The everyday buttons: send input across without the shortcut or an edge, and hold the
         edges for a while."""
         module = widgets.Module("Keyboard and mouse")
-        self.redirect_button = QPushButton("Send input across")
+        self.redirect_button = widgets.ActionButton("Send input across")
         self.redirect_button.setProperty("vernier", "primary")
         self.redirect_button.setCursor(Qt.CursorShape.PointingHandCursor)
         self.redirect_button.clicked.connect(self.toggle_redirect)
@@ -678,9 +727,9 @@ class WindowsApplication(QWidget):
         own_note = self._own_note()
         module.body.addWidget(own_note)
         hold_note = widgets.label(
-            "Off, your pointer can leave a full-screen game or video, and another machine's pointer can come "
-            "home through this PC's edge. Useful if your keyboard has no key for the shortcut.", "note", wrap=True)
+            "This screen decides, including when another machine drives it. On, a full-screen app here holds pointer crossings; shortcuts and jump keys still work. Off, another machine's pointer can go home or onward through the configured ways.", "note", wrap=True)
         module.body.addWidget(hold_note)
+        self.hold_switch.setToolTip("This screen's setting applies to every pointer on it.")
         self.wayland_crossing_note = widgets.label(
             "On Wayland Beamer cannot see a full-screen app, or a mouse button held before the pointer reaches an "
             "edge, so the edges are never held for one and a drag can cross.", "note", wrap=True)
@@ -695,7 +744,7 @@ class WindowsApplication(QWidget):
         target = self.sender.shortcut_target()
         if target is not None and target in self._labels_by_id:
             return f"Send input to {self._labels_by_id[target]}"
-        sendable = [entry for entry in self._peer_entries
+        sendable = [entry for entry in peerlist.desktops(self._peer_entries)
                     if entry.get("in_use", True) is True and entry.get("send")]
         # The entry migrated from 1.4.x has no id to pick it by until its first link.
         return f"Send input to {self._shown(peerlist.labels(self._peer_entries)[sendable[0]['token']])}" if len(sendable) == 1 else "Send input across"
@@ -708,7 +757,7 @@ class WindowsApplication(QWidget):
         self._refresh_window()
 
     def _crossing_state_args(self) -> tuple:
-        entries = self._peer_entries
+        entries = peerlist.desktops(self._peer_entries)
         return (
             bool(entries), any(entry.get("host") for entry in entries), self._any_send(),
             bool(self.sender.peers_up()), bool(self._ways_in()),
@@ -716,7 +765,7 @@ class WindowsApplication(QWidget):
         )
 
     def _machines_name(self) -> str:
-        entries = self._peer_entries
+        entries = peerlist.desktops(self._peer_entries)
         return self._shown(peerlist.labels(entries)[entries[0]["token"]]) if len(entries) == 1 else "your machines"
 
     def _crossing_state_sentence(self) -> str:
@@ -762,15 +811,17 @@ class WindowsApplication(QWidget):
     def _show_same(self) -> None:
         if self._config is None:
             return
-        old = False
-        on = self._config.same_on_both
+        old = any("settings" not in caps for caps in self._peer_caps().values())
+        on = self._config.same_on_both and not old
         if self.same_switch.isChecked() != on:
             self.same_switch.blockSignals(True)
             self.same_switch.setChecked(on)
             self.same_switch.blockSignals(False)
-        self.same_switch.setEnabled(self._paired and not old)
-        who = settings_sync.who([self._shown(label) for label in peerlist.labels(self._peer_entries).values()])
+        desktops = peerlist.desktops(self._peer_entries)
+        self.same_switch.setEnabled(self._paired and bool(desktops) and not old)
+        who = settings_sync.who([self._shown(label) for label in peerlist.labels(desktops).values()])
         self.same_note.setText(settings_sync.switch_note(who, self._config.same_on_both, old))
+        self.same_note.setToolTip(settings_sync.switch_detail())
         widgets.set_role(self.same_note, "note-amber" if old else "note")
         for key, label in self.scope_labels.items():
             text = settings_sync.scope(key, who, on, pages_win.SCOPE.get(key))
@@ -795,10 +846,21 @@ class WindowsApplication(QWidget):
             "set_at": config.design_set_at,
             "by": config.design_by or config.machine_id,
             "values": {key: values[key] for key in settings_sync.DESIGN_KEYS},
+            "path": (self._design_path or [config.machine_id])
+                    if config.design_follow_peer and not config.same_on_both else [config.machine_id],
         }
         return settings_sync.message_data(
             config.same_on_both, config.same_set_at, values, by=config.same_by, design_state=design_state
         )
+
+    def _design_peer_caps(self) -> dict:
+        desktops = {entry.get("id") for entry in peerlist.desktops(self._peer_entries)}
+        caps = {protocol.id_text(peer): self.sender.links.caps(peer) for peer in self.sender.peers_up()}
+        for peer in self.server.links():
+            known = self.server.caps_of(peer)
+            if known is not None:
+                caps[protocol.id_text(peer)] = known
+        return {peer: known for peer, known in caps.items() if peer in desktops}
 
     def _refresh_design_follow(self) -> None:
         if not hasattr(self, "design_follow_choice") or self._config is None:
@@ -809,63 +871,119 @@ class WindowsApplication(QWidget):
         none = QStandardItem("None")
         none.setData("", Qt.ItemDataRole.UserRole)
         model.appendRow(none)
-        unavailable = []
-        for entry in self._peer_entries:
-            peer_text = entry.get("id", "")
-            peer = protocol.read_id(peer_text)
-            if peer is None:
-                continue
+        caps = self._design_peer_caps()
+        desktops = [entry for entry in peerlist.desktops(self._peer_entries) if protocol.read_id(entry.get("id")) is not None]
+        rows = settings_sync.follow_rows(desktops, caps, self._design_states, self._config.design_follow_peer)
+        for entry, why_not in rows:
             name = self._shown(entry.get("name") or entry.get("platform") or "Paired machine")
-            supported = peer_text in self._design_states
-            item = QStandardItem(name if supported else f"{name} — Needs beta.6 or later")
-            item.setData(peer_text, Qt.ItemDataRole.UserRole)
-            if not supported:
+            item = QStandardItem(f"{name} — {why_not}" if why_not == settings_sync.NEEDS_DESIGN_SYNC else name)
+            item.setData(entry["id"], Qt.ItemDataRole.UserRole)
+            if why_not is not None:
                 item.setEnabled(False)
-                unavailable.append(name)
+                item.setToolTip(why_not)
             model.appendRow(item)
         choice.setModel(model)
         selected = choice.findData(self._config.design_follow_peer, Qt.ItemDataRole.UserRole)
         choice.setCurrentIndex(max(0, selected))
         choice.blockSignals(False)
-        peer = next((item for item in self._peer_entries if item.get("id") == self._config.design_follow_peer), None)
+        desktops = peerlist.desktops(self._peer_entries)
+        peer = next((item for item in desktops if item.get("id") == self._config.design_follow_peer), None)
+        name = self._shown(peer.get('name') or 'that machine') if peer else ""
         if peer:
-            name = self._shown(peer.get('name') or 'that machine')
             if self._config.same_on_both:
-                self.design_follow_note.setText(f"Following {name}, paused while Same on all machines is on.")
+                note = f"Following {name}, paused while Same on all machines is on."
+            elif self._config.design_follow_peer not in caps:
+                note = f"Keeping the last design received from {name} until it reconnects."
             else:
-                self.design_follow_note.setText(f"Following {name}. Change a Design setting to stop following.")
-        elif unavailable:
-            self.design_follow_note.setText("A paired machine is unavailable until it has beta.6 or later.")
+                note = ""
         else:
-            self.design_follow_note.setText("None: this PC keeps its own Design.")
+            note = settings_sync.follow_note(rows) or "None: this PC keeps its own Design."
+        self.design_follow_note.setText(note)
+        self.design_follow_note.setVisible(bool(note))
+        self._lock_followed_design(
+            settings_sync.follow_lock(self._config.design_follow_peer, self._config.same_on_both, desktops), name)
+
+    def _lock_followed_design(self, entry, name: str) -> None:
+        """Followed controls dimmed and deaf while `entry` is followed; the local ones stay live."""
+        if not hasattr(self, "follow_banner"):
+            return
+        locked = entry is not None
+        for control in (self.glow_style_choice, self.switch_style_choice, self.glow_colour_choice,
+                        self.length_choice, self.size_choice):
+            control.set_enabled(not locked)
+        self.landing_toggle.setEnabled(not locked)
+        widgets.set_dimmed(self.landing_toggle, locked)
+        self.follow_banner_label.setText(settings_sync.following_banner(name) if locked else "")
+        self.follow_banner.setVisible(locked)
+
+    def _follow_banner(self) -> QWidget:
+        """Shown at the top of Style while this PC follows another machine's design, whose followed
+        controls are locked until Stop following (settings_sync.follow_lock)."""
+        self.follow_banner = QFrame()
+        self.follow_banner.setProperty("vernier", "banner")
+        row = QVBoxLayout(self.follow_banner)
+        row.setContentsMargins(12, 10, 12, 10)
+        row.setSpacing(8)
+        self.follow_banner_label = widgets.label("", "heading", wrap=True)
+        row.addWidget(self.follow_banner_label)
+        self.stop_follow_button = widgets.ActionButton(settings_sync.STOP_FOLLOWING)
+        self.stop_follow_button.setProperty("vernier", "small")
+        self.stop_follow_button.clicked.connect(self._stop_following)
+        row.addWidget(self.stop_follow_button, 0, Qt.AlignmentFlag.AlignLeft)
+        self.follow_banner.setVisible(False)
+        return self.follow_banner
+
+    def _stop_following(self) -> None:
+        self.design_follow_choice.setCurrentIndex(0)
 
     def _design_follow_chosen(self, _index: int) -> None:
         if self._config is None:
             return
         self._config.design_follow_peer = self.design_follow_choice.currentData(Qt.ItemDataRole.UserRole) or ""
-        self._persist()
+        self._followed_version = None
+        if not self._config.design_follow_peer:
+            self._design_path = [self._config.machine_id]
+            self._config.design_set_at = settings_sync.next_stamp(self._config.design_set_at, time.time())
+            self._config.design_by = self._config.machine_id
+        if not self._persist():
+            return
+        if not self._config.design_follow_peer:
+            self._send_same()
         self._refresh_design_follow()
-        self._apply_followed_design()
+        self._apply_followed_design(force=True)
 
-    def _apply_followed_design(self) -> None:
+    def _apply_followed_design(self, force=False) -> None:
         config = self._config
         peer = config.design_follow_peer
         state = self._design_states.get(peer)
         if not peer or state is None or config.same_on_both:
             return
         current = settings_sync.pc_values(config)
+        cursor = self._followed_version
+        stamp, author = cursor[1:] if cursor and cursor[0] == peer else (-1, "")
         taken = settings_sync.followed_design(
-            current, state, peer, peer, config.same_on_both, config.design_set_at,
-            config.design_by,
+            current, state, peer, peer, config.same_on_both, stamp,
+            author, own_id=config.machine_id, force=force,
         )
         if taken is None:
             return
-        settings_sync.apply_pc(config, taken["values"])
-        config.design_set_at = taken["set_at"]
-        config.design_by = taken["by"]
+        cycle = taken.get("cycle", False)
+        path = [config.machine_id] if cycle else taken["path"]
+        announce = cycle or taken["changed"] or path != self._design_path or force
+        if cycle:
+            config.design_follow_peer = ""
+        else:
+            settings_sync.apply_pc(config, taken["values"])
+        if announce:
+            config.design_set_at = settings_sync.next_stamp(config.design_set_at, time.time())
+            config.design_by = config.machine_id
         self._design_seen = tuple(getattr(config, key) for key in settings_sync.DESIGN_KEYS)
         self._reflect_config(config)
-        if self._persist() and taken["changed"]:
+        if not self._persist():
+            return
+        self._design_path = path
+        self._followed_version = None if cycle else (peer, taken["set_at"], taken["by"])
+        if announce:
             self._send_same()
         self._refresh_design_follow()
 
@@ -880,10 +998,11 @@ class WindowsApplication(QWidget):
 
     def _peer_caps(self) -> dict:
         """{peer id: capabilities} for every peer with a link up, in either direction."""
+        desktops = {protocol.read_id(entry.get("id")) for entry in peerlist.desktops(self._peer_entries)}
         caps = {peer: self.sender.links.caps(peer) for peer in self.sender.peers_up()}
         for peer in self.server.links():
             caps.setdefault(peer, self.server.caps_of(peer) or frozenset())
-        return caps
+        return {peer: known for peer, known in caps.items() if peer in desktops}
 
     def _send_to(self, peer: bytes, message: dict) -> bool:
         return self.sender.send_to(peer, message) or self.server.send(peer, message)
@@ -905,7 +1024,7 @@ class WindowsApplication(QWidget):
             return []
         messages = []
         author = protocol.read_id(entry.get("side_by")) or protocol.read_id(config.machine_id)
-        if entry.get("side") in return_edge.EDGES and entry.get("side_set_at") and author is not None:
+        if entry.get("port") != 0 and entry.get("side") in return_edge.EDGES and entry.get("side_set_at") and author is not None:
             settings = {"machine_id": protocol.id_text(self._identity()["id"]), "peers": peers,
                         "zones": self.book.zones()}
             way_back = ways.has_way(settings, entry["id"])
@@ -917,7 +1036,7 @@ class WindowsApplication(QWidget):
                       if item.get("in_use", True) is True
                       and protocol.read_id(item.get("id")) not in (None, peer)]
             messages.append(protocol.paired_msg(others[: protocol.MAX_PEERS]))
-        if "settings" in self._peer_caps().get(peer, ()):
+        if entry.get("port") != 0 and "settings" in self._peer_caps().get(peer, ()):
             messages.append(protocol.settings_msg(self._same_state()))
         return messages
 
@@ -962,14 +1081,14 @@ class WindowsApplication(QWidget):
         self._persist()
         self._send_same()
         if not on:
-            self._apply_followed_design()
+            self._apply_followed_design(force=True)
         self._show_same()
 
     def _on_settings(self, peer: str, data) -> None:
         """A peer's settings message, over either link. Its state stands only when it is newer than
         this PC's; then its values replace the shared ones here, and it goes on to every other peer
         that takes it, which stops the first time it meets a copy it already holds."""
-        if self._config is None:
+        if self._config is None or any(entry.get("id") == peer and entry.get("port") == 0 for entry in self.book.peers()):
             return
         was_on = self._config.same_on_both
         state = settings_sync.read_design_state(data, TRIGGER_KEYS)
@@ -989,6 +1108,9 @@ class WindowsApplication(QWidget):
             config.same_set_at = set_at
             config.same_by = data.get("by", "") if isinstance(data.get("by"), str) else ""
             if on:
+                values, conflict = ways.shared_trigger_values({"peers": self.book.peers()}, values)
+                if conflict is not None:
+                    self._show_trigger_conflict(conflict)
                 design_stamp = settings_sync.design_change_stamp(
                     settings_sync.pc_values(config), values, config.design_set_at,
                     state, config.machine_id,
@@ -1015,11 +1137,12 @@ class WindowsApplication(QWidget):
             forwarded = dict(data)
             forwarded["design_sync"] = self._same_state()["design_sync"]
             self._send_same(source=source, data=forwarded)
-        if state is not None:
-            self._apply_followed_design()
-            self._refresh_design_follow()
         if taken is not None and was_on and not on:
+            self._apply_followed_design(force=True)
+        elif state is not None:
             self._apply_followed_design()
+        if state is not None:
+            self._refresh_design_follow()
 
     def _sign_in_module(self) -> QWidget:
         module = widgets.Module("At sign-in")
@@ -1070,9 +1193,23 @@ class WindowsApplication(QWidget):
     @staticmethod
     def _row(*items) -> QWidget:
         """Widgets and layouts that show and hide as one row of a module."""
+        if len(items) >= 2 and isinstance(items[0], QLabel) and items[0].property("vernier") == "key":
+            controls = [item for item in items[1:]
+                        if isinstance(item, QLayout) or isinstance(item, QWidget) and not isinstance(item, QLabel)]
+            if len(controls) == 1:
+                control = controls[0]
+                if isinstance(control, QLayout):
+                    holder = QWidget()
+                    control.setContentsMargins(0, 0, 0, 0)
+                    holder.setLayout(control)
+                    holder.setMaximumWidth(360)
+                    control = holder
+                notes = [item for item in items[1:] if isinstance(item, QLabel)]
+                return widgets.FormRow(items[0], control, notes)
         row = QWidget()
         row.setProperty("vernier", "plain")
         column = QVBoxLayout(row)
+        column.setSizeConstraint(QLayout.SizeConstraint.SetMinimumSize)
         column.setContentsMargins(0, 0, 0, 0)
         column.setSpacing(8)
         for item in items:
@@ -1080,7 +1217,8 @@ class WindowsApplication(QWidget):
         return row
 
     def _ways_module(self, current: Config) -> QWidget:
-        module = widgets.Module("Ways in")
+        module = widgets.Module("Ways from this screen")
+        self.ways_module = module
         # Which machine everything below shows and edits; only there with more than one paired.
         holder = QWidget()
         holder.setProperty("vernier", "plain")
@@ -1096,22 +1234,26 @@ class WindowsApplication(QWidget):
         self.ways_summary = widgets.label("", "note", wrap=True)
         module.body.addWidget(self.ways_summary)
         self.arrangement_diagram = ArrangementDiagram()
-        module.body.addWidget(self.arrangement_diagram)
+        # The diagram beside the ways it draws, once the column holds both; stacked below that.
+        ways_list = QWidget()
+        ways_list.setProperty("vernier", "plain")
+        ways_column = QVBoxLayout(ways_list)
+        ways_column.setContentsMargins(0, 0, 0, 0)
+        ways_column.setSpacing(8)
+        self.ways_pair = widgets.SideBySide(self.arrangement_diagram, ways_list)
+        module.body.addWidget(self.ways_pair)
         self.way_boxes: dict = {}
         for value, text, detail in pages_win.WAY_ROWS:
             box = QCheckBox(text)
             box.toggled.connect(lambda on, v=value: self._ways_changed(v, on))
             self.way_boxes[value] = box
             if not detail:
-                module.body.addWidget(box)
+                ways_column.addWidget(box)
                 continue
             box.setAccessibleDescription(detail)
-            line = QHBoxLayout()
-            line.setSpacing(8)
-            line.addWidget(box)
-            line.addWidget(widgets.label(detail, "small"))
-            line.addStretch(1)
-            module.body.addLayout(line)
+            ways_column.addWidget(box)
+            ways_column.addWidget(widgets.label(detail, "small", wrap=True))
+        ways_column.addStretch(1)
         # A way refused because it would share a stretch of this screen with another machine's.
         self.clash_note = widgets.label("", "note-amber", wrap=True)
         self.clash_note.setVisible(False)
@@ -1146,7 +1288,7 @@ class WindowsApplication(QWidget):
         share_tiles.setSpacing(4)
         self.share_tiles = {}
         for part in return_edge.PARTS:
-            tile = QPushButton()
+            tile = widgets.ElidingButton()
             tile.setProperty("vernier", "choice")
             tile.setCheckable(True)
             tile.setMinimumHeight(48)
@@ -1160,26 +1302,20 @@ class WindowsApplication(QWidget):
         self.share_module.body.addWidget(self.share_button)
         self.share_module.setVisible(False)
 
-        chips = QHBoxLayout()
-        chips.setSpacing(4)
-        self.part_buttons: dict = {}
-        for part in return_edge.PARTS:
-            button = QPushButton()
-            button.setProperty("vernier", "choice")
-            button.setCheckable(True)
-            button.setMinimumHeight(widgets.MIN_TARGET)
-            button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.parts_choice = widgets.Choice([(part, name) for part, name in
+            zip(return_edge.PARTS, ("Top", "Middle", "Bottom"))], 3, "", exclusive=False)
+        self.part_buttons = self.parts_choice._buttons
+        for part, button in self.part_buttons.items():
             button.clicked.connect(lambda on, p=part: self._set_part(p, on))
-            chips.addWidget(button, 1)
-            self.part_buttons[part] = button
         self.parts_note = widgets.label("", "note", wrap=True)
-        self.crossing_rows["parts"] = self._row(widgets.label("Parts", "key"), chips, self.parts_note)
+        self.crossing_rows["parts"] = self._row(widgets.label("Parts", "key"), self.parts_choice.view, self.parts_note)
 
         self.corner_choice = widgets.Choice(CORNER_CHOICES, columns=2, current="", on_change=self._set_corner)
         self.corner_choice.set_names("Corner")
         self.crossing_rows["corner"] = self._row(widgets.label("Corner", "key"), self.corner_choice.view)
 
-        self.dragging_switch = widgets.Switch("Don't cross while dragging")
+        self.dragging_switch = widgets.Switch("Don't cross while dragging with this PC's pointer")
+        self.dragging_switch.setToolTip("Applies when this physical pointer pushes through this screen's ways; visiting pointers are not protected by this switch.")
         self.dragging_switch.setFont(theme.font(theme.TYPE["body"]))
         self.dragging_switch.setChecked(current.block_while_dragging)
         self.dragging_switch.toggled.connect(self._set_block_while_dragging)
@@ -1189,17 +1325,17 @@ class WindowsApplication(QWidget):
             if key == "edge":
                 module.body.addWidget(self.share_module)
 
-        self.jump_heading = widgets.Eyebrow("Jump straight here")
+        self.jump_heading = widgets.Eyebrow("Jump to this machine")
         module.body.addWidget(self.jump_heading)
-        jump_row = QHBoxLayout()
+        jump_row = QVBoxLayout()
         jump_row.setSpacing(8)
         self.jump_recorder = widgets.JumpKeyRecorder(self._record_jump_key, self._jump_arming)
         jump_row.addWidget(self.jump_recorder, 1)
-        self.jump_clear = QPushButton("Clear")
+        self.jump_clear = widgets.ActionButton("Clear")
         self.jump_clear.setProperty("vernier", "plain")
         self.jump_clear.setAccessibleName("Clear jump key")
         self.jump_clear.clicked.connect(lambda: self._record_jump_key(""))
-        jump_row.addWidget(self.jump_clear)
+        jump_row.addWidget(self.jump_clear, 0, Qt.AlignmentFlag.AlignLeft)
         module.body.addLayout(jump_row)
         self.jump_note = widgets.label("", "note", wrap=True)
         module.body.addWidget(self.jump_note)
@@ -1211,7 +1347,10 @@ class WindowsApplication(QWidget):
     def _crossing_settings(self) -> dict:
         """The peers and zones as last read, in the shape core.ways reads them."""
         own = self._config.machine_id if self._config is not None else ""
-        return {"machine_id": own, "peers": self._peer_entries, "zones": self._zone_entries}
+        desktops = peerlist.desktops(self._peer_entries)
+        ids = {entry.get("id") for entry in desktops}
+        return {"machine_id": own, "peers": desktops,
+                "zones": [zone for zone in self._zone_entries if zone.get("peer") in ids]}
 
     def _read_crossing(self) -> None:
         try:
@@ -1280,6 +1419,7 @@ class WindowsApplication(QWidget):
         self.machine_choice = widgets.Choice(items, max(1, columns), "", on_change=self._choose_machine)
         self.machine_choice.set_names("Machine")
         self._machine_slot.replaceWidget(old, self.machine_choice.view)
+        old.hide()
         old.deleteLater()
 
     def _write_ways(self, **changes) -> bool:
@@ -1364,6 +1504,7 @@ class WindowsApplication(QWidget):
         motion.set_shown(self.machine_row, several)
         name = dict(machines).get(chosen) if several else None
         name = name or "the other machine"
+        self.ways_module.eyebrow.setText(f"Ways from this screen to {name}")
         held = ways.ways(settings, chosen)
         shortcut = "shortcut" in config.crossing_methods
         methods = held["methods"] + (["shortcut"] if shortcut else [])
@@ -1376,14 +1517,16 @@ class WindowsApplication(QWidget):
         self.edge_choice.set_value(side)
         self.edge_choice.set_names(f"Where {name} is")
         self.edge_heading.setText(f"Where {name} is")
-        self.edge_note.setText(f"One border, walked both ways, so changing it here moves it on {name} too.")
+        self.edge_note.setText(f"Changing a side updates {name}'s side too; it can turn overlapping ways off, with a notice.")
         self.edge_unlearned.setText(pages_win.not_learned_edge(name))
         self.corner_choice.set_value(held["corner"])
+        self.corner_choice.view.setToolTip(f"This corner leads to {name} on its configured side.")
         edge = side or "right"
         names = pages_win.part_names(edge)
         for part, button in self.part_buttons.items():
             button.setText(names[part])
             button.setChecked(part in held["parts"])
+        self.parts_choice.view.refresh_metrics()
         self.parts_note.setText(
             f"Crosses only along {pages_win.parts_phrase(edge, held['parts'])}; the rest of "
             "it is a wall. Choose any, but at least one."
@@ -1395,7 +1538,7 @@ class WindowsApplication(QWidget):
             # Wayland shows no button held before the pointer meets the edge (wayland_crossing_note).
             motion.set_shown(row, key in shown and not (key == "dragging" and platform_parts.WAYLAND))
         motion.set_shown(self.resistance_module, "resistance" in shown)
-        motion.set_shown(self.shortcut_module, "shortcut" in shown)
+        motion.set_shown(self.shortcut_module, "shortcut" in shown or bool(getattr(self, "_trigger_conflict", "")))
         key_name = TRIGGER_KEYS.get(config.trigger_key, config.trigger_key)
         summary = pages_win.ways_summary(methods, side, held["parts"], held["corner"], key_name, config.trigger_style,
                                          name, several)
@@ -1441,6 +1584,12 @@ class WindowsApplication(QWidget):
         self.arrangement_diagram.set_machines(drawn, key_name, config.trigger_style, shortcut)
         self.resistance_strip.set_edge(edge)
         self._reflect_jump_key()
+        caption = f"Where {name} is"
+        if self.edge_heading.fontMetrics().horizontalAdvance(caption) > 180:
+            caption = "Where the other machine is"
+        self.edge_heading.setText(caption)
+        self.edge_heading.setAccessibleName(f"Where {name} is")
+        self.edge_heading.setToolTip(f"Where {name} is")
 
     def _reflect_jump_key(self) -> None:
         chosen = self._chosen_machine()
@@ -1454,8 +1603,14 @@ class WindowsApplication(QWidget):
             return
         name = self._shown(peerlist.label_for(self._peer_entries, peer_id=chosen) or "this machine")
         self.jump_recorder.set_value(entry.get("jump_key", ""))
+        self.jump_heading.setText(f"Jump to {name}")
         self.jump_clear.setAccessibleName(f"Clear jump key for {name}")
-        self.jump_note.setText(f"sends input to {name}")
+        chord = self.jump_recorder.key.text()
+        if entry.get("jump_key"):
+            self.jump_note.setText(f"Press {chord} to send input to {name}; press again to bring it home.")
+        else:
+            self.jump_note.setText(f"Choose a key combination to jump to {name} and back.")
+        self.jump_note.setToolTip(f"Works while edges are held. Needs In use, This PC drives it and permission from {name} to drive it.")
 
     def _jump_arming(self, armed: bool) -> None:
         self.sender.jump_recording = armed
@@ -1594,9 +1749,9 @@ class WindowsApplication(QWidget):
 
     def _update_resistance_hint(self, value: int) -> None:
         text = (
-            "Switches the moment the pointer touches the edge."
+            "Switches the moment this PC's pointer touches the edge. Each screen supplies its own zones."
             if value == 0
-            else "How far to push past the edge before it gives."
+            else "Follows this PC's mouse on every screen; each screen supplies its own zones."
         )
         if text != self.resistance_hint.text():
             self.resistance_hint.setText(text)
@@ -1697,6 +1852,7 @@ class WindowsApplication(QWidget):
             row = QFrame()
             row.setProperty("vernier", "entry")
             row_layout = QHBoxLayout(row)
+            row_layout.setSizeConstraint(QLayout.SizeConstraint.SetMinimumSize)
             row_layout.setContentsMargins(12, 2, 4, 2)
             name = widgets.label(capture_win.input_title(entry), "readout")
             row_layout.addWidget(name, 1)
@@ -1809,10 +1965,15 @@ class WindowsApplication(QWidget):
             )
             self.trigger_note.setVisible(True)
             return
-        self.trigger_note.setVisible(False)
-        self.trigger_recorder.set_title(TRIGGER_KEYS[name])
         if self._config is None:
             return
+        try:
+            ways.check_trigger_key({"peers": self.book.peers()}, name)
+        except ValueError as exc:
+            self._show_trigger_conflict(str(exc))
+            return
+        self._show_trigger_conflict("")
+        self.trigger_recorder.set_title(TRIGGER_KEYS[name])
         self._config.trigger_key = name
         self._persist()
         self._configure_trigger(self._config)
@@ -1820,6 +1981,11 @@ class WindowsApplication(QWidget):
         if ignored.key(value) in self._config.ignored_inputs:
             # The shortcut always stays with Beamer, so it cannot also be on the stays-here list.
             self._set_ignored([entry for entry in self._config.ignored_inputs if entry != ignored.key(value)])
+
+    def _show_trigger_conflict(self, note) -> None:
+        self._trigger_conflict = note
+        self.trigger_note.setText(note)
+        self.trigger_note.setVisible(bool(note))
 
     def _set_trigger_style(self, value: str) -> None:
         if self._config is None:
@@ -1833,7 +1999,7 @@ class WindowsApplication(QWidget):
 
     def _update_style_hint(self, style: str) -> None:
         text = (
-            "Input is on another machine for as long as the key is held."
+            "Input is on another machine for as long as the key is held. If you jump while holding the shortcut, releasing it brings input home."
             if style == "hold"
             else "Tap twice to switch; tap twice again to come back."
         )
@@ -1854,15 +2020,17 @@ class WindowsApplication(QWidget):
         layout.addWidget(self._on_screen_module(current))
         self.look_module = self._edge_look_module(current)
         layout.addWidget(self.look_module)
+        layout.addWidget(self.colour_module)
+        layout.addWidget(self._appearance_module(current))
         follow = widgets.Module("Match design with")
         self.design_follow_choice = QComboBox()
+        self.design_follow_choice.setMaximumWidth(320)
         self.design_follow_choice.currentIndexChanged.connect(self._design_follow_chosen)
-        follow.body.addWidget(self.design_follow_choice)
+        follow.body.addWidget(self._row(widgets.label("Machine", "key"), self.design_follow_choice))
         self.design_follow_note = widgets.label("None: this PC keeps its own Design.", "note", wrap=True)
         follow.body.addWidget(self.design_follow_note)
         layout.addWidget(follow)
         self._refresh_design_follow()
-        layout.addWidget(self._appearance_module(current))
         self._reflect_look()
 
     def _appearance_module(self, current: Config) -> QWidget:
@@ -1874,8 +2042,13 @@ class WindowsApplication(QWidget):
             (("system", "System"), ("light", "Light"), ("dark", "Dark")), 3, current.appearance,
             on_change=self._appearance_chosen,
         )
+        self.appearance_choice.set_width(252)
         module.body.addWidget(self._row(widgets.label("This window", "key"), self.appearance_choice.view))
-        module.body.addWidget(widgets.label("System follows Windows' light or dark setting.", "note", wrap=True))
+        if sys.platform.startswith("linux"):
+            appearance_note = "System follows your Linux desktop's light or dark setting."
+        else:
+            appearance_note = "System follows Windows' light or dark setting."
+        module.body.addWidget(widgets.label(appearance_note, "note", wrap=True))
         return module
 
     def _appearance_chosen(self, choice: str) -> None:
@@ -1896,8 +2069,7 @@ class WindowsApplication(QWidget):
         module.body.addWidget(self._own_note())
         module.body.addWidget(
             widgets.label(
-                "Lights this PC as you push toward another machine. Switched off, crossing still works. "
-                "Each machine sets how its own edge looks.",
+                "Turns crossing and landing animations on or off on this screen. Saved style choices stay in place.",
                 "note",
                 wrap=True,
             )
@@ -1910,37 +2082,41 @@ class WindowsApplication(QWidget):
         self.landing_row = self._row(
             self.landing_toggle,
             widgets.label(
-                "When the shortcut or a menu brings input to this PC, an animation plays around the "
-                "pointer. Choose it under Style for: Shortcut and menu.",
+                "For shortcut, menu and jump arrivals; requires Animate crossings on this screen.",
                 "note",
                 wrap=True,
             ),
         )
         self.landing_row.layout().setSpacing(12)
         module.body.addWidget(self.landing_row)
+        self.landing_toggle.setToolTip("Jump arrivals use this screen's landing animation too.")
         return module
 
     def _edge_look_module(self, current: Config) -> QWidget:
-        module = widgets.Module("Style and colour")
+        module = widgets.Module("Style")
+        module.body.addWidget(self._follow_banner())
         colours = app_config.palette_colours(current.glow_colour)
+        self.style_preview_hint = widgets.label("Hover to preview", "preview-hint")
+        module.body.addWidget(self.style_preview_hint)
         # Which animation the tiles below choose. Not saved: it only says which one is being worked on.
         self.design_mode_choice = widgets.Choice(
             (("crossing", "Crossing"), ("switch", "Shortcut and menu")), 2, "crossing", on_change=self._preview_method
         )
         self.design_mode_choice.set_names("Style for")
+        self.design_mode_choice.set_width(240)
         self.style_for_row = self._row(widgets.label("Style for", "key"), self.design_mode_choice.view)
-        module.body.addWidget(self.style_for_row)
         # Where every tile below plays its style: never switched off by the style, and what differs
         # there is said beneath it. The edge or a corner; a PC has no notch to show.
         self.effect_method_choice = widgets.Choice(
             (("edge", "Edge"), ("corner", "Corner")), 2, "edge", on_change=self._place_picked
         )
         self.effect_method_choice.set_names("Show at")
+        self.effect_method_choice.set_width(176)
         self._place_chosen = False
         self.place_note = widgets.label("", "small", wrap=True)
         self.preview_at_row = self._row(widgets.label("Show at", "key"), self.effect_method_choice.view, self.place_note)
+        module.body.addWidget(self.style_for_row)
         module.body.addWidget(self.preview_at_row)
-        module.body.addSpacing(6)
         self.effect_stills = {}
         groups = []
         for title, items in pages_win.style_groups():
@@ -1959,7 +2135,9 @@ class WindowsApplication(QWidget):
                 tiles.append((choice, name, detail, picture))
             switch_groups.append((title, tiles))
         self.switch_style_choice = widgets.TileGroups(switch_groups, current.shortcut_arrival_style, on_change=self._apply_look)
+        self.switch_style_choice.view.setToolTip("For shortcut, menu and jump arrivals. Same as crossing uses this screen's crossing style.")
         module.body.addWidget(self.switch_style_choice.view)
+        module.body.addSpacing(6)
         # Each tile plays its preview while the pointer is over it.
         for choices, pictures in ((self.glow_style_choice, self.effect_stills),
                                   (self.switch_style_choice, self.switch_stills)):
@@ -1975,34 +2153,24 @@ class WindowsApplication(QWidget):
         # Every style and every switch plays at this length, so it follows the tiles either way.
         self.length_choice = widgets.Choice(effects.LENGTHS, 3, current.effect_length, on_change=self._apply_look)
         self.length_choice.set_names("Length")
+        self.length_choice.set_width(240)
         self.size_choice = widgets.Choice(effects.SIZES, 3, current.effect_size, on_change=self._apply_look)
         self.size_choice.set_names("Size")
-        controls = QHBoxLayout()
-        controls.setSpacing(12)
+        self.size_choice.set_width(240)
         for title, choice in (("Length", self.length_choice), ("Size", self.size_choice)):
-            field = QVBoxLayout()
-            field.setSpacing(5)
-            field.addWidget(widgets.label(title, "key"))
-            field.addWidget(choice.view)
-            controls.addLayout(field, 1)
-        module.body.addLayout(controls)
+            module.body.addWidget(self._row(widgets.label(title, "key"), choice.view))
         module.body.addWidget(widgets.label(
-            "Length sets how long each animation plays. Size sets the edge band's depth.", "small", wrap=True))
-        module.body.addSpacing(10)
-        colour_head = QHBoxLayout()
-        colour_head.setSpacing(8)
-        colour_head.addWidget(widgets.label("Colour", "key"))
+            "Length changes effect playback time, not crossing resistance or key timing. Size changes depth for styles that support it; it does not change resistance.", "small", wrap=True))
+        self.colour_module = widgets.Module("Colour")
         self.colour_note = widgets.label("For the crossing and the shortcut alike", "small")
-        colour_head.addWidget(self.colour_note)
-        colour_head.addStretch(1)
-        module.body.addLayout(colour_head)
+        self.colour_module.body.addWidget(self.colour_note)
         self.glow_colour_choice = widgets.SwatchGroups(
             [(title, [(value, name, app_config.palette_colours(value)) for value, name in items])
              for title, items in pages_win.colour_groups()],
             current.glow_colour,
             on_change=self._apply_look,
         )
-        module.body.addWidget(self.glow_colour_choice.view)
+        self.colour_module.body.addWidget(self.glow_colour_choice.view)
         self._look = None
         return module
 
@@ -2035,6 +2203,7 @@ class WindowsApplication(QWidget):
         # With the animations off, what they look like cannot apply, so it is hidden, not faded.
         motion.set_shown(self.landing_row, on)
         motion.set_shown(self.look_module, on)
+        motion.set_shown(self.colour_module, on)
         # Style for exists only while a switch plays anything; otherwise the module is Crossing.
         motion.set_shown(self.style_for_row, landing)
         self.colour_note.setVisible(landing)
@@ -2143,7 +2312,6 @@ class WindowsApplication(QWidget):
         design_changed = self._design_seen is not None and design_fields != self._design_seen
         self._design_seen = design_fields
         if design_changed:
-            self._config.design_follow_peer = ""
             self._config.design_set_at = settings_sync.next_stamp(
                 max(self._config.design_set_at, self._config.same_set_at), time.time())
             self._config.design_by = self._config.machine_id
@@ -2239,7 +2407,9 @@ class WindowsApplication(QWidget):
                 waking=peer is not None and self.sender.is_waking(peer),
             )
             state = replace(state, detail=self._shown(state.detail))
-            where = f"{peers_view.platform_name(entry)} · {peers_view.address_line(entry, hide)}"
+            where = peers_view.platform_name(entry)
+            if entry.get("port") != 0:
+                where += f" · {peers_view.address_line(entry, hide)}"
             items.append((entry, labels[token], state, where))
         return items
 
@@ -2250,7 +2420,7 @@ class WindowsApplication(QWidget):
             LOGGER.exception("The peers could not be read")
             peers, zones = [], []
         self._peer_entries, self._zone_entries = peers, zones
-        if self._config is not None and self._config.design_follow_peer not in {p.get("id") for p in peers}:
+        if self._config is not None and self._config.design_follow_peer not in {p.get("id") for p in peerlist.desktops(peers)}:
             if self._config.design_follow_peer:
                 self._config.design_follow_peer = ""
                 self._persist()
@@ -2274,7 +2444,7 @@ class WindowsApplication(QWidget):
 
     def _any_send(self) -> bool:
         return any(entry.get("in_use", True) is True and entry.get("send") and protocol.linkable(entry)
-                   for entry in self._peer_entries)
+                   for entry in peerlist.desktops(self._peer_entries))
 
     def _label_of(self, peer: Optional[bytes]) -> str:
         return self._labels_by_id.get(peer, "another machine") if peer is not None else ""
@@ -2331,7 +2501,7 @@ class WindowsApplication(QWidget):
         try:
             with app_config.SETTINGS_LOCK:
                 settings = app_config.load_settings(self.config_path)
-                for entry in settings["peers"]:
+                for entry in peerlist.desktops(settings["peers"]) if field == "send" else settings["peers"]:
                     entry[field] = bool(enabled)
                 app_config.write_settings(self.config_path, settings)
         except (ConfigError, OSError):
@@ -2341,13 +2511,14 @@ class WindowsApplication(QWidget):
 
     def _refresh_tray_directions(self) -> None:
         """The tray's ticks name who they cover and show whether every machine has the direction on."""
-        entries = self._peer_entries
-        labels = peerlist.labels(entries)
-        who = self._shown(labels[entries[0]["token"]]) if len(entries) == 1 else "machines"
         for action, field, text in (
-            (self.drive_action, "allow_drive", f"{who} drives this PC" if len(entries) == 1 else "Machines drive this PC"),
-            (self.send_action, "send", f"This PC drives {who}"),
+            (self.drive_action, "allow_drive", "Machines drive this PC"),
+            (self.send_action, "send", "This PC drives machines"),
         ):
+            entries = peerlist.desktops(self._peer_entries) if field == "send" else self._peer_entries
+            if len(entries) == 1:
+                who = self._shown(peerlist.labels(entries)[entries[0]["token"]])
+                text = f"{who} drives this PC" if field == "allow_drive" else f"This PC drives {who}"
             action.setEnabled(bool(entries))
             if action.text() != text:
                 action.setText(text)
@@ -2590,31 +2761,22 @@ class WindowsApplication(QWidget):
         ))
         layout.addWidget(privacy)
         module = widgets.Module("This PC")
-        fields = QGridLayout()
-        fields.setHorizontalSpacing(10)
-        fields.setVerticalSpacing(10)
-        fields.setColumnStretch(1, 1)
-
-        def field(row, caption, entry, span=2):
+        def field(caption, entry):
             # The caption is the field's buddy and its accessible name, so a screen reader and
             # Alt+letter both reach the field by what it is called.
             key = widgets.label(caption, "key")
             key.setBuddy(entry)
             entry.setAccessibleName(caption)
-            fields.addWidget(key, row, 0)
-            fields.addWidget(entry, row, 1, 1, span)
+            module.body.addWidget(widgets.FormRow(key, entry))
 
         # Read-only: the address that faces the machines this PC knows, which is what another machine
         # types to pair by address.
         self.host_readout = widgets.label(self._shown(self._host) or "Not known yet", "readout", wrap=True)
         self.host_readout.setAccessibleName("This PC's address")
-        key = widgets.label("This PC's address", "key")
-        key.setBuddy(self.host_readout)
-        fields.addWidget(key, 0, 0)
-        fields.addWidget(self.host_readout, 0, 1, 1, 2)
+        field("This PC's address", self.host_readout)
         self.port_entry = QLineEdit(str(current.port))
-        field(1, "Port", self.port_entry)
-        module.body.addLayout(fields)
+        self.port_entry.setMaximumWidth(240)
+        field("This PC's listening port", self.port_entry)
         self.save_message = widgets.label("", "note", wrap=True)
         self.save_message.setVisible(False)
         module.body.addWidget(self.save_message)
@@ -2698,8 +2860,14 @@ class WindowsApplication(QWidget):
     # -- Firewall, on Connection --------------------------------------------------------------
 
     def _firewall_module(self, layout) -> None:
-        module = widgets.Module("Windows Firewall")
-        self.firewall_note = widgets.label("Checking Windows Firewall…", "note", wrap=True)
+        if sys.platform.startswith("linux"):
+            title = "Linux firewall"
+            checking = "Beamer's firewall check is not yet on Linux."
+        else:
+            title = "Windows Firewall"
+            checking = "Checking Windows Firewall…"
+        module = widgets.Module(title)
+        self.firewall_note = widgets.label(checking, "note", wrap=True)
         module.body.addWidget(self.firewall_note)
         self.firewall_button = QPushButton("Checking…")
         self.firewall_button.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -2811,7 +2979,7 @@ class WindowsApplication(QWidget):
     def _apply_theme(self) -> None:
         app = QApplication.instance()
         if app is not None:
-            app.setStyleSheet(theme.stylesheet())
+            theme.apply_stylesheet(app)
         self._apply_title_bar()
 
     def _apply_title_bar(self) -> None:
@@ -3051,12 +3219,11 @@ class WindowsApplication(QWidget):
             return self.sender.on_dead_key(vk)
         if self.sender.handle_jump_key(name, down, vk):
             return True
+        if not self.sender.shortcut_armed:
+            self._trigger.configure(self._trigger.key, self._trigger.style, self._trigger.window_ms)
+            return self.sender.on_key(name, down, vk, us)
         action = self._trigger.feed(name, down, time.monotonic())
         if action is not None:
-            if not self.sender.shortcut_armed:
-                # The key is still the trigger's, so it never reaches an app,
-                # but with the shortcut switched off it moves nothing.
-                return True
             if action == capture_win.TOGGLE:
                 self.sender.toggle()
             else:

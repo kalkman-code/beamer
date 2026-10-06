@@ -93,6 +93,8 @@ def legible(palette, dark, fx=None):
     ends on a deep red, and effects that drew those, additively on dark most of all, all but
     vanished. On a light one the effects that draw a pack's colours as given have every colour
     lighter than LIGHT_CEILING brought down to it, as Mono, Pearl and Contrast all but vanished."""
+    if not dark and tuple(palette) in NEW_LIGHT_PACKS:
+        return list(NEW_LIGHT_PACKS[tuple(palette)])
     if dark:
         low, high = DARK_FLOOR, 1.0
     elif getattr(fx, "id", None) in LIGHT_AS_GIVEN:
@@ -411,13 +413,13 @@ def _light_aperture(pen, state, departing):
 
 
 # Every direction built, in the order the Design pages list them: each direction's quiet, medium
-# and showpiece effect, and its three colour packs. Ids are the settings values, so never rename one.
+# and showpiece effect, and its colour packs. Ids are settings values, so never rename one.
 ALL_DIRECTIONS = (
-    ("fx_membrane", "Membrane", ("skin", "film", "rupture"), ("oil_slick", "soap_bubble", "pearl")),
-    ("fx_sparks", "Sparks", ("flint", "filings", "discharge"), ("ember", "forge", "sparkler_gold")),
-    ("fx_instrument", "Instrument", ("rule", "gauge", "rangefinder"), ("phosphor", "sodium", "contrast")),
-    ("fx_folio", "Folio", ("crease", "pleat", "concertina"), ("vellum", "carbon_copy", "marbled")),
-    ("fx_selvedge", "Selvedge", ("thread", "weave", "jacquard"), ("flax", "madder", "tide")),
+    ("fx_membrane", "Membrane", ("skin", "film", "rupture"), ("oil_slick", "soap_bubble", "pearl", "opal", "sea_glass")),
+    ("fx_sparks", "Sparks", ("flint", "filings", "discharge"), ("ember", "forge", "sparkler_gold", "arc", "magnesium")),
+    ("fx_instrument", "Instrument", ("rule", "gauge", "rangefinder"), ("phosphor", "sodium", "contrast", "ruby", "cobalt")),
+    ("fx_folio", "Folio", ("crease", "pleat", "concertina"), ("vellum", "carbon_copy", "marbled", "moss", "plum")),
+    ("fx_selvedge", "Selvedge", ("thread", "weave", "jacquard"), ("flax", "madder", "tide", "woad", "saffron")),
     ("fx_ink", "Ink", ("capillary", "viscous_drop", "sumi_bloom"), ("indigo_ink", "matcha", "terracotta")),
     ("fx_warp", "Warp", ("light_slit", "hyperdrive", "wormhole"), ("neon", "vaporwave", "cyber")),
 )
@@ -437,7 +439,52 @@ LIGHT_AS_GIVEN = ("aperture", "crease", "pleat", "concertina", "thread", "weave"
     effect for module, _name, effects, _packs in ALL_DIRECTIONS if module in ("fx_ink", "fx_warp")
     for effect in effects
 )
-PACK_IDS = tuple(pack for _module, _name, _effects, packs in DIRECTIONS for pack in packs)
+MONO_PACKS = {
+    'mono': ('White', ['#ebebeb', '#969696', '#ebebeb']),
+    'mono_silver': ('Silver', ['#c9ced2', '#a8afb6', '#e1e5e8']),
+    'mono_graphite': ('Graphite', ['#65696f', '#4a4f55', '#868c94']),
+    'mono_ink': ('Ink', ['#25282c', '#101215', '#41464d']),
+    'mono_warm': ('Warm grey', ['#b7ada0', '#8a8074', '#d8cfc2']),
+}
+BRIGHT_PACKS = {
+    'citron': ('Citron', ['#d5ff00', '#c1f000', '#e3ff38']),
+    'laser': ('Laser', ['#1affbe', '#00efa9', '#42ffd0']),
+    'electric': ('Electric', ['#1aa7ff', '#0098f0', '#36b8ff']),
+    'fuchsia': ('Fuchsia', ['#ff66b3', '#ff4da6', '#ff80bf']),
+    'ultraviolet': ('Ultraviolet', ['#bf80ff', '#b570ff', '#cd99ff']),
+}
+# Same hue and saturation, luminance capped at .20 (over 3:1 on preview wells).
+# Authored stops avoid doing colour-space searches in the animation frame loop.
+NEW_LIGHT_PACKS = {
+    ('#53dc91', '#9572eb', '#43c5b4'): ('#1d8d50', '#8962e9', '#2a897d'),
+    ('#527cda', '#ac8cd2', '#d985b0', '#7eade0'): ('#4c78d9', '#9268c4', '#c8508e', '#337dce'),
+    ('#48b8a0', '#8bd6b5', '#388f91', '#b4dfb0'): ('#358977', '#318a63', '#358789', '#408b39'),
+    ('#69c8ff', '#269de8', '#b5e5ff', '#456ad0'): ('#0080cb', '#1581c6', '#0081c8', '#456ad0'),
+    ('#c98bff', '#9255da', '#ead2ff', '#b064e8'): ('#a945ff', '#9255da', '#a846ff', '#a752e5'),
+    ('#ef4471', '#d32859', '#ff9ab5'): ('#ec265b', '#d32859', '#f60042'),
+    ('#478df5', '#2a6dd3', '#a4caff'): ('#2376f3', '#2a6dd3', '#1174ff'),
+    ('#72965b', '#bfd0a0', '#465e3b'): ('#658450', '#6c8341', '#465e3b'),
+    ('#9b6b9e', '#d2b5ce', '#8b6095'): ('#9b6b9e', '#a3679b', '#8b6095'),
+    ('#8277b3', '#7268a4', '#c3b9df'): ('#7f73b1', '#7268a4', '#846fbd'),
+    ('#d48238', '#976025', '#efc18a'): ('#b36927', '#976025', '#b16b18'),
+    tuple(BRIGHT_PACKS['citron'][1]): ('#6f8400', '#6b8500', '#718300'),
+    tuple(BRIGHT_PACKS['laser'][1]): ('#008d65', '#008d64', '#008c6a'),
+    tuple(BRIGHT_PACKS['electric'][1]): ('#0080d0', '#0080cb', '#0081c8'),
+    tuple(BRIGHT_PACKS['fuchsia'][1]): ('#f00079', '#f00078', '#f00077'),
+    tuple(BRIGHT_PACKS['ultraviolet'][1]): ('#a449ff', '#a24bff', '#a648ff'),
+}
+PACK_IDS = tuple(pack for _module, _name, _effects, packs in DIRECTIONS for pack in packs) + tuple(BRIGHT_PACKS) + tuple(MONO_PACKS)
+
+
+def colour_groups(light_choices, with_effects=True):
+    """Shared colour catalogue; Mono is independent of every effect family."""
+    groups = [('Light', [(value, name) for value, name in light_choices if value != 'mono']),
+              ('Mono', [(value, name) for value, (name, _stops) in MONO_PACKS.items()])]
+    if with_effects:
+        groups.extend((title, [(value, pack(value)[0]) for value in values])
+                      for _module, title, _effects, values in DIRECTIONS)
+        groups.append(('Bright', [(value, name) for value, (name, _stops) in BRIGHT_PACKS.items()]))
+    return groups
 
 _loaded = None
 
@@ -457,6 +504,8 @@ def _load():
                 effects[effect_id] = by_id[effect_id]
             for pack_id in pack_ids:
                 packs[pack_id] = module.PACKS[pack_id]
+        packs.update(BRIGHT_PACKS)
+        packs.update(MONO_PACKS)
         _loaded = (effects, packs)
     return _loaded
 

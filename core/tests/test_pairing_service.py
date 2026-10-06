@@ -29,14 +29,6 @@ def quiet_logger():
     return logger
 
 
-def free_port(kind):
-    sock = socket.socket(socket.AF_INET, kind)
-    sock.bind(("127.0.0.1", 0))
-    port = sock.getsockname()[1]
-    sock.close()
-    return port
-
-
 def wait_until(predicate, timeout=5.0):
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
@@ -80,17 +72,25 @@ def closed_without_a_byte(sock, timeout=2.0):
 class Machine:
     def __init__(self, test, name, identity, platform, peer_udp=None, entries=(), udp_port=None):
         self.book = Book(entries)
-        self.udp_port = udp_port or free_port(socket.SOCK_DGRAM)
-        self.tcp_port = free_port(socket.SOCK_STREAM)
+        self.udp_port = 0 if udp_port is None else udp_port
         self.paired = []
         self.service = PairingService(
             name=name, identity=identity, platform=platform, port_getter=lambda: 24820,
             peers=self.book.peers, store=self.book.store, on_paired=self.paired.append,
-            logger=quiet_logger(), bind_port=self.udp_port, tcp_port=self.tcp_port,
-            announce_to=("127.0.0.1", peer_udp or free_port(socket.SOCK_DGRAM)),
+            logger=quiet_logger(), bind_port=self.udp_port, tcp_port=0,
+            announce_to=("127.0.0.1", peer_udp if peer_udp is not None else 0),
         )
         self.service.start()
         test.addCleanup(self.service.stop)
+        assert wait_until(lambda: self.service.listening_port is not None), "the pairing service did not bind"
+        self.udp_port = self.service.listening_port
+
+    @property
+    def tcp_port(self):
+        return self.service.tcp_port
+
+    def pair_with(self, peer):
+        self.service.announce_to = ("127.0.0.1", peer.udp_port)
 
     def connect(self):
         sock = socket.create_connection(("127.0.0.1", self.tcp_port), timeout=3.0)
@@ -98,11 +98,38 @@ class Machine:
         return sock
 
 
+class EphemeralPortTests(unittest.TestCase):
+    def test_pairing_service_reports_the_ports_bound_by_the_os(self):
+        book = Book()
+        service = PairingService(
+            "Loop PC", PC_ID, "windows", lambda: 24820, book.peers, book.store,
+            logger=quiet_logger(), bind_port=0, tcp_port=0, announce_to=("127.0.0.1", 0),
+        )
+        self.addCleanup(service.stop)
+        service.start()
+        self.assertTrue(wait_until(lambda: service._sock is not None))
+        udp_port = service._sock.getsockname()[1]
+        self.assertEqual(getattr(service, "listening_port", None), udp_port)
+        service.begin_pairing()
+        self.assertGreater(service.tcp_port, 0)
+
+    def test_two_pairing_services_announce_on_their_actual_ports(self):
+        mac = Machine(self, "Loop Mac", MAC_ID, "macos")
+        pc = Machine(self, "Loop PC", PC_ID, "windows", peer_udp=mac.udp_port)
+        mac.pair_with(pc)
+        code = pc.service.begin_pairing()
+        self.assertTrue(wait_until(lambda: any(machine["pair_id"] for machine in mac.service.machines())))
+        seen = next(machine for machine in mac.service.machines() if machine["pair_id"])
+        saved = mac.service.pair(seen, code)
+        self.assertTrue(wait_until(lambda: pc.paired))
+        self.assertEqual(pc.paired[0]["token"], saved["token"])
+
+
 class BothEndsTests(unittest.TestCase):
     def setUp(self):
-        mac_udp, pc_udp = free_port(socket.SOCK_DGRAM), free_port(socket.SOCK_DGRAM)
-        self.mac = Machine(self, "Loop Mac", MAC_ID, "macos", peer_udp=pc_udp, udp_port=mac_udp)
-        self.pc = Machine(self, "Loop PC", PC_ID, "windows", peer_udp=mac_udp, udp_port=pc_udp)
+        self.mac = Machine(self, "Loop Mac", MAC_ID, "macos")
+        self.pc = Machine(self, "Loop PC", PC_ID, "windows", peer_udp=self.mac.udp_port)
+        self.mac.pair_with(self.pc)
 
     def _pair_over_udp(self, host, requester):
         code = host.service.begin_pairing()
@@ -145,8 +172,8 @@ class BothEndsTests(unittest.TestCase):
 
 class OwnBeaconTests(unittest.TestCase):
     def test_a_machine_that_hears_its_own_beacons_does_not_list_itself(self):
-        port = free_port(socket.SOCK_DGRAM)
-        alone = Machine(self, "Alone", MAC_ID, "macos", peer_udp=port, udp_port=port)
+        alone = Machine(self, "Alone", MAC_ID, "macos")
+        alone.pair_with(alone)
         arrived = []
         original = alone.service._dispatch
         alone.service._dispatch = lambda sock, message, *rest: (arrived.append(message.get("type")), original(sock, message, *rest))
@@ -490,7 +517,7 @@ class RequesterLimitTests(unittest.TestCase):
     def test_a_requester_with_32_peers_does_not_start(self):
         mac = Machine(self, "Full Mac", MAC_ID, "macos", entries=[entry(bytes([n]) * 16) for n in range(1, 33)])
         with self.assertRaises(PairingError) as caught:
-            mac.service.pair_by_address("127.0.0.1", "123456", port=free_port(socket.SOCK_STREAM))
+            mac.service.pair_by_address("127.0.0.1", "123456", port=0)
         self.assertEqual(str(caught.exception), pairing.ERROR_FULL)
 
     def test_a_host_with_32_peers_shows_no_code(self):
@@ -500,9 +527,9 @@ class RequesterLimitTests(unittest.TestCase):
         self.assertIsNone(pc.service.code)
 
     def test_the_failed_code_memory_covers_both_transports(self):
-        mac_udp, pc_udp = free_port(socket.SOCK_DGRAM), free_port(socket.SOCK_DGRAM)
-        pc = Machine(self, "PC", PC_ID, "windows", peer_udp=mac_udp, udp_port=pc_udp)
-        mac = Machine(self, "Mac", MAC_ID, "macos", peer_udp=pc_udp, udp_port=mac_udp)
+        mac = Machine(self, "Mac", MAC_ID, "macos")
+        pc = Machine(self, "PC", PC_ID, "windows", peer_udp=mac.udp_port)
+        mac.pair_with(pc)
 
         def over_udp(code):
             self.assertTrue(wait_until(lambda: any(m["pair_id"] for m in mac.service.machines())))

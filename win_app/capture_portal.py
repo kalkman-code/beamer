@@ -276,15 +276,17 @@ class _Session:
         if preflight is not None:
             preflight()
         self.version = self.portal.version(INTERFACE)
-        if self.version < 1:
-            raise CaptureUnavailable(NO_PORTAL)
 
     def open(self) -> None:
         """Make and start the session; the user may be asked, for as long as they take."""
+        LOGGER.info("Requesting InputCapture session (portal version %d)", self.version)
         try:
             if self.version >= 2:
-                results = portal.plain(self.portal.call(INTERFACE, "CreateSession2", "a{sv}",
-                                                        ({"session_handle_token": ("s", self.portal.token())},)))
+                try:
+                    results = portal.plain(self.portal.call(INTERFACE, "CreateSession2", "a{sv}",
+                                                            ({"session_handle_token": ("s", self.portal.token())},)))
+                except portal.PortalError as exc:
+                    raise CaptureUnavailable(f"{NO_PORTAL} ({exc})") from exc
                 self.handle = results[0]["session_handle"]
                 options = {"capabilities": ("u", CAP_KEYBOARD | CAP_POINTER), "persist_mode": ("u", 2)}
                 token = self._tokens.read()
@@ -295,11 +297,14 @@ class _Session:
                 if started.get("restore_token"):
                     self._tokens.write(started["restore_token"])
             else:
-                results = self.portal.request(INTERFACE, "CreateSession", "sa{sv}", lambda handle_token: ("", {
-                    "handle_token": ("s", handle_token),
-                    "session_handle_token": ("s", self.portal.token()),
-                    "capabilities": ("u", CAP_KEYBOARD | CAP_POINTER),
-                }))
+                try:
+                    results = self.portal.request(INTERFACE, "CreateSession", "sa{sv}", lambda handle_token: ("", {
+                        "handle_token": ("s", handle_token),
+                        "session_handle_token": ("s", self.portal.token()),
+                        "capabilities": ("u", CAP_KEYBOARD | CAP_POINTER),
+                    }))
+                except portal.PortalError as exc:
+                    raise CaptureUnavailable(f"{NO_PORTAL} ({exc})") from exc
                 self.handle = results["session_handle"]
         except portal.Refused:
             self._tokens.write("")
@@ -332,11 +337,6 @@ class _Session:
     def enable(self) -> None:
         self.portal.call(INTERFACE, "Enable", "oa{sv}", (self.handle, {}))
         self.enabled = True
-
-    def disable(self) -> None:
-        if self.enabled:
-            self.portal.call(INTERFACE, "Disable", "oa{sv}", (self.handle, {}))
-            self.enabled = False
 
     def release(self, activation_id: int, point: Tuple[int, int]) -> None:
         options = {"cursor_position": ("(dd)", (float(point[0]), float(point[1])))}
@@ -398,7 +398,7 @@ class Hooks:
         self._zones: List[crossing.Rect] = []
         self._keymap = None
         self._mods = (0, 0, 0, 0)
-        self._names_down: Dict[int, str] = {}
+        self._names_down: Dict[Tuple[int, int], str] = {}
         self._carry = [0.0, 0.0]
         self._scroll_carry = [0.0, 0.0]
         self._frame: List[tuple] = []
@@ -511,6 +511,7 @@ class Hooks:
             LOGGER.exception("Could not let go of the captured input; closing the session lets go of it")
         finally:
             self._activation = None
+            self._names_down.clear()
             desktop_portal.set_captured(False)
             if session is not None:
                 try:
@@ -633,6 +634,7 @@ class Hooks:
             raise CaptureUnavailable(ENDED.format(detail=f"letting go failed: {exc}")) from exc
         finally:
             self._activation = None
+            self._names_down.clear()
             desktop_portal.set_captured(False)
         # The sender may have landed the pointer while the Release was on its way.
         landed = desktop_portal.position()
@@ -720,6 +722,12 @@ class Hooks:
             return
         if kind == "disconnect":
             raise CaptureUnavailable(ENDED.format(detail="its input connection closed"))
+        if kind == "device_paused":
+            device = event[1]
+            for device_id, code in tuple(self._names_down):
+                if device_id == id(device):
+                    self._key_event(code, False, device)
+            return
         if kind == "modifiers":
             self._mods = tuple(event[2:6])
             return
@@ -800,7 +808,7 @@ class Hooks:
             if kind == "motion":
                 self._motion(event[2], event[3])
             elif kind == "key":
-                self._key_event(event[2], event[3])
+                self._key_event(event[2], event[3], event[1])
             elif kind == "button":
                 self._button(event[2], event[3])
             elif kind == "scroll_discrete":
@@ -838,20 +846,22 @@ class Hooks:
         # An answer of False, the button kept here, cannot be played back on Wayland.
         self._on_mouse(press if down else release, 0, 0, data)
 
-    def _key_event(self, code: int, down: bool) -> None:
-        name = self._names_down.get(code) if down else self._names_down.pop(code, None)
+    def _key_event(self, code: int, down: bool, device) -> None:
+        key = (id(device), code)
+        name = self._names_down.get(key) if down else self._names_down.pop(key, None)
         if name is None:
             name = VK_TO_NAME.get(code)
         if name is None and self._keymap is not None:
             depressed, latched, locked, group = self._mods
             mods = self._keymap.core_mods(depressed | latched | locked)
             for held in self._names_down:
-                mods |= HELD_MODS.get(held, 0)
+                held_code = held[1] if isinstance(held, tuple) else held
+                mods |= HELD_MODS.get(held_code, 0)
             name = character(code + KEYCODE_OFFSET, mods, group, self._keymap)
         if name is None:
             return
         if down:
-            self._names_down[code] = name
+            self._names_down[key] = name
         self._on_key(name, down, code, keytable.EVDEV_US.get(code))
 
 

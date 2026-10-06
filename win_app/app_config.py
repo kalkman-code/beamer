@@ -2,7 +2,7 @@
 
 The file is settings.json (WIRE.md section 1), migrated from 1.4.x's config.json on the first start
 and never written back to it. `Config` is the flat view the window, the sender and the receiver have
-always read: this PC's own settings, and `peers[0]` as the fields that used to be the Mac's
+always read: this PC's own settings, and the first desktop peer as the fields that used to be the Mac's
 (`mac_host`, `auth_token`, `send_to_mac` and the rest). Each peer's side and zones are written only by
 `set_ways` and `apply_arrangement`, one peer at a time, never by a save of the flat view, so a view read
 before another machine sent its side cannot put the old one back. The settings carry whatever else
@@ -24,6 +24,7 @@ from pathlib import Path
 from platform_parts import capture as capture_win
 from core import effects
 from core import ignored
+from core import peerlist
 from core import protocol
 from core import receiver
 from core import return_edge
@@ -37,7 +38,7 @@ LOGGER = logging.getLogger(__name__)
 # Today's two styles and five colours, then every crossing effect and colour pack in effects.py.
 # Any colour goes with any style.
 GLOW_STYLES = ("glow", "beam") + effects.EFFECT_IDS
-GLOW_COLOURS = ("signal", "colourful", "ocean", "sunset", "mono") + effects.PACK_IDS
+GLOW_COLOURS = tuple(tokens.PALETTES) + effects.PACK_IDS
 EDGES = ("left", "right", "top", "bottom")
 CORNERS = ("top_left", "top_right", "bottom_left", "bottom_right")
 METHODS = ("edge", "part", "corner", "shortcut")
@@ -88,7 +89,7 @@ class Config:
     # Mac configures the rest and tells this PC the return edge on every switch.
     edge_glow: bool = True
     glow_style: str = "glow"
-    glow_colour: str = "signal"
+    glow_colour: str = "colourful"
     # A switch by the shortcut or a menu, not a crossing, plays an arrival around the pointer.
     shortcut_arrival: bool = True
     # What that plays: "match" for whatever the crossing style plays, else see effects.SWITCH_STYLES.
@@ -308,7 +309,7 @@ def config_from_dict(raw: dict) -> Config:
     trigger_key = raw.get("trigger_key", "cmd_r")
     try:
         glow_style, glow_colour, switch_style = effects.offered(
-            raw.get("glow_style", "glow"), raw.get("glow_colour", "signal"), raw.get("shortcut_arrival_style", "match"))
+            raw.get("glow_style", "glow"), raw.get("glow_colour", "colourful"), raw.get("shortcut_arrival_style", "match"))
         config = Config(
             host=raw["host"],
             port=migrated_port(raw["port"]),
@@ -570,7 +571,7 @@ def remigrate(settings: dict, legacy: dict) -> bool:
         return False
     settings["migrated_token_sha256"] = token_sha256(token)
     peers, zones = settings["peers"], settings["zones"]
-    old = next((index for index, peer in enumerate(peers) if peer.get("from_1_4")), None)
+    old = next((index for index, peer in enumerate(peers) if peer.get("from_1_4") and peer.get("port") != 0), None)
     if is_paired_token(token) and any(
         is_paired_token(peer.get("token")) and key_id(peer["token"]) == key_id(token)
         for index, peer in enumerate(peers) if index != old
@@ -660,6 +661,7 @@ def load_settings(path: Path) -> dict:
         raise SettingsFileError(f"{path} has a peer way_back_by that is not text, and is left as it is")
     if any("in_use" in entry and not isinstance(entry["in_use"], bool) for entry in settings["peers"]):
         raise SettingsFileError(f"{path} has a peer in_use that is not true or false, and is left as it is")
+    phones_repaired = peerlist.normalise_phones(settings)
     if any("jump_key" in entry and (not isinstance(entry["jump_key"], str)
                                     or (entry["jump_key"] and not ways.valid_jump_key(entry["jump_key"])))
            for entry in settings["peers"]):
@@ -670,7 +672,7 @@ def load_settings(path: Path) -> dict:
     settings.setdefault("port", protocol.DEFAULT_PORT)
     settings.setdefault("shortcut", True)
     settings.setdefault("migrated_token_sha256", "")
-    repaired = ways.ensure_zones(settings)
+    repaired = ways.ensure_zones(settings) or phones_repaired
     if (legacy is not None and remigrate(settings, legacy)) or repaired:
         _write_json(path, settings)
     return settings
@@ -718,12 +720,12 @@ def _zones_of(settings: dict, peer_id: str) -> dict:
 
 
 def _flat_from_settings(settings: dict) -> dict:
-    """The dict `config_from_dict` reads: settings.json's kept fields, and the first peer and its
+    """The dict `config_from_dict` reads: settings.json's kept fields, and the first desktop and its
     zones as the fields that used to be the Mac's."""
     flat = {key: settings[key] for key in KEPT_FIELDS if key in settings}
     flat.update(machine_id=settings["machine_id"], name=_text(settings["name"]), port=settings["port"],
                 host="", mac_host="", auth_token="")
-    peer = settings["peers"][0] if settings["peers"] else None
+    peer = peerlist.first_desktop(settings["peers"])
     zones = _zones_of(settings, peer.get("id", "")) if peer else {}
     flat["crossing_methods"] = [kind for kind in KINDS if kind in zones and not zones[kind].get("off")]
     if settings["shortcut"]:
@@ -744,8 +746,8 @@ def _flat_from_settings(settings: dict) -> dict:
 
 def _apply_flat(settings: dict, flat: dict) -> None:
     """Write a Config's flat fields (from `config_to_dict`) into the settings: this PC's own, and the
-    first peer's address, name and switches, never a side or a zone. A token that is not the first
-    peer's is a new pairing: it replaces that entry, and its zones point at the empty id until a link
+    first desktop's address, name and switches, never a side or a zone. A token that is not that
+    desktop's is a new pairing: it replaces that entry, and its zones point at the empty id until a link
     learns the new one."""
     own_id = settings["machine_id"]
     settings.update({key: flat[key] for key in KEPT_FIELDS})
@@ -756,19 +758,21 @@ def _apply_flat(settings: dict, flat: dict) -> None:
         # Nothing paired: this machine's own settings are all there is to write, and no peer is made.
         return
     peers = settings["peers"]
-    if not peers or peers[0].get("token") != flat["auth_token"]:
+    index = next((index for index, entry in enumerate(peers) if entry.get("port") != 0), None)
+    peer = peers[index] if index is not None else None
+    if peer is None or peer.get("token") != flat["auth_token"]:
         entry = _peer_entry(flat, flat["auth_token"], flat["port"], own_id)
-        held = peers[0] if peers else {}
+        held = peer or {}
         # The side is the pair's, settled by `arrangement`, and is not the flat view's to set.
         entry.update(side=held.get("side", ""), side_set_at=held.get("side_set_at", 0), side_by=held.get("side_by", ""))
-        if peers:
+        if index is not None:
             for zone in settings["zones"]:
-                if zone.get("peer") == peers[0].get("id"):
+                if zone.get("peer") == peer.get("id"):
                     zone["peer"] = ""
-            peers[0] = entry
+            peers[index] = entry
         else:
-            peers.insert(0, entry)
-    peer = peers[0]
+            peers.append(entry)
+        peer = entry
     # Its name and hardware address are learnt on its link: written here only with a new address, which
     # clears what was learnt at the old one, or a save from a window read before one was learnt would
     # put the old one back.
@@ -824,8 +828,13 @@ def save_config(path: Path, config: Config) -> None:
     payload = config_to_dict(config)
     with SETTINGS_LOCK:
         settings = load_settings(path)
+        if config.trigger_key != settings.get("trigger_key"):
+            try:
+                ways.check_trigger_key(settings, config.trigger_key)
+            except ValueError as exc:
+                raise ConfigError(str(exc)) from exc
         _apply_flat(settings, payload)
-        _write_json(path, settings)
+        write_settings(path, settings)
 
 
 def set_jump_key(path: Path, peer_id: str, value, trigger_key: str) -> dict:
@@ -847,6 +856,7 @@ def write_settings(path: Path, settings: dict) -> None:
     """The settings as the link changed them (an id learnt, an address, `linked`), written atomically."""
     if any("in_use" in entry and not isinstance(entry["in_use"], bool) for entry in settings.get("peers", []) if isinstance(entry, dict)):
         raise SettingsFileError(f"{path} has a peer in_use that is not true or false")
+    peerlist.normalise_phones(settings)
     if any("jump_key" in entry and (not isinstance(entry["jump_key"], str)
                                     or (entry["jump_key"] and not ways.valid_jump_key(entry["jump_key"])))
            for entry in settings.get("peers", []) if isinstance(entry, dict)):
@@ -884,7 +894,7 @@ def set_peer_hardware_address(path: Path, peer: str, address: str) -> bool:
     with SETTINGS_LOCK:
         settings = load_settings(path)
         entry = next((item for item in settings["peers"] if item.get("id") == peer), None)
-        if entry is None or entry.get("hw") == address:
+        if entry is None or entry.get("port") == 0 or entry.get("hw") == address:
             return False
         entry["hw"] = address
         _write_json(path, settings)

@@ -31,6 +31,9 @@ class _ScriptedSocket:
         self.sent += 1
         return len(data)
 
+    def getsockname(self):
+        return "0.0.0.0", 24821
+
     def recvfrom(self, bufsize):
         self.calls += 1
         if self.script:

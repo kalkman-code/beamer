@@ -47,8 +47,8 @@ class Gate:
     list says by then: a key sent across and put on the list while still held would otherwise have
     its release kept here and stay down on the far side, and one kept here and taken off the list
     would stay down here. `keeps` runs on the one thread that reads input on each platform; `reset`
-    is for when input comes home, since the far side lets go of everything it was holding then, and
-    is called from other threads, hence the lock."""
+    forgets remote presses when input comes home, while locally kept presses remain until their
+    physical releases arrive. It is called from other threads, hence the lock."""
 
     def __init__(self, entries=()):
         self.entries = frozenset(entries)
@@ -80,6 +80,3 @@ class Gate:
     def reset(self):
         with self._lock:
             self._sent.clear()
-            # A release that arrives once input is home is never asked about, so what was kept
-            # here is forgotten too.
-            self._kept.clear()

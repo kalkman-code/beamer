@@ -38,7 +38,7 @@ DEFAULT_CROSSING = {
     "haptic_feel": "medium",
     "haptic_steps": "quarters",
     "glow_style": "glow",
-    "glow_colour": "signal",
+    "glow_colour": "colourful",
     "block_while_dragging": True,
     # A full-screen app in front holds this Mac's edges. This Mac's own choice, never shared.
     "hold_full_screen": False,

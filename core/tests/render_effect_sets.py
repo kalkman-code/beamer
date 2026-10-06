@@ -75,11 +75,11 @@ def catalogue():
         yield name.lower(), ids, (packs[0], pack_name, palette)
 
 
-def preview(fx, t, palette, dark, method="edge"):
+def preview(fx, t, palette, dark, method="edge", scale=0.6):
     scene = (effects.preview_switch_scene(fx, max(0, t - 1.85), palette, dark=dark) if method == "switch"
              else effects.preview_scene(fx, t, method, palette, dark=dark))
     width, height = effects.preview_size(method)
-    bitmap = Bitmap(round(width * 0.6), round(height * 0.6), 0.6)
+    bitmap = Bitmap(round(width * scale), round(height * scale), scale)
     bitmap.clear(dark)
     if method != "switch":
         # Display boundaries belong to the judging scene, never to the effect itself.

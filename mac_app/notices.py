@@ -2,6 +2,8 @@
 
 import secrets
 
+from core.locale import americanise
+
 
 def user_notifications():
     """Load the framework only when a notification is requested."""
@@ -69,6 +71,7 @@ class Notices:
             framework = self._module()
             centre = framework.UNUserNotificationCenter.currentNotificationCenter()
             content = framework.UNMutableNotificationContent.alloc().init()
+            title, body = americanise(title), americanise(body)
             content.setTitle_(title)
             content.setBody_(body)
             content.setSound_(framework.UNNotificationSound.defaultSound())

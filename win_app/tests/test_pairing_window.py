@@ -403,10 +403,58 @@ class PairingSheetWindowTest(unittest.TestCase):
         self.assertTrue(self.window.sheet.code_showing)
         self.assertTrue(self.window.sheet.count_label.text().startswith("Expires in "))
 
+    def test_pairing_dialog_hides_the_qr_and_caption(self):
+        from PySide6.QtGui import QImage
+
+        self.window.sheet.show_code("482913", 60, "This PC's address: 192.0.2.20 · port 24821",
+                                    [[True, False], [False, True]], "")
+        self.app.processEvents()
+        self.assertTrue(self.window.sheet.qr.isHidden())
+        self.assertTrue(self.window.sheet.qr_caption.isHidden())
+        self.window.sheet.setAttribute(Qt.WidgetAttribute.WA_DontShowOnScreen, True)
+        self.window.sheet.resize(700, 720)
+        self.window.sheet.show()
+        self.app.processEvents()
+        image = QImage(self.window.sheet.size(), QImage.Format.Format_ARGB32_Premultiplied)
+        image.fill(Qt.GlobalColor.transparent)
+        self.window.sheet.render(image)
+        destination = Path(os.environ.get("BEAMER_PAIRUI_RENDERS", "renders")) / "qt-pairing-dialog.png"
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        self.assertTrue(image.save(str(destination)), f"could not save {destination} ({image.width()}x{image.height()})")
+
     def test_pairing_code_text_is_centred_in_its_stretched_label(self):
         self.show_code()
         alignment = self.window.sheet.code_label.alignment()
         self.assertTrue(alignment & Qt.AlignmentFlag.AlignHCenter)
+
+    def test_entered_code_ink_is_centred_in_the_code_box(self):
+        from PySide6.QtGui import QImage
+
+        code = self.window.sheet.code
+        code.setFixedSize(240, 48)
+        code.setText("408819")
+        self.app.processEvents()
+        image = QImage(code.size(), QImage.Format.Format_ARGB32_Premultiplied)
+        image.fill(Qt.GlobalColor.transparent)
+        code.render(image)
+        contents = code.contentsRect().adjusted(4, 4, -4, -4)
+        background = image.pixelColor(contents.left(), contents.top())
+        ink = []
+        for y in range(contents.top(), contents.bottom() + 1):
+            for x in range(contents.left(), contents.right() + 1):
+                colour = image.pixelColor(x, y)
+                if (abs(colour.red() - background.red()) + abs(colour.green() - background.green())
+                        + abs(colour.blue() - background.blue())) > 24:
+                    ink.append((x, y))
+        self.assertTrue(ink, "no code digits were rendered")
+        left, right = min(x for x, _ in ink), max(x for x, _ in ink)
+        top, bottom = min(y for _, y in ink), max(y for _, y in ink)
+        ink_centre = ((left + right + 1) / 2, (top + bottom + 1) / 2)
+        box_centre = (code.width() / 2, code.height() / 2)
+        self.assertLessEqual(abs(ink_centre[0] - box_centre[0]), 1,
+                             f"code digits are off-centre horizontally: {ink_centre} vs {box_centre}")
+        self.assertLessEqual(abs(ink_centre[1] - box_centre[1]), 1,
+                             f"code digits are off-centre vertically: {ink_centre} vs {box_centre}")
 
     def test_cancelling_the_code_puts_the_button_back_and_says_nothing(self):
         self.show_code()
@@ -514,6 +562,12 @@ class PairingSheetWindowTest(unittest.TestCase):
                          peerlist.pairing_error_text(pairing.PairingError(pairing.ERROR_REFUSED), "Studio"))
 
     def test_the_code_shows_a_qr_unless_addresses_are_hidden(self):
+        from unittest import mock
+        from core import feature_flags
+        with mock.patch.object(feature_flags, "PAIRING_QR_VISIBLE", True):
+            self._qr_unless_addresses_hidden()
+
+    def _qr_unless_addresses_hidden(self):
         self.window._code_address = "192.0.2.5"
         self.window._pairing_address = lambda: "192.0.2.5"
         self.show_code()

@@ -22,14 +22,6 @@ def quiet_logger():
     return logger
 
 
-def free_udp_port():
-    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    sock.bind(("127.0.0.1", 0))
-    port = sock.getsockname()[1]
-    sock.close()
-    return port
-
-
 def wait_until(predicate, timeout=5.0):
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
@@ -44,22 +36,27 @@ class LoopbackTests(unittest.TestCase):
     replaced so nothing leaves this machine."""
 
     def setUp(self):
-        self.pc_port = free_udp_port()
-        self.mac_port = free_udp_port()
+        self.pc_port = 0
+        self.mac_port = 0
         self.paired = []
         self.announcer = Announcer(
             lambda: 51820,
             lambda token, name, address: self.paired.append((token, name, address)),
             logger=quiet_logger(),
-            bind_port=self.pc_port,
-            announce_to=("127.0.0.1", self.mac_port),
+            bind_port=0,
+            announce_to=("127.0.0.1", 0),
             name="TEST-PC",
         )
-        self.discovery = Discovery(logger=quiet_logger(), bind_port=self.mac_port)
+        self.discovery = Discovery(logger=quiet_logger(), bind_port=0)
         self.discovery.start()
         self.announcer.start()
         self.addCleanup(self.announcer.stop)
         self.addCleanup(self.discovery.stop)
+        self.assertTrue(wait_until(lambda: self.announcer.listening_port is not None))
+        self.assertTrue(wait_until(lambda: self.discovery.listening_port is not None))
+        self.pc_port = self.announcer.listening_port
+        self.mac_port = self.discovery.listening_port
+        self.announcer.announce_to = ("127.0.0.1", self.mac_port)
 
     def test_discovers_pairs_and_stores_one_token_each_side(self):
         self.assertTrue(wait_until(lambda: self.discovery.pcs()))
@@ -169,10 +166,10 @@ class ImpostorTests(unittest.TestCase):
         self.impostor.bind(("127.0.0.1", 0))
         self.impostor.settimeout(5.0)
         self.addCleanup(self.impostor.close)
-        self.discovery = Discovery(logger=quiet_logger(), bind_port=free_udp_port())
+        self.discovery = Discovery(logger=quiet_logger(), bind_port=0)
         self.discovery.start()
         self.addCleanup(self.discovery.stop)
-        self.assertTrue(wait_until(lambda: self.discovery._sock is not None))
+        self.assertTrue(wait_until(lambda: self.discovery.listening_port is not None))
         self.real = PairingHost(name="REAL-PC")
         self.code = self.real.begin()
         self.pc = {
@@ -262,22 +259,24 @@ class FindTests(unittest.TestCase):
     """A PC whose beacons never reach the Mac, found by its address instead."""
 
     def setUp(self):
-        self.pc_port = free_udp_port()
-        self.mac_port = free_udp_port()
         self.paired = []
         self.announcer = Announcer(
             lambda: 51820,
             lambda token, name, address: self.paired.append((token, name, address)),
             logger=quiet_logger(),
-            bind_port=self.pc_port,
-            announce_to=("127.0.0.1", free_udp_port()),
+            bind_port=0,
+            announce_to=("127.0.0.1", 0),
             name="FAR-PC",
         )
-        self.discovery = Discovery(logger=quiet_logger(), bind_port=self.mac_port)
+        self.discovery = Discovery(logger=quiet_logger(), bind_port=0)
         self.discovery.start()
         self.announcer.start()
         self.addCleanup(self.announcer.stop)
         self.addCleanup(self.discovery.stop)
+        self.assertTrue(wait_until(lambda: self.announcer.listening_port is not None))
+        self.assertTrue(wait_until(lambda: self.discovery.listening_port is not None))
+        self.pc_port = self.announcer.listening_port
+        self.mac_port = self.discovery.listening_port
 
     def test_a_pc_no_beacon_reaches_is_found_by_address_and_pairs(self):
         self.assertFalse(wait_until(lambda: self.discovery.pcs(), timeout=0.6))
@@ -298,7 +297,7 @@ class FindTests(unittest.TestCase):
 
     def test_a_name_that_never_resolves_does_not_hold_up_beacons(self):
         # The beacon below is sent once, so the loop must have its socket before it goes.
-        self.assertTrue(wait_until(lambda: self.discovery._sock is not None))
+        self.assertTrue(wait_until(lambda: self.discovery.listening_port is not None))
         resolving = threading.Event()
         real = socket.getaddrinfo
 

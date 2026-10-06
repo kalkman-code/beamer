@@ -1,13 +1,11 @@
-"""kvm_bridge_win.py:2351 (`_on_hook_key`) cannot be imported here (it
-needs PySide6, Windows-only), so this drives its exact dispatch by hand
-against the two pure-Python pieces it calls: `capture_win.Trigger.feed` and
-`sender.LinkSender.on_key`. The dispatch replicated below is copied verbatim
-from `_on_hook_key`'s body."""
+"""Run the app's actual hook decision with a real Trigger and LinkSender, without a window."""
 
 import time
 import unittest
 import os
 import sys
+from typing import Optional
+from types import SimpleNamespace
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
@@ -15,22 +13,13 @@ import capture_win
 from core import protocol
 from capture_win import Trigger
 from links_rig import B, Rig, make_config
+from core.tests.app_methods import load_methods
+
+Application = load_methods("win_app/kvm_bridge_win.py", "WindowsApplication", ["_on_hook_key"], globals())
 
 
 def dispatch(trigger, link_sender, name, down, vk=None, us=None):
-    """`WindowsApplication._on_hook_key`, verbatim."""
-    action = trigger.feed(name, down, time.monotonic())
-    if action is not None:
-        if not link_sender.shortcut_armed:
-            return True
-        if action == capture_win.TOGGLE:
-            link_sender.toggle()
-        else:
-            link_sender.set_redirecting(action == capture_win.REDIRECT)
-        return True
-    if trigger.claims(name, down, link_sender.redirecting):
-        return True
-    return link_sender.on_key(name, down, vk, us)
+    return Application._on_hook_key(SimpleNamespace(_trigger=trigger, sender=link_sender), name, down, vk, us)
 
 
 class HeldTriggerRepeatTests(unittest.TestCase):
@@ -96,11 +85,26 @@ class HeldTriggerRepeatTests(unittest.TestCase):
         # key-up -- the peer is left with a phantom held key.
         self.assertEqual(self.keys(protocol.MSG_KEYUP), [])
 
-    def test_with_the_shortcut_off_the_trigger_is_swallowed_and_moves_nothing(self):
-        self.link_sender.update_config(make_config(crossing_methods=["edge"]))
-        self.assertTrue(dispatch(self.trigger, self.link_sender, "alt_r", True))
-        self.assertFalse(self.link_sender.redirecting)
-        self.assertEqual(self.rig.sent(B, "focus"), [])
+    def test_shortcut_off_passes_the_key_without_switching_in_each_input_state(self):
+        for style in ("double_tap", "hold"):
+            for state in ("local", "receiving", "redirected"):
+                with self.subTest(style=style, state=state):
+                    rig = Rig(crossing_methods=["edge"])
+                    trigger = Trigger("alt_r", style, 300)
+                    if state == "redirected":
+                        rig.sender.set_redirecting(True)
+                    rig.driven = state == "receiving"
+                    rig.flush()
+                    rig.links.sent.clear()
+                    for down in (True, False) * 2:
+                        self.assertEqual(dispatch(trigger, rig.sender, "alt_r", down), state == "redirected")
+                    self.assertEqual(rig.sender.redirecting, state == "redirected")
+                    self.assertEqual(rig.sent_home, [])
+                    self.assertEqual(rig.sent(B, "focus"), [])
+                    keys = [message for message in rig.sent(B) if message["type"] in (protocol.MSG_KEYDOWN, protocol.MSG_KEYUP)]
+                    expected = [{"type": kind, "data": {"key": "alt_r"}}
+                                for kind in (protocol.MSG_KEYDOWN, protocol.MSG_KEYUP) * 2]
+                    self.assertEqual(keys, expected if state == "redirected" else [])
 
 
 if __name__ == "__main__":

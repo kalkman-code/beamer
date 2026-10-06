@@ -19,3 +19,10 @@ mac_app/dist/
 
 # Rendered documents, never committed
 docs/pdf/
+
+# Linux bundles, OSTree build repositories and flatpak-builder's cache.
+/dist/
+/.flatpak-builder/
+
+# Offscreen audit fixtures, measurements and renders.
+/renders/

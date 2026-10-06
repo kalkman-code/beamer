@@ -28,17 +28,21 @@ import re
 import time
 
 from . import effects
-from .protocol import MACHINE_ID_SIZE
+from .protocol import MACHINE_ID_SIZE, MAX_PEERS
 
 TRIGGER_STYLES = ("double_tap", "hold")
 GLOW_STYLES = ("glow", "beam") + effects.EFFECT_IDS
-GLOW_COLOURS = ("signal", "colourful", "ocean", "sunset", "mono") + effects.PACK_IDS
+GLOW_COLOURS = ("signal", "colourful", "ocean", "sunset", "mono", "aurora") + effects.PACK_IDS
 LENGTHS = tuple(value for value, _name in effects.LENGTHS)
 # Keys a trigger cannot be, beside characters and media keys, which the receiver's own table rejects.
 NOT_TRIGGERS = ("browser_back", "browser_forward", "backspace", "tab", "enter", "esc", "space", "print_screen")
 
 CROSSING_KEYS = ("resistance_px", "block_while_dragging", "shortcut", "trigger_key", "trigger_style", "double_tap_ms")
 DESIGN_KEYS = ("glow_style", "glow_colour", "effect_length", "effect_size", "shortcut_arrival", "shortcut_arrival_style")
+DESIGN_UNAVAILABLE = "Design not available yet: connect to this machine with Beamer 1.5.0 beta.6 or later."
+NEEDS_DESIGN_SYNC = "Needs beta.6 or later"
+OLD_PEER_NOTE = "A connected machine is unavailable until it has beta.6 or later."
+NO_MACHINE_CONNECTED = "No paired machine is connected."
 
 MAX_STAMP = 2 ** 53 - 2
 DAY = 24 * 60 * 60
@@ -118,7 +122,15 @@ def read_design_state(data, trigger_keys, now=None):
                 if key in values and _valid(key, values[key], trigger_keys)}
     if "effect_size" not in values:
         accepted["effect_size"] = "medium"
-    return {"set_at": set_at, "by": by, "values": accepted}
+    result = {"set_at": set_at, "by": by, "values": accepted}
+    if "path" in state:
+        path = state["path"]
+        if (not isinstance(path, list) or not 1 <= len(path) <= MAX_PEERS + 1
+                or any(not item or _id(item) is None for item in path)
+                or len({_id(item) for item in path}) != len(path)):
+            return None
+        result["path"] = list(path)
+    return result
 
 
 def design_arrived(state, set_at_here, by_here=""):
@@ -134,20 +146,75 @@ def design_arrived(state, set_at_here, by_here=""):
                                     (set_at == int(set_at_here or 0) and by > held_by))
 
 
-def followed_design(current, state, source, follower, same_on, set_at_here, by_here):
-    """A newer direct state to apply locally, or None. Its stamp remains the leader's so every
-    follower in a chain carries the same newest state; identical values need no announcement."""
-    if (state is None or source != follower or same_on
-            or not design_arrived(state, set_at_here, by_here)):
+def followed_design(current, state, source, follower, same_on, set_at_here, by_here,
+                    own_id="", force=False):
+    """Adopt a selected leader, then compare versions against that leader's last adopted state.
+    The returned stamp is the adoption cursor, never this machine's advertisement version."""
+    if state is None or source != follower or same_on:
+        return None
+    path = list(state.get("path", []))
+    if not path:
+        path = list({_id(item): item for item in (state.get("by"), source) if item}.values())
+    if own_id and any(_id(item) == _id(own_id) for item in path):
+        return {"cycle": True}
+    if not force and not design_arrived(state, set_at_here, by_here):
         return None
     values = dict(current)
     for key in DESIGN_KEYS:
         if key in state["values"]:
             values[key] = state["values"][key]
     changed = any(current.get(key) != values.get(key) for key in DESIGN_KEYS)
-    if not changed:
-        return {"changed": False, "values": values, "set_at": state["set_at"], "by": state["by"]}
-    return {"changed": True, "values": values, "set_at": state["set_at"], "by": state["by"]}
+    result = {"changed": changed, "values": values, "set_at": state["set_at"], "by": state["by"]}
+    if own_id:
+        result["path"] = path + [own_id]
+    return result
+
+
+def follow_rows(desktops, caps, states, following=""):
+    """Match design with's machines, as [(entry, why_not)]: the paired desktops linked now, and the
+    one followed even while it is away so the selection still shows. `caps` is {id: capabilities}
+    for the live links only, `states` the Design states received. `why_not` is None for a machine
+    that can be chosen, NEEDS_DESIGN_SYNC for one whose link lacks `design_sync`, else
+    DESIGN_UNAVAILABLE until its state arrives. No version string is read: capability decides."""
+    rows = []
+    for entry in desktops:
+        peer = entry.get("id", "")
+        if not peer or (peer not in caps and peer != following):
+            continue
+        known = caps.get(peer)
+        if known is not None and "design_sync" not in known:
+            rows.append((entry, NEEDS_DESIGN_SYNC))
+        else:
+            rows.append((entry, None if peer in states else DESIGN_UNAVAILABLE))
+    return rows
+
+
+def follow_note(rows):
+    """The one line under Match design with when nothing is followed and no machine can be chosen,
+    or None when one can. Offline machines are not listed, so they never set it."""
+    reasons = [why_not for _entry, why_not in rows]
+    if not reasons:
+        return NO_MACHINE_CONNECTED
+    if None in reasons:
+        return None
+    return OLD_PEER_NOTE if NEEDS_DESIGN_SYNC in reasons else DESIGN_UNAVAILABLE
+
+
+STOP_FOLLOWING = "Stop following"
+
+
+def follow_lock(following, same_on, desktops):
+    """The paired desktop whose Design this machine follows, while the followed Design controls
+    (DESIGN_KEYS: style, landing animation, colour, length, size) are locked; None while they are
+    this machine's to change. Same on all machines pauses following, so it unlocks them. The lock
+    holds while the followed machine is away: its last design stays until Stop following."""
+    if not following or same_on:
+        return None
+    return next((entry for entry in desktops if entry.get("id") == following), None)
+
+
+def following_banner(name):
+    return f"Following {name}'s design"
 
 
 def design_change_stamp(current, incoming, set_at_here, source_state, own_id, now=None):
@@ -313,11 +380,16 @@ def who(labels):
     return labels[0] if len(labels) == 1 else "every paired machine"
 
 
-def scope(page, who, on, own):
+def scope(page, who, on, own, platform=""):
     """The line under a page's purpose: `own` (the page's usual "for this machine only") unless
     the page is kept in step and the switch is on. `who` is from `who()`."""
     if on and page in SHARED_PAGES:
-        return f"Kept the same as {who}. Change it on any machine."
+        if page == "crossing":
+            return "Resistance, drag protection and Shortcut stay in step. Ways and jump keys below are local; each side is shared with its paired machine."
+        text = "Style, colour, length, size and landing animation stay in step. Animation enable and window appearance stay local."
+        if platform == "mac":
+            text += " Notch and trackpad controls stay local."
+        return text
     return own
 
 
@@ -325,7 +397,14 @@ def switch_note(who, on, peer_too_old):
     """The note under Overview's Same on all machines switch; `who` names the machines it keeps in step with."""
     if peer_too_old:
         return f"{who}'s Beamer is too old to keep settings in step. Update it to turn this on."
-    if on:
-        return f"The Crossing and Design pages match {who}'s. A change on any machine reaches the rest."
-    return (f"Off: the Crossing and Design pages are this machine's own. On, they match {who}'s, "
-            "and a change on any machine reaches the rest.")
+    if not on:
+        return "Off: each machine keeps its current values; previous separate values are not restored."
+    with_machines = "compatible paired machines" if who == "every paired machine" else f"compatible versions of {who}"
+    return "Shares resistance, drag protection, Shortcut and six animation settings with " + with_machines + "."
+
+
+def switch_detail(platform=""):
+    text = "Connected machines with compatible Beamer versions update now; others catch up when they reconnect. Zones, sides, jump keys, full-screen hold, animation enable and appearance stay on each machine."
+    if platform == "mac":
+        text += " Notch and trackpad controls stay on this Mac."
+    return text

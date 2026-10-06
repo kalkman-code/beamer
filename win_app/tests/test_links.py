@@ -55,6 +55,26 @@ class EdgeTests(unittest.TestCase):
         self.assertEqual(focus["resistance_px"], 40)
         self.assertEqual(focus["reach"], [])
 
+    def test_a_failed_cursor_read_skips_that_event_without_disabling_crossing(self):
+        rig = Rig()
+        reads = iter([PermissionError("access denied"), PermissionError("access denied")] + [(0, 500)] * 4)
+
+        def cursor_position():
+            result = next(reads)
+            if isinstance(result, Exception):
+                raise result
+            return result
+
+        rig.desktop.cursor_position = cursor_position
+        with self.assertLogs("sender", level="WARNING") as logs:
+            rig.push(1)
+            rig.push(1)
+            self.assertTrue(rig.sender.zone_models())
+            rig.push(4)
+
+        self.assertEqual(len(logs.records), 1)
+        self.assertTrue(rig.sender.redirecting)
+
     def test_the_push_lights_the_edge_it_is_pressing(self):
         self.rig.push(4)
         self.assertTrue(self.rig.pressure)
@@ -202,6 +222,17 @@ class TakingTests(unittest.TestCase):
         restored = self.sender._key_message(B, {"type": protocol.MSG_KEYDOWN, "data": dict(physical)})
 
         self.assertEqual((released["data"]["key"], restored["data"]["key"]), (original, original))
+
+    def test_a_dropped_peer_forgets_held_key_names_before_reconnect(self):
+        self.sender.set_redirecting(True)
+        self.rig.accept_take()
+        self.sender.on_key("ctrl", True, 0xA2)
+        self.rig.flush()
+        physical = self.sender._keys_down[0xA2]
+        self.sender._forget_held(B)
+        self.sender.update_config(make_config(modifier_style="positional"))
+        pressed_again = self.sender._key_message(B, {"type": protocol.MSG_KEYDOWN, "data": dict(physical)})
+        self.assertEqual(pressed_again["data"]["key"], "cmd")
 
     def test_an_image_too_large_to_decode_is_not_sent_but_the_text_is(self):
         for image, sent in ((pngs.png(), True), (pngs.png(16384, 16384), False)):

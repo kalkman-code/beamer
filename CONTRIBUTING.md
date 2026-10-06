@@ -5,16 +5,17 @@ reply is not guaranteed.
 
 ## Bug reports
 
-Use the bug report form, and attach both machines' logs where you can:
+Use the bug report form, and attach the logs from both machines where you can:
 `~/Library/Logs/Beamer/Beamer.log` on the Mac and `%LOCALAPPDATA%\Beamer\Beamer.log` on Windows.
-They hold your machines' names and local network addresses, so look them over first.
+They hold your machines' names and local network addresses, so look them over first. On Linux, use
+Open log folder from Beamer's menu.
 
 ## Feature requests
 
 Use the feature request form, or add a reaction to an existing request rather than a "+1"
-comment. There is no roadmap and no promise that anything gets built. Linux, Intel Macs, two Macs
-or two PCs, and three machines at once are being built for 1.5.0; test builds appear on the
-releases page as pre-releases.
+comment. There is no roadmap and no promise that anything gets built. Beamer 1.5.0 supports Intel
+Macs, experimental Linux on GNOME Wayland or X11, Mac-to-Mac and Windows-to-Windows pairs, and three machines
+at once. Test builds appear on the releases page as pre-releases.
 
 ## Pull requests
 
@@ -25,4 +26,5 @@ we agree the approach before you write code.
 
 ## Building it
 
-The README's "Building from source" and "Development checks" sections cover both platforms.
+The README's "Building from source" and "Development checks" sections cover macOS and Windows.
+For the Linux Flatpak build, see `docs/flatpak-build.md`.

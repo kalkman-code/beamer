@@ -92,22 +92,23 @@ class DesignChoicesTest(unittest.TestCase):
         self.assertEqual(tuple(values), effects.EFFECT_IDS)
         self.assertEqual(groups[1][1][0][:2], ("skin", "Skin"))
 
-    def test_colours_are_today_then_each_direction_three_packs(self):
+    def test_colours_offer_five_per_group_including_mono(self):
         import crossing
         from core import effects
 
         groups = pages.colour_groups(crossing.GLOW_COLOURS)
-        self.assertEqual(groups[0], ("Light", [(name, name.capitalize()) for name in crossing.GLOW_COLOURS]))
-        self.assertEqual([group for group, _ in groups[1:]], ["Membrane", "Sparks", "Instrument", "Folio", "Selvedge"])
-        self.assertEqual(tuple(value for _group, choices in groups[1:] for value, _title in choices), effects.PACK_IDS)
-        self.assertIn(("sodium", "Sodium"), groups[3][1])
+        self.assertEqual([group for group, _ in groups], ['Light', 'Mono', 'Membrane', 'Sparks', 'Instrument', 'Folio', 'Selvedge', 'Bright'])
+        self.assertEqual(groups[1][1], [(value, name) for value, (name, _stops) in effects.MONO_PACKS.items()])
+        self.assertTrue(all(len(choices) == 5 for group, choices in groups))
+        self.assertCountEqual([value for _group, choices in groups[1:] for value, _title in choices], effects.PACK_IDS)
+        self.assertIn(("sodium", "Sodium"), groups[4][1])
 
     def test_without_the_effects_only_today_is_offered(self):
         import crossing
 
         self.assertIsNone(pages.effects_load_error())
         self.assertEqual([group for group, _ in pages.style_groups(False)], ["Light"])
-        self.assertEqual([group for group, _ in pages.colour_groups(crossing.GLOW_COLOURS, False)], ["Light"])
+        self.assertEqual([group for group, _ in pages.colour_groups(crossing.GLOW_COLOURS, False)], ["Light", "Mono"])
         from unittest import mock
         from core import effects
 
@@ -189,7 +190,7 @@ class CrossingPageRulesTests(unittest.TestCase):
         self.assertTrue(line(True, False, False, True, False, None).startswith("No machine is driven"))
         self.assertTrue(line(True, True, False, True, False, None).startswith("Not connected to any machine"))
         self.assertEqual(line(True, True, True, False, False, None), "Only the shortcut is switched on; there is nothing to pause.")
-        self.assertTrue(line(True, True, True, True, True, None).startswith("Paused."))
+        self.assertTrue(line(True, True, True, True, True, None).startswith("Pauses pointer crossing"))
         self.assertEqual(line(True, True, True, True, False, "Keynote"), "Held: an app is full screen.")
         self.assertEqual(line(True, True, True, True, False, None), "On. Pause it to lean on an edge without switching.")
 

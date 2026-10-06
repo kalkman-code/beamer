@@ -180,14 +180,14 @@ def zone_models(zones, peers, allowed, resistance_px: int, notch_span=None) -> l
     sides = {}
     for peer in peers or ():
         ident = protocol.read_id(peer.get("id")) if isinstance(peer, dict) else None
-        if ident is not None and peer.get("in_use", True) is True:
+        if ident is not None and peer.get("in_use", True) is True and peer.get("port") != 0:
             sides[ident] = peer.get("side")
     found = {"corner": [], "edge": [], "part": [], "notch": []}
     for zone in zones or ():
         if not isinstance(zone, dict) or zone.get("off") is True:
             continue
         peer = protocol.read_id(zone.get("peer"))
-        if peer is None or peer not in allowed:
+        if peer is None or peer not in allowed or peer not in sides:
             continue
         kind, side = zone.get("kind"), sides.get(peer)
         try:
@@ -205,21 +205,6 @@ def zone_models(zones, peers, allowed, resistance_px: int, notch_span=None) -> l
             continue
         found[kind].append((peer, model))
     return found["corner"] + found["edge"] + found["part"] + found["notch"]
-
-
-def zone_stretch(zone: dict, sides: dict) -> set:
-    """The stretch of screen a zone covers, for section 8's rule that two zones in use never cover
-    the same one: an `edge` zone its peer's side, a `part` zone the chosen thirds of it, a `corner`
-    zone its corner; a notch, and a zone whose peer has no side, cover none. `sides` maps a zone's
-    `peer` text to that peer's `side`."""
-    kind, side = zone.get("kind"), sides.get(zone.get("peer"), "")
-    if kind == "corner" and zone.get("corner") in crossing.CORNERS:
-        return {("corner", zone["corner"])}
-    if kind == "edge" and side in crossing.EDGES:
-        return {(side, part) for part in crossing.PARTS}
-    if kind == "part" and side in crossing.EDGES and isinstance(zone.get("parts"), list):
-        return {(side, part) for part in zone["parts"] if part in crossing.PARTS}
-    return set()
 
 
 @functools.lru_cache(maxsize=128)

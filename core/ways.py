@@ -29,6 +29,29 @@ _JUMP_KEYS = {"backspace", "caps_lock", "delete", "down", "end", "enter", "esc",
               "volume_down", "volume_up", "media_next", "media_prev", "media_stop", "media_play_pause"}
 
 
+def part_names(edge: str) -> dict:
+    """The labels for thirds along an edge, in the direction they run."""
+    if edge in ("left", "right"):
+        return {"start": "Top", "middle": "Middle", "end": "Bottom"}
+    return {"start": "Left", "middle": "Middle", "end": "Right"}
+
+
+def parts_phrase(edge: str, parts) -> str:
+    """The selected thirds in a sentence, defaulting to the middle when none are known."""
+    names = part_names(edge)
+    chosen = [names[part].lower() for part in PARTS if part in parts] or ["middle"]
+    joined = chosen[0] if len(chosen) == 1 else ", ".join(chosen[:-1]) + " and " + chosen[-1]
+    return f"the {joined} of the {edge} edge"
+
+
+def toggle_part(parts, part, on) -> list:
+    """The selected thirds after a change, keeping one selected so Part of the edge can cross."""
+    chosen = set(parts) | {part} if on else set(parts) - {part}
+    if not chosen:
+        chosen = set(parts)
+    return [name for name in PARTS if name in chosen]
+
+
 def valid_jump_key(value) -> bool:
     """Whether a recorded jump key is one modifier chord with a single non-modifier key."""
     if not isinstance(value, str) or not value or value != value.lower():
@@ -62,7 +85,7 @@ def jump_chord(modifiers, key) -> Optional[str]:
 
 def jump_key(peer: dict) -> Optional[str]:
     """The peer's optional local jump chord, or None when absent or empty."""
-    value = peer.get("jump_key")
+    value = peer.get("jump_key") if peer.get("port") != 0 else None
     return value if isinstance(value, str) and value else None
 
 
@@ -70,23 +93,50 @@ def check_jump_key(settings: dict, peer: str, value, trigger_key: str) -> Option
     """Validate and clash-check a peer's jump chord before it is stored; empty clears it."""
     if value in (None, ""):
         return None
+    entry = _entry(settings, peer)
+    if entry is not None and entry.get("port") == 0:
+        raise ValueError("a phone cannot be a jump target")
     if not isinstance(value, str):
         raise ValueError("choose a modifier and one non-modifier key")
     if not valid_jump_key(value):
         raise ValueError("choose a modifier and one non-modifier key")
-    parts = value.split("+")
-    if parts[-1] == trigger_key or (isinstance(trigger_key, str) and trigger_key.removesuffix("_r") in parts):
+    if _trigger_in_chord(trigger_key, value):
         raise ValueError("that key is the trigger shortcut's: pick a chord without it")
     for entry in settings.get("peers", []):
-        if entry.get("id") != peer and entry.get("jump_key") == value:
+        if entry.get("id") != peer and jump_key(entry) == value:
             raise ValueError("that key is already assigned to another machine")
     return value
+
+
+def _trigger_in_chord(trigger_key, chord):
+    parts = chord.split("+")
+    return (parts[-1] == trigger_key
+            or isinstance(trigger_key, str) and trigger_key.removesuffix("_r") in parts)
+
+
+def check_trigger_key(settings, trigger_key):
+    """Apply the same overlap rule whichever side of a shortcut/jump clash is edited."""
+    for peer in settings.get("peers", []):
+        chord = jump_key(peer)
+        if chord and _trigger_in_chord(trigger_key, chord):
+            raise ValueError(f"That shortcut clashes with the jump key {chord}; the jump key has been kept.")
+
+
+def shared_trigger_values(settings, values):
+    """Keep the local jump and trigger on a clash, while allowing the other shared values."""
+    if "trigger_key" not in values:
+        return values, None
+    try:
+        check_trigger_key(settings, values["trigger_key"])
+    except ValueError as exc:
+        return {key: value for key, value in values.items() if key != "trigger_key"}, str(exc)
+    return values, ""
 
 
 def jump_peer(peers: list, chord: str) -> Optional[str]:
     """The in-use machine assigned this jump chord, or None."""
     return next((entry.get("id") for entry in peers
-                 if entry.get("in_use", True) is True and entry.get("id") and entry.get("jump_key") == chord), None)
+                 if entry.get("in_use", True) is True and entry.get("id") and jump_key(entry) == chord), None)
 
 
 def _entry(settings: dict, peer: str) -> Optional[dict]:
@@ -128,6 +178,8 @@ def edit(settings: dict, peer: str, *, side: str, methods, parts, corner: str, k
     entry = _entry(settings, peer)
     if entry is None:
         raise KeyError(peer)
+    if entry.get("port") == 0:
+        raise ValueError("a phone cannot have a side or zones")
     side = side if side in EDGES else ""
     moved = bool(side) and side != entry.get("side")
     if moved:
@@ -206,7 +258,7 @@ def share(settings: dict, side: str, thirds: dict, *, kinds) -> list:
     those whose zones changed and those whose way back or way_back_by did (section 8)."""
     if side not in EDGES or not isinstance(thirds, dict) or set(thirds) != set(PARTS):
         raise ValueError("a split needs every third of a known side")
-    peers = {entry.get("id"): entry for entry in settings["peers"]}
+    peers = {entry.get("id"): entry for entry in peerlist.desktops(settings["peers"])}
     if any(not isinstance(peer, str) or peers.get(peer, {}).get("side") != side for peer in thirds.values()):
         raise ValueError("every third must belong to a machine on that side")
     if "part" not in kinds:
@@ -216,6 +268,8 @@ def share(settings: dict, side: str, thirds: dict, *, kinds) -> list:
     told = way_back_state(settings)
     changed = []
     for entry in settings["peers"]:
+        if entry.get("port") == 0:
+            continue
         peer = entry.get("id")
         mine = _mine(settings, peer)
         zones = [zone for zone in mine.values() if zone.get("off") is not True and
@@ -301,7 +355,7 @@ def arrangement(settings: dict, peer: str, edge: str, set_at: int, by: str, here
     notices), a sentence for each zone turned off; `here` is "this Mac" or "this PC"."""
     entry = _entry(settings, peer)
     by_bytes = _id_bytes(by)
-    if entry is None or edge not in EDGES or by_bytes is None:
+    if entry is None or entry.get("port") == 0 or edge not in EDGES or by_bytes is None:
         return False, []
     told = isinstance(way_back, bool) and entry.get("way_back") is not way_back
     if told:
@@ -338,11 +392,12 @@ def _zoned(entry: dict) -> bool:
 def default_side(settings: dict) -> bool:
     """The Mac's one paired machine with no side holds Right, the side its Crossing page shows, so
     its edge crosses from pairing rather than from the first save. Unstamped and with no author, so a
-    side either machine chooses wins over it. Only with one entry in all, as the page counts them: a
+    side either machine chooses wins over it. Only with one desktop, as the page counts them: a
     second, even the one migrated from 1.4.x, may hold Right already. True when it wrote the side."""
-    if len(settings["peers"]) != 1:
+    desktops = peerlist.desktops(settings["peers"])
+    if len(desktops) != 1:
         return False
-    entry = settings["peers"][0]
+    entry = desktops[0]
     if not _zoned(entry) or entry.get("side") in EDGES:
         return False
     entry.update(side="right", side_set_at=0, side_by="")

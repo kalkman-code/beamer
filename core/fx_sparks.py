@@ -478,6 +478,8 @@ EFFECTS = [
 ]
 
 PACKS = {
+    "arc": ("Arc", ["#69c8ff", "#269de8", "#b5e5ff", "#456ad0"]),
+    "magnesium": ("Magnesium", ["#c98bff", "#9255da", "#ead2ff", "#b064e8"]),
     "ember": ("Ember", ["#ffe4ad", "#ffb04a", "#ff6a24", "#d8321a", "#8e1a10"]),
     "forge": ("Forge", ["#fff4dc", "#ffc15e", "#ff7f2a", "#b8c4d2", "#5d7896"]),
     "sparkler_gold": ("Sparkler gold", ["#ffffff", "#fff1bf", "#ffd35c", "#f0a531"]),

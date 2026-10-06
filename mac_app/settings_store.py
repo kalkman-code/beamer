@@ -1,7 +1,7 @@
 """The Mac's settings.json (WIRE.md section 1) and the migration from 1.4.x's config.json.
 
 The app above this layer still speaks Config, so the file is read into the shape 1.4.x had, with
-peers[0] feeding host and auth_token; settings.json holds the rest (other peers, zones) for the steps
+the first desktop feeding host and auth_token; settings.json holds the rest (other peers, zones) for the steps
 that follow. config.json is only ever read, so a downgrade finds its settings as they were.
 """
 
@@ -212,11 +212,11 @@ def _crossing_from_zones(settings, peer):
 
 
 def raw_from_settings(settings):
-    """settings.json in config.json's shape, with peers[0] standing in for the one PC."""
+    """settings.json in config.json's shape, with the first desktop standing in for the one PC."""
     raw = {name: copy.deepcopy(value) for name, value in settings.items() if name not in SETTINGS_ONLY}
     crossing = dict(settings["crossing"])
-    if settings["peers"]:
-        peer = settings["peers"][0]
+    peer = peerlist.first_desktop(settings["peers"])
+    if peer is not None:
         raw.update(
             host=peer["host"], port=peer["port"], auth_token=peer["token"], pc_name=peer["name"],
             mac_address=peer["hw"], send_to_windows=peer["send"], allow_windows_to_drive=peer["allow_drive"],
@@ -248,7 +248,7 @@ def _rename_zones(zones, old, new):
 
 
 def _merge_config(base, cfg):
-    """`base` with the values of `cfg` written over it: the pairing fields into peers[0], the rest by name."""
+    """`base` with `cfg`'s pairing fields in the first desktop and the rest by name."""
     settings = copy.deepcopy(base)
     raw = config_to_raw(cfg)
     machine_id = settings["machine_id"]
@@ -259,15 +259,17 @@ def _merge_config(base, cfg):
     settings["shortcut"] = "shortcut" in cfg.crossing["methods"]
     crossing = {name: value for name, value in raw["crossing"].items()}
     peers, zones = settings["peers"], settings["zones"]
+    peer = peerlist.first_desktop(peers)
+    at = peers.index(peer) if peer is not None else None
     if not cfg.auth_token:
-        if peers:
-            gone = peers.pop(0)
+        if at is not None:
+            gone = peers.pop(at)
             settings["zones"] = [zone for zone in zones if zone.get("peer") != gone["id"]]
-    elif not peers or peers[0]["token"] != cfg.auth_token:
+    elif peer is None or peer["token"] != cfg.auth_token:
         entry = _entry_from_config(cfg, machine_id)
-        if peers:
-            zones = _rename_zones(zones, peers[0]["id"], "")
-            peers[0] = entry
+        if at is not None:
+            zones = _rename_zones(zones, peer["id"], "")
+            peers[at] = entry
         else:
             peers.append(entry)
         settings["zones"] = _apply_zones(zones, "", crossing)
@@ -278,11 +280,11 @@ def _merge_config(base, cfg):
         # Its name and hardware address are learnt on its link: written here only with a new address,
         # which clears what was learnt at the old one, or a save from a window read before one was
         # learnt would put the old one back.
-        if cfg.host != peers[0].get("host"):
-            peers[0].update(name=cfg.pc_name, hw=cfg.mac_address)
-        peers[0].update(host=cfg.host, port=cfg.port, send=cfg.send_to_windows, allow_drive=cfg.allow_windows_to_drive)
+        if cfg.host != peer.get("host"):
+            peer.update(name=cfg.pc_name, hw=cfg.mac_address)
+        peer.update(host=cfg.host, port=cfg.port, send=cfg.send_to_windows, allow_drive=cfg.allow_windows_to_drive)
     settings["crossing"] = {
-        name: value for name, value in crossing.items() if not (peers and name in MOVED_CROSSING)
+        name: value for name, value in crossing.items() if not (peerlist.first_desktop(peers) is not None and name in MOVED_CROSSING)
     }
     return settings
 
@@ -321,10 +323,6 @@ class SettingsStore:
     def add_peer(self, entry, replaced=None):
         """Stores a pairing (`PairingService`'s `store`): `entry` joins the peers, taking the place
         of `replaced` when there is one. Raises SettingsError, writing nothing, if it cannot be saved."""
-        if entry.get("port") == 0:
-            # A phone's entry. The flat settings read the first machine's port, so one of these
-            # in front would leave them unloadable; phones are the 1.6.0 milestone.
-            raise SettingsError("a phone cannot be paired with this Mac in this version")
         with self.lock:
             settings = copy.deepcopy(self.current())
             if replaced is not None:
@@ -406,7 +404,7 @@ class SettingsStore:
         with self.lock:
             settings = copy.deepcopy(self.current())
             entry = next((item for item in settings["peers"] if item["id"] == peer), None)
-            if entry is None or entry["hw"] == address:
+            if entry is None or entry.get("port") == 0 or entry["hw"] == address:
                 return False
             entry["hw"] = address
             self.save_settings(settings)
@@ -434,6 +432,11 @@ class SettingsStore:
             handed = self._handed_token
             base = self.load_settings()
             self._config(base)
+            if cfg.trigger_key != base.get("trigger_key"):
+                try:
+                    ways.check_trigger_key(base, cfg.trigger_key)
+                except ValueError as exc:
+                    raise SettingsError(str(exc)) from exc
             cfg = self._without_stale_pairing(cfg, base, handed)
             return self._config(self.save_settings(_merge_config(base, cfg)))
 
@@ -443,7 +446,8 @@ class SettingsStore:
         pairing stored from the pairing service's thread, a removal) would have its old machine
         written back over the new one, or the new one popped if there had been none. Its machine
         fields are the file's own then; everything else it changed is kept."""
-        first = base["peers"][0]["token"] if base["peers"] else ""
+        desktop = peerlist.first_desktop(base["peers"])
+        first = desktop["token"] if desktop is not None else ""
         if cfg.auth_token == first or cfg.auth_token != handed:
             return cfg
         current = raw_from_settings(base)
@@ -532,19 +536,22 @@ class SettingsStore:
         if not isinstance(settings["peers"], list):
             raise SettingsError("peers must be a list")
         settings["peers"] = [{**PEER_DEFAULTS, **peer} if isinstance(peer, dict) else peer for peer in settings["peers"]]
+        peerlist.normalise_phones(settings)
         if not isinstance(settings["crossing"], dict):
             raise SettingsError("crossing must be a JSON object")
         settings["crossing"] = {
             **{name: value for name, value in config_module.DEFAULT_CROSSING.items() if name not in MOVED_CROSSING},
             **settings["crossing"],
-        } if settings["peers"] else {**config_module.DEFAULT_CROSSING, **settings["crossing"]}
+        } if peerlist.first_desktop(settings["peers"]) is not None else {**config_module.DEFAULT_CROSSING, **settings["crossing"]}
         return settings
 
     @staticmethod
     def _ensure_zones(settings):
         """Give old pairs their edge and the one unplaced desktop its shown side on every read and save.
         Run after a learnt id has renamed migrated zones, or that machine would get a second edge."""
-        if isinstance(settings["zones"], list) and all(isinstance(item, dict) for item in settings["peers"] + settings["zones"]):
+        if (isinstance(settings["zones"], list)
+                and all(isinstance(item, dict) for item in settings["peers"] + settings["zones"])
+                and all(isinstance(item.get("id"), str) for item in settings["peers"])):
             ways.ensure_zones(settings)
             ways.default_side(settings)
 
@@ -669,7 +676,7 @@ class SettingsStore:
         settings = copy.deepcopy(settings)
         settings["migrated_token_sha256"] = _sha256(legacy.auth_token)
         peers = settings["peers"]
-        at = next((index for index, peer in enumerate(peers) if peer["from_1_4"]), None)
+        at = next((index for index, peer in enumerate(peers) if peer["from_1_4"] and peer.get("port") != 0), None)
         taken = {protocol.key_id(peer["token"]) for index, peer in enumerate(peers)
                  if index != at and protocol.is_paired_token(peer["token"])}
         token = legacy.auth_token
@@ -733,7 +740,7 @@ class SettingsStore:
             ("haptic_steps", HAPTIC_STEPS),
             # Today's styles and colours, then every crossing effect and colour pack.
             ("glow_style", GLOW_STYLES + effects.EFFECT_IDS),
-            ("glow_colour", GLOW_COLOURS + effects.PACK_IDS),
+            ("glow_colour", GLOW_COLOURS + ("aurora",) + effects.PACK_IDS),
             ("shortcut_arrival_style", effects.SWITCH_STYLES),
             ("effect_length", tuple(value for value, _name in effects.LENGTHS)),
             ("effect_size", tuple(value for value, _name in effects.SIZES)),

@@ -374,6 +374,7 @@ def plan_key_inputs(
 
 _mods_down: Set[str] = set()
 _char_vk_down: Dict[str, int] = {}
+_named_down: Dict[str, Tuple[int, int, int]] = {}
 # One lock over the held-key bookkeeping and the send it describes: a session
 # thread injecting while a reconnect's release_all snapshots and clears would
 # otherwise press a key that nothing then remembers to release.
@@ -392,7 +393,17 @@ def _locked(function):
 @_locked
 def inject_key(name: str, down: bool, us: Optional[str] = None) -> None:
     LOGGER.debug("key %s %s (mods held: %s)", name, "down" if down else "up", sorted(_mods_down))
-    plan = plan_key_inputs(name, down, _mods_down, _char_vk_down, _vk_key_scan, _map_virtual_key, us, _key_at)
+    lowered = name.lower()
+    held = _named_down.get(lowered) if lowered in VK_MAP and lowered not in MODIFIER_KEYS else None
+    if held is not None:
+        vk, scan, flags = held
+        plan = [(vk, scan, flags if down else flags | KEYEVENTF_KEYUP)]
+        if not down:
+            _named_down.pop(lowered, None)
+    else:
+        plan = plan_key_inputs(name, down, _mods_down, _char_vk_down, _vk_key_scan, _map_virtual_key, us, _key_at)
+        if down and plan and lowered in VK_MAP and lowered not in MODIFIER_KEYS:
+            _named_down[lowered] = plan[0]
     if not plan:
         return
     _send_input(*(_keybd_input(vk, scan, flags) for vk, scan, flags in plan))
@@ -558,6 +569,11 @@ def release_all() -> None:
     input_injector_mac.release_all: the receiver calls it when the peer's
     input goes home or its link dies, so a modifier held through a switch
     does not stay down on this PC."""
+    for name in sorted(_named_down):
+        try:
+            inject_key(name, down=False)
+        except Exception:
+            LOGGER.exception("Could not release %r", name)
     for name in sorted(_mods_down):
         try:
             inject_key(name, down=False)
@@ -575,6 +591,7 @@ def release_all() -> None:
             LOGGER.exception("Could not release the %s mouse button", button)
     _mods_down.clear()
     _char_vk_down.clear()
+    _named_down.clear()
     _buttons_down.clear()
 
 

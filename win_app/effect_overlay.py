@@ -15,8 +15,15 @@ from __future__ import annotations
 import ctypes
 import logging
 import math
+import os
 import sys
 import time
+
+# Qt splits antialiased fills into tiny span jobs and waits on each batch. On Windows the
+# worker wake-ups cost more than these narrow strokes; serial fills produce identical pixels.
+# Qt caches this process-wide switch on the first paint, before an overlay is ever created.
+if sys.platform == "win32":
+    os.environ["QT_NO_GUI_THREADPOOL"] = "1"
 
 from PySide6.QtCore import QPointF, QRect, QRectF, Qt, QTimer
 from PySide6.QtGui import (

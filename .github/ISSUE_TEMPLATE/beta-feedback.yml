@@ -1,0 +1,46 @@
+name: Beta feedback
+description: Tell us how the Beamer beta behaved for you, good or bad.
+labels: [beta]
+body:
+  - type: input
+    id: beamer-version
+    attributes:
+      label: Beamer version
+      description: Shown in About Beamer on each machine. Say if they differ.
+      placeholder: "1.5.0"
+    validations:
+      required: true
+  - type: textarea
+    id: machines
+    attributes:
+      label: Each machine's operating system and version
+      description: One line per machine you use with Beamer.
+      placeholder: |
+        MacBook: macOS 26.1
+        Desktop: Windows 11 24H2
+        Laptop: Fedora 44, GNOME on Wayland
+    validations:
+      required: true
+  - type: textarea
+    id: did
+    attributes:
+      label: What you did
+    validations:
+      required: true
+  - type: textarea
+    id: happened
+    attributes:
+      label: What happened
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs
+      description: |
+        If something went wrong, attach Beamer.log from each machine. Open log folder in Beamer's menu shows where it is.
+        The log holds your machines' names and local network addresses; remove them if you would rather not share them.

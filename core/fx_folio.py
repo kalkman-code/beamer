@@ -98,6 +98,8 @@ EFFECTS = [
 ]
 
 PACKS = {
+    "moss": ("Moss", ["#72965b", "#bfd0a0", "#465e3b"]),
+    "plum": ("Plum", ["#9b6b9e", "#d2b5ce", "#8b6095"]),
     "vellum": ("Vellum", ["#c69a60", "#f0ddac", "#88674c"]),
     "carbon_copy": ("Carbon copy", ["#6688ae", "#bbcad9", "#344d72"]),
     "marbled": ("Marbled", ["#bd6858", "#6c9691", "#e1bb78"]),

@@ -540,6 +540,8 @@ EFFECTS = [
 ]
 
 PACKS = {
+    "opal": ("Opal", ["#527cda", "#ac8cd2", "#d985b0", "#7eade0"]),
+    "sea_glass": ("Sea glass", ["#48b8a0", "#8bd6b5", "#388f91", "#b4dfb0"]),
     "oil_slick": ("Oil slick", ["#8a4dff", "#2f7dff", "#16c6b0", "#9fdc4a", "#f0c23c", "#e8477f"]),
     "soap_bubble": ("Soap bubble", ["#ffd98e", "#ff9cc2", "#c3a6ff", "#8fcfff", "#9ef2cf"]),
     "pearl": ("Pearl", ["#fbf4e8", "#f2c9d6", "#c6dcf2", "#d9f0dc", "#ffffff"]),

@@ -22,6 +22,7 @@ import hardware_mac
 import input_injector_mac
 import no_unlock
 from core import protocol
+from core import peerlist
 from core import receiver
 from core.receiver import LinkResponder, ServerState
 
@@ -85,7 +86,8 @@ class WindowsInput:
     def peer_settings(self):
         """Whether a machine linked to this Mac keeps Same on all machines; None while none is, or
         none has told."""
-        known = [self.server.caps_of(peer) for peer in self.server.links()]
+        desktops = {protocol.read_id(peer.get("id")) for peer in peerlist.desktops(self._controller.book.peers())}
+        known = [self.server.caps_of(peer) for peer in self.server.links() if peer in desktops]
         known = [caps for caps in known if caps is not None]
         return any("settings" in caps for caps in known) if known else None
 
@@ -152,7 +154,10 @@ class WindowsInput:
         """This Mac's settings state to every machine linked to it that keeps it and that this Mac
         has no link open to, `source` (a b64 id, the machine a newer state came from) excepted."""
         sent = False
+        desktops = {protocol.read_id(peer.get("id")) for peer in peerlist.desktops(self._controller.book.peers())}
         for peer in self.server.links():
+            if peer not in desktops:
+                continue
             caps = self.server.caps_of(peer)
             if protocol.id_text(peer) == source or caps is None or "settings" not in caps or self._outbound_up(peer):
                 continue
@@ -170,13 +175,13 @@ class WindowsInput:
         if entry is None:
             return []
         messages = []
-        if entry.get("side") in crossing.EDGES:
+        if entry.get("port") != 0 and entry.get("side") in crossing.EDGES:
             by = protocol.read_id(entry.get("side_by")) or bytes(self._controller.identity()["id"])
             messages.append(protocol.arrangement_v6(entry["side"], entry.get("side_set_at", 0), by,
                                                     way_back=self._controller.way_back(text),
                                                     way_back_by=protocol.read_id(self._controller.way_back_by(text))))
         caps = self.server.caps_of(peer) or frozenset()
-        if "settings" in caps:
+        if entry.get("port") != 0 and "settings" in caps:
             messages += [m for m in self._controller.announce() if m.get("type") == protocol.MSG_SETTINGS]
         if entry.get("send") is True:
             ids = [protocol.read_id(item.get("id")) for item in self._controller.book.peers() if item.get("id") != text]
@@ -193,7 +198,8 @@ class WindowsInput:
         self._arrangement_callback(*args)
 
     def _on_settings(self, peer, data) -> None:
-        if self.settings_callback is not None:
+        desktops = {protocol.read_id(entry.get("id")) for entry in peerlist.desktops(self._controller.book.peers())}
+        if peer in desktops and self.settings_callback is not None:
             self.settings_callback(data, protocol.id_text(peer))
 
     def _on_paired(self, peer, ids) -> None:

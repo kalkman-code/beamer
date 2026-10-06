@@ -43,5 +43,26 @@ class WantsDarkTests(unittest.TestCase):
         self.assertFalse(theme.wants_dark("sepia", False))
 
 
+@unittest.skipIf(theme is None, "PySide6 is not installed")
+class StylesheetApplicationTests(unittest.TestCase):
+    def test_identical_application_stylesheet_is_not_repolished(self):
+        class Application:
+            def __init__(self):
+                self.value = ""
+                self.applied = []
+
+            def styleSheet(self):
+                return self.value
+
+            def setStyleSheet(self, value):
+                self.value = value
+                self.applied.append(value)
+
+        app = Application()
+        self.assertTrue(theme.apply_stylesheet(app))
+        self.assertFalse(theme.apply_stylesheet(app))
+        self.assertEqual(app.applied, [theme.stylesheet()])
+
+
 if __name__ == "__main__":
     unittest.main()
