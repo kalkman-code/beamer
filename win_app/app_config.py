@@ -901,10 +901,11 @@ def set_peer_hardware_address(path: Path, peer: str, address: str) -> bool:
         return True
 
 
-def set_ways(path: Path, peer: str, *, side=None, methods, parts, corner) -> bool:
+def set_ways(path: Path, peer: str, *, side=None, methods, parts, corner, live=None) -> bool:
     """Writes one peer's ways across (WIRE.md section 8): its `side`, and its edge, part and corner
     zones, in use when named in `methods`. `side` None keeps the side held now, so a change to a way
-    never puts back a side that arrived since the window last read it. Raises ClashError, writing
+    never puts back a side that arrived since the window last read it. A machine with no link now
+    (`live(id)` false) gives way to them (core/ways.py give_way). Raises ClashError, writing
     nothing, when two machines' zones would then cover one stretch of this PC's screen; ConfigError
     when no entry has `peer`. Returns whether the side moved, which the caller sends as `arrangement`."""
     with SETTINGS_LOCK:
@@ -919,7 +920,9 @@ def set_ways(path: Path, peer: str, *, side=None, methods, parts, corner) -> boo
         if moved:
             # Moved onto a side another machine's edge holds: the side stands and this machine's way
             # there goes off, as when the side arrives from it; the page says which machine holds it.
-            ways.settle(settings, peer, "this PC")
+            ways.settle(settings, peer, "this PC", live)
+        for notice in ways.give_way(settings, peer, "this PC", live):
+            LOGGER.info("%s", notice)
         sentence = ways.clash(settings, "this PC")
         if sentence is not None:
             raise ClashError(sentence)
@@ -936,7 +939,22 @@ def share_side(path: Path, side: str, thirds: dict) -> list:
         return changed
 
 
-def apply_arrangement(path: Path, peer: str, edge: str, set_at: int, by: str, way_back=None, way_back_by=None):
+def settle_presence(path: Path, live, gone):
+    """What became of the zones set aside for a machine with no link (core/ways.py settle_presence).
+    Returns (changed, notices): whether the file was written, and a sentence for each zone that stays
+    off for good or could not be put back."""
+    with SETTINGS_LOCK:
+        settings = load_settings(path)
+        before = copy.deepcopy(settings)
+        notices = ways.settle_presence(settings, "this PC", live, gone)
+        if settings == before:
+            return False, notices
+        _write_json(path, settings)
+        return True, notices
+
+
+def apply_arrangement(path: Path, peer: str, edge: str, set_at: int, by: str, way_back=None, way_back_by=None,
+                      live=None):
     """A peer's `arrangement` (WIRE.md section 8), as core.ways takes it: `edge` is the edge of the peer
     that faces this PC, so this PC's side for it is the opposite, and `way_back` is kept whatever the
     side. Returns (changed, notices): whether the file was written, and a sentence for each of that
@@ -944,7 +962,7 @@ def apply_arrangement(path: Path, peer: str, edge: str, set_at: int, by: str, wa
     with SETTINGS_LOCK:
         settings = load_settings(path)
         changed, notices = ways.arrangement(settings, peer, edge, set_at, by, "this PC", way_back,
-                                             way_back_by=way_back_by, corner_edge=_corner_edge)
+                                             way_back_by=way_back_by, corner_edge=_corner_edge, live=live)
         if changed:
             _write_json(path, settings)
         return changed, notices

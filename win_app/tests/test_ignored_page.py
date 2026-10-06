@@ -91,6 +91,48 @@ class RecorderTests(unittest.TestCase):
         self.key(False, 0x11, 0x1D)
         self.assertEqual(self.recorded, [("key", 0xA2)])
 
+    def test_laid_out_keycap_has_room_for_its_key_and_hint(self):
+        # A widget that owns a layout is sized from that layout, not from its heightForWidth, so the
+        # keycap's own padding has to live in the layout: without it the hint's last pixels sat
+        # under the bottom border ("Click, then press the key" half cut off).
+        from PySide6.QtWidgets import QVBoxLayout, QWidget
+
+        self.holder = holder = QWidget()
+        column = QVBoxLayout(holder)
+        column.addWidget(self.recorder)
+        column.addStretch(1)
+        holder.resize(280, 400)
+        holder.show()
+        self.app.processEvents()
+        room = self.recorder.width() - 24
+        need = self.recorder.key.heightForWidth(room) + self.recorder.hint.heightForWidth(room) + 10 + 16
+        self.assertGreaterEqual(self.recorder.height(), need)
+        holder.hide()
+
+    def test_hint_gets_the_whole_width_the_box_reserved_for_it(self):
+        # Windows' fonts wrapped "Click, then press the key" inside a 110 px hint at 150% while the
+        # box had reserved one line at its full width, so "key" sat under the bottom border. A
+        # longer hint wraps at the size-hint width on any font, which is what the old layout used.
+        from PySide6.QtWidgets import QVBoxLayout, QWidget
+
+        self.recorder.cancel()
+        self.holder = holder = QWidget()
+        column = QVBoxLayout(holder)
+        column.addWidget(self.recorder)
+        column.addStretch(1)
+        for text in ("Click, then press the key", "Click here, then press the key you want to use as the shortcut"):
+            self.recorder.hint.setText(text)
+            for width in (240, 280, 420):
+                with self.subTest(text=text, width=width):
+                    holder.resize(width, 400)
+                    holder.show()
+                    self.app.processEvents()
+                    hint = self.recorder.hint
+                    self.assertEqual(hint.width(), self.recorder.width() - 24)
+                    self.assertGreaterEqual(hint.height(), hint.heightForWidth(hint.width()))
+                    self.assertLessEqual(hint.geometry().bottom(), self.recorder.height() - 8)
+        holder.hide()
+
 
 if __name__ == "__main__":
     unittest.main()

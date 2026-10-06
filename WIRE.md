@@ -346,7 +346,11 @@ The initiator:
      bytes; on Windows and Linux that close can destroy the version 5 preamble in flight. So:
      when the entry has never linked on version 6 (`linked` false), "Update Beamer on *name* to
      1.5.0; if it is up to date, pair the two again"; otherwise "*name* closed the connection: it
-     may have removed this machine, or be too busy to answer".
+     may have removed this machine, or be too busy to answer". After such closes, and nothing else,
+     for 60 seconds running on an entry that has linked (any other result starts the 60 seconds
+     again), it says "*name* no longer has this pairing: remove *name* here
+     and pair the two again", and dials that entry every 30 seconds rather than every 2 until a
+     link is made or the entry changes.
    - Nothing within the handshake's 5 seconds (the initiator has no separate deadline for the
      preamble): says the peer is probably running a Beamer from before version 4.
 4. Reads the other 56 bytes and checks them: the prefix must differ from its own, and the key id
@@ -1163,7 +1167,15 @@ only for the entry migrated from 1.4.x, which never links. A zone never names a 
   first that holds the pointer wins. Apart from a corner inside an edge, two zones in use never
   cover the same stretch: the settings refuse a list where they would, and an `arrangement` that
   would make two overlap is applied and turns the clashing zones for the sender `off`, with a
-  notice naming both machines. A zone's stretch is its peer's `side` for an `edge` zone, the
+  notice naming both machines. The exception is a machine with no link up at that moment, in
+  either direction: its clashing zones are set aside instead (`off` and `"aside": true`), with a
+  notice saying it is not connected, and the same holds when the user gives a machine a side or a
+  way on the Crossing page, which then offers no thirds of a side held only by such a machine. A
+  machine that is only asleep must not lose its layout: when it links, a zone set aside is put back
+  in use, unless another zone in use covers that stretch, when it stays `off` like any other clash.
+  Only a machine whose link reports that it no longer has this pairing (section 2, initiator step
+  3) keeps its zones `off` for good, and the app says so in its window, not only in its log. Any
+  edit of the zone by the user clears `aside`. A zone's stretch is its peer's `side` for an `edge` zone, the
   chosen thirds of it for a `part` zone, and the corner for a `corner` zone; the `notch` is a
   stretch of its own, which only another `notch` zone covers: it fires on a dwell and 1.4.x let
   it stand beside the edge, but a Mac has one notch, so it leads to one machine. 1.4.x let the

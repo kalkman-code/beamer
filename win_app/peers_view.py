@@ -13,7 +13,7 @@ from core import protocol
 
 PLATFORM_NAMES = {"macos": "Mac", "windows": "Windows", "linux": "Linux", "ios": "iPhone", "android": "Android"}
 
-REFUSED_KINDS = ("unauthenticated", "wrong_id", "different", "unreadable")
+REFUSED_KINDS = ("unauthenticated", "wrong_id", "different", "unreadable", "forgotten")
 VERSION_KINDS = ("older", "newer", "not_beamer")
 UNREACHABLE_KINDS = ("unreachable", "timeout")
 QUIET_KINDS = ("connected", "removed", "off")

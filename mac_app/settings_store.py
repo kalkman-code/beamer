@@ -11,6 +11,7 @@ import copy
 import dataclasses
 import hashlib
 import json
+import logging
 import os
 import secrets
 import tempfile
@@ -31,6 +32,8 @@ from crossing import CORNERS, EDGES, GLOW_COLOURS, GLOW_STYLES, HAPTIC_FEELS, HA
 from key_codes import KEY_NAME_TO_CODE
 from wake import parse_mac
 
+
+LOGGER = logging.getLogger(__name__)
 
 APP_SUPPORT_DIRECTORY = Path.home() / "Library" / "Application Support" / "Beamer"
 DEFAULT_SETTINGS_PATH = APP_SUPPORT_DIRECTORY / "settings.json"
@@ -182,6 +185,7 @@ def _apply_zones(zones, peer_id, crossing):
         for index, zone in enumerate(result):
             if zone.get("peer") == peer_id and zone.get("kind") == new["kind"]:
                 merged = {**zone, **{key: value for key, value in new.items() if key != "off"}}
+                merged.pop("aside", None)
                 if new.get("off"):
                     merged["off"] = True
                 else:
@@ -370,10 +374,11 @@ class SettingsStore:
                 self.save_settings(settings)
             return removed
 
-    def set_ways(self, peer, *, side, methods, parts, corner):
+    def set_ways(self, peer, *, side, methods, parts, corner, live=None):
         """Writes one machine's side and zones, as the Crossing page shows them for it (core/ways.py).
-        Returns whether its side moved, which the caller sends it as `arrangement`; SettingsError, writing
-        nothing, for a machine not in the list or zones that would clash with another's."""
+        A machine with no link now (`live(id)` false) gives way to them. Returns whether its side
+        moved, which the caller sends it as `arrangement`; SettingsError, writing nothing, for a
+        machine not in the list or zones that would clash with another's."""
         with self.lock:
             settings = copy.deepcopy(self.current())
             try:
@@ -384,7 +389,9 @@ class SettingsStore:
             if moved:
                 # Moved onto a side another machine's edge holds: the side stands and this machine's
                 # way there goes off, as when the side arrives from it; the page says who holds it.
-                ways.settle(settings, peer, "this Mac")
+                ways.settle(settings, peer, "this Mac", live)
+            for notice in ways.give_way(settings, peer, "this Mac", live):
+                LOGGER.info("%s", notice)
             self.save_settings(settings)
             return moved
 
@@ -410,14 +417,26 @@ class SettingsStore:
             self.save_settings(settings)
             return True
 
-    def arrangement(self, peer, edge, set_at, by, way_back=None, way_back_by=None):
+    def settle_presence(self, live, gone):
+        """What became of the zones set aside for a machine with no link (core/ways.py settle_presence).
+        Returns (changed, notices): whether the file was written, and a sentence for each zone that
+        stays off for good or could not be put back."""
+        with self.lock:
+            settings = copy.deepcopy(self.current())
+            notices = ways.settle_presence(settings, "this Mac", live, gone)
+            changed = settings != self.current()
+            if changed:
+                self.save_settings(settings)
+            return changed, notices
+
+    def arrangement(self, peer, edge, set_at, by, way_back=None, way_back_by=None, live=None):
         """A machine's `arrangement`, kept when it is newer than the side held for that machine, and
         its `way_back` whatever the side (core/ways.py). Returns (changed, notices), a sentence for each
         zone it turned off."""
         with self.lock:
             settings = copy.deepcopy(self.current())
             changed, notices = ways.arrangement(settings, peer, edge, set_at, by, "this Mac", way_back,
-                                                 way_back_by=way_back_by)
+                                                 way_back_by=way_back_by, live=live)
             if changed:
                 self.save_settings(settings)
             return changed, notices

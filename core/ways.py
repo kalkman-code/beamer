@@ -8,6 +8,7 @@ app calls these on its settings under its own lock and writes the file itself.
 
 import base64
 import binascii
+import copy
 import re
 from typing import Callable, Optional
 
@@ -198,6 +199,7 @@ def edit(settings: dict, peer: str, *, side: str, methods, parts, corner: str, k
             zone = {"peer": peer, "kind": kind}
             settings["zones"].append(zone)
         zone.update(fields[kind])
+        zone.pop("aside", None)
         if kind in methods:
             zone.pop("off", None)
         else:
@@ -221,14 +223,15 @@ def _stretch(zone: dict, sides: dict) -> set:
     return set()
 
 
-def share_offer(settings: dict, peer: str) -> Optional[dict]:
-    """Propose thirds for `peer` when another machine already uses part of its side."""
+def share_offer(settings: dict, peer: str, live: Optional[Callable[[str], bool]] = None) -> Optional[dict]:
+    """Propose thirds for `peer` when another machine already uses part of its side. A machine with
+    no link now is never offered a third: choosing the side takes it from that one (`give_way`)."""
     entry = _entry(settings, peer)
     side = entry.get("side") if entry else ""
     if side not in EDGES:
         return None
     sides = {item.get("id"): item.get("side", "") for item in settings["peers"]}
-    holders = _side_holders(settings, peer)
+    holders = _side_holders(settings, peer, live)
     if not holders:
         return None
     holder_set = set(holders)
@@ -282,9 +285,11 @@ def share(settings: dict, side: str, thirds: dict, *, kinds) -> list:
         before = (dict(edge) if edge else None, dict(part) if part else None)
         if edge is not None:
             edge["off"] = True
+            edge.pop("aside", None)
         if part is None:
             part = {"peer": peer, "kind": "part"}
             settings["zones"].append(part)
+        part.pop("aside", None)
         if expected:
             part["parts"] = expected
             part.pop("off", None)
@@ -344,15 +349,17 @@ def _id_bytes(text) -> Optional[bytes]:
 
 
 def arrangement(settings: dict, peer: str, edge: str, set_at: int, by: str, here: str, way_back=None,
-                way_back_by=None, corner_edge: Optional[Callable[[str, str], str]] = None):
+                way_back_by=None, corner_edge: Optional[Callable[[str, str], str]] = None,
+                live: Optional[Callable[[str], bool]] = None):
     """A peer's `arrangement` (section 8): `edge` is the peer's edge that faces this machine, so this
     machine's side for it is the opposite. Taken when newer than the side held: a higher stamp, or the
     same stamp and the larger `by` as bytes. A machine with no zone yet gets its whole edge for that
     side, and a side that would put two zones in use over one stretch is applied and turns this peer's
     clashing zones off. `way_back` and `way_back_by`, when carried, are kept on the entry whether or
     not the side was newer. `corner_edge(corner, side)`, the app's own, rewrites the edge its corner zones
-    for the peer cross, as `edit` does, since a PC's corner crosses the side. Returns (changed,
-    notices), a sentence for each zone turned off; `here` is "this Mac" or "this PC"."""
+    for the peer cross, as `edit` does, since a PC's corner crosses the side. `live(id)`, when given,
+    says whether a machine has a link up now: one that has not gives way (`give_way`). Returns
+    (changed, notices), a sentence for each zone turned off; `here` is "this Mac" or "this PC"."""
     entry = _entry(settings, peer)
     by_bytes = _id_bytes(by)
     if entry is None or entry.get("port") == 0 or edge not in EDGES or by_bytes is None:
@@ -381,7 +388,7 @@ def arrangement(settings: dict, peer: str, edge: str, set_at: int, by: str, here
                 zone["edge"] = corner_edge(zone["corner"], entry["side"])
     if peer not in {zone.get("peer") for zone in settings["zones"]}:
         settings["zones"].append({"peer": peer, "kind": "edge"})
-    return True, _turn_off_clashes(settings, entry, here)
+    return True, _turn_off_clashes(settings, entry, here, live)
 
 
 def _zoned(entry: dict) -> bool:
@@ -437,14 +444,15 @@ def has_way(settings: dict, peer: str) -> bool:
                for zone in settings["zones"])
 
 
-def blocked_sentence(settings: dict, peer: str, here: str) -> str:
+def blocked_sentence(settings: dict, peer: str, here: str, live: Optional[Callable[[str], bool]] = None) -> str:
     """The Crossing page's sentence for a machine whose side another machine's edge already holds and
-    that has no way in of its own; "" otherwise."""
+    that has no way in of its own; "" otherwise, and "" for a holder with no link now, which gives way."""
     entry = _entry(settings, peer) or {}
     side = entry.get("side")
     if side not in EDGES or has_way(settings, peer):
         return ""
-    holder = _side_holder(settings, peer)
+    holders = _side_holders(settings, peer, live)
+    holder = holders[0] if holders else None
     if holder is None:
         return ""
     peers = settings["peers"]
@@ -490,8 +498,9 @@ def _side_holder(settings: dict, peer: str) -> Optional[str]:
     return holders[0] if holders else None
 
 
-def _side_holders(settings: dict, peer: str) -> list:
-    """Every machine with an active edge or part zone over `peer`'s side, in zone order."""
+def _side_holders(settings: dict, peer: str, live: Optional[Callable[[str], bool]] = None) -> list:
+    """Every machine with an active edge or part zone over `peer`'s side, in zone order; with `live`,
+    only those with a link up now."""
     entry = _entry(settings, peer) or {}
     side = entry.get("side")
     if side not in EDGES:
@@ -502,19 +511,107 @@ def _side_holders(settings: dict, peer: str) -> list:
     for zone in settings["zones"]:
         owner = zone.get("peer")
         if (owner != peer and owner not in holders and zone.get("off") is not True
-                and zone.get("kind") in ("edge", "part") and _stretch(zone, sides) & stretches):
+                and zone.get("kind") in ("edge", "part") and _stretch(zone, sides) & stretches
+                and (live is None or live(owner))):
             holders.append(owner)
     return holders
 
 
-def settle(settings: dict, peer: str, here: str) -> list:
+def settle(settings: dict, peer: str, here: str, live: Optional[Callable[[str], bool]] = None) -> list:
     """After a machine's side moved here: its zones that now clash with another machine's are turned
-    off, as when the side arrives from that machine, and a sentence for each is returned."""
+    off, as when the side arrives from that machine, and a sentence for each is returned. With
+    `live`, a machine with no link now gives way instead (`give_way`)."""
     entry = _entry(settings, peer)
-    return _turn_off_clashes(settings, entry, here) if entry is not None else []
+    return _turn_off_clashes(settings, entry, here, live) if entry is not None else []
 
 
-def _turn_off_clashes(settings: dict, entry: dict, here: str) -> list:
+def give_way(settings: dict, peer: str, here: str, live: Optional[Callable[[str], bool]]) -> list:
+    """Sets aside every zone in use of a machine with no link now (`live(id)` false) that covers a
+    stretch one of `peer`'s zones in use covers, and returns a sentence for each. The zone is `off`
+    and carries `aside`: a machine with its lid shut is not gone, so `settle_presence` puts the zone
+    back when it connects, and turns it off for good only when it is found to have removed this one
+    (06-10-2026). Nothing without `live`."""
+    if live is None:
+        return []
+    sides = {item.get("id"): item.get("side", "") for item in settings["peers"]}
+    wanted = set()
+    for zone in settings["zones"]:
+        if zone.get("peer") == peer and zone.get("off") is not True:
+            wanted |= _stretch(zone, sides)
+    peers = settings["peers"]
+    name = peerlist.label_for(peers, peer_id=peer) or peerlist.UNNAMED
+    notices = []
+    for zone in settings["zones"]:
+        owner = zone.get("peer")
+        if owner == peer or zone.get("off") is True or not (_stretch(zone, sides) & wanted) or live(owner):
+            continue
+        zone["off"] = True
+        zone["aside"] = True
+        other = peerlist.label_for(peers, peer_id=owner) or peerlist.UNNAMED
+        notices.append(f"{other} is not connected, so {name} takes that part of {here}'s screen for now and "
+                       f"{other}'s {KIND_WORDS.get(zone.get('kind'), 'zone')} is set aside until it connects.")
+    return notices
+
+
+def presence_due(settings: dict, live: Callable[[str], bool], gone: Callable[[str], bool]) -> bool:
+    """Whether `settle_presence` would change anything now: a zone is set aside (`give_way`) for a
+    machine that has connected, or has removed this pairing, since."""
+    if not any(zone.get("aside") is True for zone in settings["zones"]):
+        return False
+    probe = copy.deepcopy(settings)
+    settle_presence(probe, "", live, gone)
+    return probe != settings
+
+
+def settle_presence(settings: dict, here: str, live: Callable[[str], bool], gone: Callable[[str], bool]) -> list:
+    """What became of the zones `give_way` set aside, as the links stand now: a machine with a link
+    up has its zone back unless another zone in use covers that stretch (then it stays off, as when two
+    machines that are both here want one stretch, and the Crossing page offers the thirds), and a machine
+    `gone(id)` says has removed this pairing keeps its zone off for good. Returns a sentence for each
+    zone it settled, apart from those put back; settings change in place."""
+    sides = {item.get("id"): item.get("side", "") for item in settings["peers"]}
+    peers = settings["peers"]
+    notices = []
+    for zone in settings["zones"]:
+        if zone.get("aside") is not True:
+            continue
+        owner = zone.get("peer")
+        if zone.get("off") is not True:
+            del zone["aside"]
+            continue
+        name = peerlist.label_for(peers, peer_id=owner) or peerlist.UNNAMED
+        word = KIND_WORDS.get(zone.get("kind"), "zone")
+        if gone(owner):
+            del zone["aside"]
+            notices.append(f"{name} no longer has this pairing, so its {word} stays off. Remove {name} here and "
+                           "pair the two again.")
+        elif live(owner):
+            del zone["aside"]
+            stretch = _stretch(zone, sides)
+            holder = next((other.get("peer") for other in settings["zones"] if other is not zone
+                           and other.get("off") is not True and _stretch(other, sides) & stretch), None)
+            if holder is None:
+                del zone["off"]
+            else:
+                held = peerlist.label_for(peers, peer_id=holder) or peerlist.UNNAMED
+                notices.append(f"{name} is connected again, but {held} leads from that part of {here}'s screen, so "
+                               f"{name}'s {word} stays off. Share the side on the Crossing page.")
+    return notices
+
+
+def gone_sentence(settings: dict, peer: str, here: str, gone: Callable[[str], bool]) -> str:
+    """The Crossing page's sentence for a machine that has removed this pairing, "" for any other."""
+    if not gone(peer):
+        return ""
+    name = peerlist.label_for(settings["peers"], peer_id=peer) or peerlist.UNNAMED
+    if has_way(settings, peer):
+        return (f"{name} no longer has this pairing. If another machine takes its side, {here} gives it up. "
+                f"Remove {name} here and pair the two again.")
+    return f"{name} no longer has this pairing, so it has no way in. Remove {name} here and pair the two again."
+
+
+def _turn_off_clashes(settings: dict, entry: dict, here: str, live: Optional[Callable[[str], bool]] = None) -> list:
+    notices = give_way(settings, entry.get("id"), here, live)
     sides = {item.get("id"): item.get("side", "") for item in settings["peers"]}
     peers = settings["peers"]
     covered = {}
@@ -527,7 +624,6 @@ def _turn_off_clashes(settings: dict, entry: dict, here: str) -> list:
             continue
         for stretch in _stretch(zone, sides):
             covered.setdefault(stretch, zone.get("peer"))
-    notices = []
     name = peerlist.label_for(peers, peer_id=entry.get("id")) or peerlist.UNNAMED
     for zone in mine:
         stretch = _stretch(zone, sides)
@@ -549,13 +645,16 @@ def _sendable(entry: dict) -> bool:
 
 def shortcut_peer(peers: list, last: Optional[str], ready: Callable[[str], bool]) -> Optional[str]:
     """The machine the shortcut, the Send button and the tray send this machine's input to: the one
-    it was last on while that one can take it, else the first in the list that can, else the first
-    this machine sends to at all, so the refusal or the wake names it. Never a machine this one does
-    not send to, a phone, or an entry with no id yet. `ready(id)` says whether one can take input now."""
+    it was last on while that one can take it, else the first in the list that can, else the one it
+    was last on, else the first this machine sends to at all, so the refusal or the wake names it: a
+    stale entry higher in the list must not take the shortcut from the machine just used (06-10-2026).
+    Never a machine this one does not send to, a phone, or an entry with no id yet. `ready(id)` says
+    whether one can take input now."""
     candidates = [entry["id"] for entry in peers if _sendable(entry)]
     if last in candidates and ready(last):
         return last
-    return next((ident for ident in candidates if ready(ident)), candidates[0] if candidates else None)
+    fallback = last if last in candidates else (candidates[0] if candidates else None)
+    return next((ident for ident in candidates if ready(ident)), fallback)
 
 
 def missing_pairings(settings: dict, peer: str) -> list:

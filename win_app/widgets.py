@@ -402,7 +402,10 @@ class FormRow(QWidget):
         column = QVBoxLayout(holder)
         column.setContentsMargins(0, 0, 0, 0)
         column.setSpacing(8)
-        column.addWidget(control, 0, Qt.AlignmentFlag.AlignLeft)
+        # A wrapping label as an aligned item would get its size hint's width, narrower than the
+        # height the row reserved for it (InputRecorder's hint); its text is left-aligned anyway.
+        wraps = isinstance(control, QLabel) and control.wordWrap()
+        column.addWidget(control, 0, Qt.AlignmentFlag(0) if wraps else Qt.AlignmentFlag.AlignLeft)
         for note in notes:
             column.addWidget(note)
         self._box.addWidget(holder, 1)
@@ -1108,7 +1111,10 @@ class InputRecorder(ActionButton):
         self.setMinimumHeight(42 if mono else 36)
         row = QBoxLayout(QBoxLayout.Direction.TopToBottom, self)
         self._content = row
-        row.setContentsMargins(12, 0, 12, 0)
+        # Vertical margins matter: a layout-owning widget is sized from its layout's own height for
+        # width, not from heightForWidth below, so with none the key sat on the top border and the
+        # hint's last pixels were cut by the bottom one.
+        row.setContentsMargins(12, 8, 12, 8)
         row.setSpacing(10)
         self.key = label(title, "keycap", wrap=True)
         self.key.setFont(theme.mono_font(tokens.TYPE["field_mono"]) if mono else theme.font(tokens.TYPE["body"]))
@@ -1116,12 +1122,16 @@ class InputRecorder(ActionButton):
         for part in (self.key, self.hint):
             part.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
         row.addWidget(self.key, 1)
-        row.addWidget(self.hint, 0, Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        # Right-aligned as text, never as a layout item: an aligned item is given its size hint's
+        # width, which for a wrapping label is about 20 average characters, so "Click, then press
+        # the key" wrapped there on Windows' fonts while the box had reserved one line at full width.
+        self.hint.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        row.addWidget(self.hint)
         self.clicked.connect(self._toggle)
 
     def heightForWidth(self, width):
         room = max(1, width - 24)
-        return max(self.minimumHeight(), sum(item.heightForWidth(room) for item in (self.key, self.hint)) + 20)
+        return max(self.minimumHeight(), sum(item.heightForWidth(room) for item in (self.key, self.hint)) + 16 + 10)
 
     def sizeHint(self):
         return QSize(280, self.heightForWidth(280))

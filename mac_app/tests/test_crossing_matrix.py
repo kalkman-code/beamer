@@ -182,6 +182,7 @@ class ArrangementFromEitherSideTests(unittest.TestCase):
             _load=lambda raw: None,
             _flush=lambda: None,
             _tell=lambda peer: self.told.append(peer),
+            _live=lambda peer: True,
         )
 
     def test_a_newer_arrangement_from_the_pc_is_applied_with_its_stamp_and_arms_the_new_edge(self):

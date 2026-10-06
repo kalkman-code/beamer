@@ -1320,7 +1320,7 @@ class LinkSet:
     found by peer id once up. What
     `LinkSender` asks of its links, and what each tells it back."""
 
-    REFUSALS = ("older", "newer", "wrong_id", "unauthenticated", "different")
+    REFUSALS = ("older", "newer", "wrong_id", "unauthenticated", "different", "forgotten")
 
     def __init__(self, sender: "LinkSender", is_local=is_this_machine, link_class=None) -> None:
         self._sender = sender

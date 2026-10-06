@@ -283,6 +283,7 @@ class ArrangementHeldByBothTests(unittest.TestCase):
             sender=types.SimpleNamespace(refresh=lambda: self.refreshed.append("sender")),
             server=types.SimpleNamespace(peers_changed=lambda: self.refreshed.append("server")),
             _tell=lambda peer: self.refreshed.append("answered"),
+            _live=lambda peer: True,
             _read_crossing=lambda: None,
             _crossing_settings=lambda: app_config.load_settings(self.path),
         )

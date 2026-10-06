@@ -19,7 +19,7 @@ sys.path.insert(0, str(ROOT / "win_app"))
 
 from PySide6.QtCore import QCoreApplication, QEvent, QObject, QPoint, QRect, Qt
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import (QApplication, QAbstractButton, QComboBox, QFrame, QLabel, QPushButton, QStyle,
+from PySide6.QtWidgets import (QApplication, QAbstractButton, QComboBox, QFrame, QLabel, QLayout, QPushButton, QStyle,
                                QStyleOptionButton, QWidget)
 
 import kvm_bridge_win as kvm
@@ -246,6 +246,22 @@ class SettingsLayoutAcceptance(unittest.TestCase):
                     with self.subTest(width=width, page=key, button=text):
                         self.assertTrue(self.paints_on_one_line(button), "the label wraps or clips inside its button")
                         self.assertGreaterEqual(button.height(), 30)
+
+    def test_no_wrapping_label_is_a_horizontally_aligned_layout_item(self):
+        # An aligned layout item gets its size hint's width, about 20 average characters for a
+        # wrapping label, while its box reserved height for the full width: the text wraps where
+        # the box has no room for the second line, on some fonts only (the Shortcut box on the rig).
+        horizontal = Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignHCenter
+        for key in PAGE_KEYS:
+            page = self.page_scroll(key).widget()
+            for layout in page.findChildren(QLayout):
+                for index in range(layout.count()):
+                    item = layout.itemAt(index)
+                    label = item.widget()
+                    if not isinstance(label, QLabel) or not label.wordWrap():
+                        continue
+                    with self.subTest(page=key, label=label.text()[:40]):
+                        self.assertFalse(item.alignment() & horizontal, "align the label's text, not its layout item")
 
     def test_effective_dpr_matches_the_scale_of_this_process(self):
         expected = float(os.environ.get("QT_SCALE_FACTOR", "1.0"))

@@ -17,7 +17,7 @@ __all__ = [
 
 # What the link says when the machine answered and would not have it: a different Beamer, an older
 # or newer one, a pairing it holds under another machine, or a first frame it could not read.
-REFUSED_KINDS = ("older", "newer", "different", "unauthenticated", "wrong_id", "unreadable")
+REFUSED_KINDS = ("older", "newer", "different", "unauthenticated", "wrong_id", "unreadable", "forgotten")
 
 NOT_WOKEN_SUFFIX = " did not wake"
 

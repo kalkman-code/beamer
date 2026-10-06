@@ -76,7 +76,9 @@ class Page(unittest.TestCase):
         self.addCleanup(self.window.appearance_watch.stop)
         self.window.windows_input = mock.Mock()
         self.window.windows_input.send_arrangement.return_value = True
-        self.window.windows_input.server.links.return_value = []
+        # Every machine linked to this Mac: one with no link gives way instead (core/ways.py give_way).
+        self.window.windows_input.server.links.return_value = [protocol.read_id(peer[0]) for peer in peers]
+        self.window.windows_input.server.caps_of.return_value = None
         self.sent = []
         self.sent_by = []
         self.controller.send_arrangement = lambda peer, edge, set_at, by=None: (
@@ -162,6 +164,70 @@ class SharingSide(Page):
         self.assertFalse(window.share_box.isHidden())
         self.assertTrue(window.blocked_note.view.isHidden())
         self.assertIs(window.window.firstResponder(), window.share_button.view)
+
+    def test_edge_turns_on_over_a_machine_with_no_link_and_that_machines_edge_goes_off(self):
+        # 06-10-2026: a machine gone for good held the side, and Edge would not turn on until it was moved.
+        window = self.build_blocked()
+        window.windows_input.server.links.return_value = [protocol.read_id(SEA)]
+        window._show_machines()
+        self.assertTrue(window.share_box.isHidden())
+        self.toggle("edge")
+        window._flush()
+        self.assertTrue(window.method_boxes["edge"].value)
+        zones = {(zone["peer"], zone["kind"]): zone for zone in self.store.current()["zones"]}
+        self.assertTrue(zones[(BEE, "edge")].get("off"))
+        self.assertTrue(zones[(BEE, "edge")].get("aside"))
+        self.assertIsNone(zones[(SEA, "edge")].get("off"))
+        self.assertIsNone(ways.clash(self.store.current(), "this Mac"))
+
+    def lid_shut(self):
+        """Sea given Bee's side while Bee, with its lid shut, has no link to this Mac."""
+        window = self.build_blocked()
+        window.windows_input.server.links.return_value = [protocol.read_id(SEA)]
+        window._show_machines()
+        self.toggle("edge")
+        window._flush()
+        return window
+
+    def bee_zone(self):
+        return next(zone for zone in self.store.current()["zones"] if zone["peer"] == BEE and zone["kind"] == "edge")
+
+    def test_a_machine_with_its_lid_shut_has_its_edge_set_aside_and_gets_it_back_when_it_connects(self):
+        window = self.lid_shut()
+        self.assertEqual(self.bee_zone(), {"peer": BEE, "kind": "edge", "off": True, "aside": True})
+        self.toggle("edge")
+        window._flush()
+        window.settle_presence()
+        self.assertTrue(self.bee_zone().get("aside"))
+        window.windows_input.server.links.return_value = [protocol.read_id(BEE), protocol.read_id(SEA)]
+        self.sent.clear()
+        window.settle_presence()
+        self.assertEqual(self.bee_zone(), {"peer": BEE, "kind": "edge"})
+        self.assertIn(BEE, {peer for peer, _edge, _stamp in self.sent})
+        self.assertIsNone(ways.clash(self.store.current(), "this Mac"))
+
+    def test_a_machine_back_over_a_side_another_holds_stays_off_and_the_page_offers_thirds(self):
+        window = self.lid_shut()
+        window.windows_input.server.links.return_value = [protocol.read_id(BEE), protocol.read_id(SEA)]
+        window.settle_presence()
+        self.assertEqual(self.bee_zone(), {"peer": BEE, "kind": "edge", "off": True})
+        window._machine_picked(BEE)
+        self.assertFalse(window.share_box.isHidden())
+
+    def test_a_machine_that_removed_this_pairing_stays_off_for_good_and_the_page_says_so(self):
+        window = self.lid_shut()
+        link = FakeLink(token(100), self.controller.book, None)
+        link.kind = "forgotten"
+        self.controller.links[token(100)] = link
+        alerts = []
+        self.controller.on_user_alert = lambda title, message: alerts.append(message)
+        window.settle_presence()
+        self.assertEqual(self.bee_zone(), {"peer": BEE, "kind": "edge", "off": True})
+        self.assertEqual(alerts, ["Bee no longer has this pairing, so its edge stays off. Remove Bee here and pair "
+                                  "the two again."])
+        window._machine_picked(BEE)
+        self.assertIn("Bee no longer has this pairing", window.blocked_note.text)
+        self.assertFalse(window.blocked_note.view.isHidden())
 
     def test_turning_on_an_overlapping_part_keeps_it_off_and_focuses_the_share_panel(self):
         window = self.build_blocked()

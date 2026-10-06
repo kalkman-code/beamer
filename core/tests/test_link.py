@@ -2,6 +2,7 @@
 LinkResponder on loopback (responder_harness.Machine) and a scripted responder where a test needs
 a peer that misbehaves."""
 
+import errno
 import socket
 import struct
 import threading
@@ -326,6 +327,73 @@ class LinkRefusalTests(unittest.TestCase):
         side.peer()["host"] = "localhost"
         self.assertTrue(wait_for(lambda: server.connections > seen, 3.0))
         link.stop()
+
+    def closing_peer(self, **fields):
+        """A peer that closes every handshake unanswered, dialled with a clock the test turns."""
+        def script(connection):
+            connection.recv(62)
+
+        server = self.serve(script)
+        side = Side(None, **fields)
+        side.peer()["port"] = server.port
+        now = [1000.0]
+        return server, side, now
+
+    def seen(self, side, count):
+        return wait_for(lambda: len(side.states) >= count, 5.0)
+
+    def test_a_machine_that_closes_unanswered_for_a_minute_is_said_to_have_removed_this_one_and_dialled_slowly(self):
+        # 06-10-2026: the lent laptop dialled the rig every two seconds on a pairing the rig no longer had.
+        server, side, now = self.closing_peer(linked=True)
+        self.link(side, clock=lambda: now[0])
+        self.assertTrue(self.seen(side, 3), side.states)
+        self.assertTrue(all("no longer has this pairing" not in text for _up, text in side.states))
+        self.assertIn("may have removed this machine", side.states[0][1])
+        now[0] += link_module.FORGOTTEN_AFTER_SECONDS
+        self.assertTrue(wait_for(lambda: "no longer has this pairing" in (side.last_text() or ""), 5.0), side.states)
+        self.assertEqual(side.last_text(), "Far no longer has this pairing: remove Far here and pair the two again")
+        seen = server.connections
+        time.sleep(0.5)
+        self.assertEqual(server.connections, seen)
+
+    def test_a_peer_that_is_slow_to_answer_for_under_a_minute_is_never_said_to_have_removed_this_one(self):
+        server, side, now = self.closing_peer(linked=True)
+        self.link(side, clock=lambda: now[0])
+        self.assertTrue(self.seen(side, 2), side.states)
+        now[0] += link_module.FORGOTTEN_AFTER_SECONDS - 1
+        before = len(side.states)
+        self.assertTrue(self.seen(side, before + 3), side.states)
+        self.assertTrue(all("no longer has this pairing" not in text for _up, text in side.states))
+
+    def test_any_other_result_starts_the_minute_again(self):
+        server, side, now = self.closing_peer(linked=True)
+        refuse = [False]
+
+        def factory(address, timeout):
+            if refuse[0]:
+                raise ConnectionRefusedError(errno.ECONNREFUSED, "refused")
+            return socket.create_connection(address, timeout=timeout)
+
+        self.link(side, clock=lambda: now[0], socket_factory=factory)
+        self.assertTrue(self.seen(side, 2), side.states)
+        now[0] += link_module.FORGOTTEN_AFTER_SECONDS - 1
+        refuse[0] = True
+        self.assertTrue(wait_for(lambda: side.states and side.states[-1][1].endswith("not listening on this port."), 5.0),
+                        side.states)
+        refuse[0] = False
+        now[0] += 5
+        before = len(side.states)
+        self.assertTrue(self.seen(side, before + 3), side.states)
+        self.assertTrue(all("no longer has this pairing" not in text for _up, text in side.states))
+
+    def test_a_machine_never_linked_that_closes_unanswered_is_never_said_to_have_removed_this_one(self):
+        server, side, now = self.closing_peer(linked=False)
+        self.link(side, clock=lambda: now[0])
+        self.assertTrue(self.seen(side, 2), side.states)
+        now[0] += 10 * link_module.FORGOTTEN_AFTER_SECONDS
+        before = len(side.states)
+        self.assertTrue(self.seen(side, before + 2), side.states)
+        self.assertTrue(all("no longer has this pairing" not in text for _up, text in side.states))
 
     def test_invalid_hello_says_this_app_sent_something_unreadable(self):
         def script(connection):

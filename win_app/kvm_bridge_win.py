@@ -52,6 +52,7 @@ from app_config import (
     load_config,
     save_config,
 )
+from core import crash_log
 from core import effects
 from diagram import ArrangementDiagram, PushStrip
 from edge_glow import EdgeGlow, PreviewLoop
@@ -853,6 +854,42 @@ class WindowsApplication(QWidget):
             config.same_on_both, config.same_set_at, values, by=config.same_by, design_state=design_state
         )
 
+    def _live(self, peer: str) -> bool:
+        """Whether `peer` has a link up now, either way. One that has none gives way on the Crossing
+        page and to an arrangement (core/ways.py give_way)."""
+        ident = protocol.read_id(peer)
+        return ident is not None and (self.sender.links.up(ident) or ident in self.server.links())
+
+    def _gone(self, peer: str) -> bool:
+        """Whether `peer` has removed this pairing: the link this PC dials to it was closed unanswered
+        for a minute (core/link.py). Its zones set aside by `give_way` then stay off for good."""
+        entry = next((item for item in self._peer_entries if item.get("id") == peer), None)
+        return entry is not None and self.sender.links.kind(entry.get("token")) == "forgotten"
+
+    def _settle_presence(self) -> None:
+        """Puts back the zones set aside for a machine that has connected since, and keeps off for good,
+        and says so, those of one that has removed this pairing (core/ways.py settle_presence)."""
+        if self._config is None or not ways.presence_due(self._crossing_settings(), self._live, self._gone):
+            return
+        self._read_crossing()
+        before = ways.way_back_state(self._crossing_settings())
+        try:
+            changed, notices = app_config.settle_presence(self.config_path, self._live, self._gone)
+        except (ConfigError, OSError):
+            LOGGER.exception("The zones set aside could not be settled")
+            return
+        if not changed:
+            return
+        for notice in notices:
+            self._on_alert("Beamer", notice)
+        self._pull_peer_fields()
+        self.sender.refresh()
+        self.server.peers_changed()
+        self._read_crossing()
+        for target, state in ways.way_back_state(self._crossing_settings()).items():
+            if before.get(target) != state:
+                self._tell(target)
+
     def _design_peer_caps(self) -> dict:
         desktops = {entry.get("id") for entry in peerlist.desktops(self._peer_entries)}
         caps = {protocol.id_text(peer): self.sender.links.caps(peer) for peer in self.sender.peers_up()}
@@ -1435,7 +1472,7 @@ class WindowsApplication(QWidget):
         had_way = ways.has_way(self._crossing_settings(), peer)
         held = ways.ways(self._crossing_settings(), peer)
         held.update(changes)
-        offer = ways.share_offer(self._crossing_settings(), peer)
+        offer = ways.share_offer(self._crossing_settings(), peer, self._live)
         occupied = {part for part, owner in offer["thirds"].items() if owner in offer["holders"]} if offer else set()
         if offer and ("edge" in held["methods"] or
                       "part" in held["methods"] and occupied.intersection(held["parts"])):
@@ -1445,7 +1482,7 @@ class WindowsApplication(QWidget):
             return False
         try:
             moved = app_config.set_ways(self.config_path, peer, side=changes.get("side"), methods=held["methods"],
-                                        parts=held["parts"], corner=held["corner"])
+                                        parts=held["parts"], corner=held["corner"], live=self._live)
         except app_config.ClashError as exc:
             self._show_clash(self._shown(str(exc)))
             self._reflect_ways()
@@ -1547,7 +1584,7 @@ class WindowsApplication(QWidget):
             self.ways_summary.setText(summary)
             motion.fade_from(self.ways_summary, shot)
         motion.set_shown(self.edge_unlearned, not side)
-        offer = ways.share_offer(settings, chosen) if chosen else None
+        offer = ways.share_offer(settings, chosen, self._live) if chosen else None
         identity = (offer["side"], tuple(offer["holders"]), tuple(offer["thirds"].items())) if offer else None
         if identity != getattr(self, "_share_identity", None):
             self._share_identity = identity
@@ -1569,7 +1606,8 @@ class WindowsApplication(QWidget):
             self.share_button.setEnabled(chosen in self._share_thirds.values())
         motion.set_shown(self.share_module, offer is not None)
         for note, sentence in (
-                (self.blocked_note, ways.blocked_sentence(settings, chosen, "this PC") if chosen and not offer else ""),
+                (self.blocked_note, (ways.blocked_sentence(settings, chosen, "this PC", self._live) if chosen and not offer else "")
+                 or (ways.gone_sentence(settings, chosen, "this PC", self._gone) if chosen else "")),
                 (self.missing_note, ways.missing_sentence(settings, chosen, "this PC") if chosen else ""),
                 (self.no_way_back_note, ways.no_way_back_sentence(settings, chosen) if chosen else "")):
             sentence = self._shown(sentence)
@@ -1683,7 +1721,7 @@ class WindowsApplication(QWidget):
         before = ways.way_back_state(self._crossing_settings())
         try:
             changed, notices = app_config.apply_arrangement(self.config_path, peer, edge, set_at, by, way_back,
-                                                             way_back_by)
+                                                             way_back_by, live=self._live)
         except (ConfigError, OSError):
             LOGGER.exception("An arrangement could not be saved")
             return
@@ -3464,6 +3502,7 @@ class WindowsApplication(QWidget):
         if self._closing:
             return
         self._show_same()
+        self._settle_presence()
         with self._status_lock:
             state = self._status
             detail = self._status_detail
@@ -3597,6 +3636,8 @@ def main() -> None:
         return
     arguments = parse_args()
     log_path = configure_logging()
+    if log_path is not None:
+        crash_log.install(log_path.parent, LOGGER)
     LOGGER.info("Starting Beamer Windows receiver")
     if log_path is not None:
         LOGGER.info("Logging to %s", log_path)

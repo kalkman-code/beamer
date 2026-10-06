@@ -355,6 +355,9 @@ class WindowTests(unittest.TestCase):
         settings["port"] = harness.free_port()
         app_config.write_settings(self.path, settings)
         self.window = kvm_bridge_win.WindowsApplication(self.path)
+        # Both linked: a machine with no link gives way instead of being offered thirds (core/ways.py give_way).
+        self.linked = {BT, CT}
+        self.window._live = lambda peer: peer in self.linked
         self.sent = []
         self.window._send_to = lambda peer, message: self.sent.append((peer, message)) or True
         self.window._refresh_window()
@@ -380,6 +383,65 @@ class CrossingPageTests(WindowTests):
         self.window._pull_peer_fields()
         self.window._choose_machine(CT)
         return self.window
+
+    def test_edge_turns_on_over_a_machine_with_no_link_and_that_machines_edge_goes_off(self):
+        # 06-10-2026: a machine gone for good held the side, and Edge would not turn on until it was moved.
+        window = self.sharing_side()
+        self.linked = {CT}
+        window._choose_machine(CT)
+        self.assertTrue(window.share_module.isHidden())
+        window.way_boxes["edge"].setChecked(True)
+        self.assertTrue(window.way_boxes["edge"].isChecked())
+        zones = {(zone["peer"], zone["kind"]): zone for zone in app_config.load_settings(self.path)["zones"]}
+        self.assertTrue(zones[(BT, "edge")].get("off"))
+        self.assertTrue(zones[(BT, "edge")].get("aside"))
+        self.assertIsNone(zones[(CT, "edge")].get("off"))
+
+    def lid_shut(self):
+        """Sea given Bee's side while Bee, with its lid shut, has no link to this PC."""
+        window = self.sharing_side()
+        self.linked = {CT}
+        window._choose_machine(CT)
+        window.way_boxes["edge"].setChecked(True)
+        self.alerts = []
+        window._on_alert = lambda title, message: self.alerts.append(message)
+        return window
+
+    def bee_zone(self):
+        return next(zone for zone in app_config.load_settings(self.path)["zones"]
+                    if zone["peer"] == BT and zone["kind"] == "edge")
+
+    def test_a_machine_with_its_lid_shut_has_its_edge_set_aside_and_gets_it_back_when_it_connects(self):
+        window = self.lid_shut()
+        self.assertEqual(self.bee_zone(), {"peer": BT, "kind": "edge", "off": True, "aside": True})
+        window.way_boxes["edge"].setChecked(False)
+        window._settle_presence()
+        self.assertTrue(self.bee_zone().get("aside"))
+        self.linked = {BT, CT}
+        window._settle_presence()
+        self.assertEqual(self.bee_zone(), {"peer": BT, "kind": "edge"})
+        self.assertIn(protocol.read_id(BT), {peer for peer, _message in self.sent})
+        self.assertEqual(self.alerts, [])
+
+    def test_a_machine_back_over_a_side_another_holds_stays_off_and_the_page_offers_thirds(self):
+        window = self.lid_shut()
+        self.linked = {BT, CT}
+        window._settle_presence()
+        self.assertEqual(self.bee_zone(), {"peer": BT, "kind": "edge", "off": True})
+        self.assertEqual(len(self.alerts), 1)
+        window._choose_machine(BT)
+        self.assertFalse(window.share_module.isHidden())
+
+    def test_a_machine_that_removed_this_pairing_stays_off_for_good_and_the_page_says_so(self):
+        window = self.lid_shut()
+        window._gone = lambda peer: peer == BT
+        window._settle_presence()
+        self.assertEqual(self.bee_zone(), {"peer": BT, "kind": "edge", "off": True})
+        self.assertEqual(self.alerts, ["Bee no longer has this pairing, so its edge stays off. Remove Bee here and "
+                                       "pair the two again."])
+        window._choose_machine(BT)
+        self.assertFalse(window.blocked_note.isHidden())
+        self.assertIn("Bee no longer has this pairing", window.blocked_note.text())
 
     def test_the_share_panel_offers_thirds_below_the_side_and_hides_the_blocked_sentence(self):
         window = self.sharing_side()

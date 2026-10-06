@@ -21,7 +21,7 @@ import bridge  # noqa: E402
 import kvm_bridge_app  # noqa: E402
 import settings_store  # noqa: E402
 from bridge_fakes import PAIRED_TOKEN  # noqa: E402
-from core import pairing  # noqa: E402
+from core import feature_flags, pairing  # noqa: E402
 from fake_link import FakeLink  # noqa: E402
 from wake import WakingController  # noqa: E402
 
@@ -323,6 +323,19 @@ class FollowTheFirstMachineTests(Base):
 
 
 class ShowingACodeTests(Base):
+    # The pairing QR is hidden until 1.6 (core.feature_flags); these tests prove both states.
+    def test_while_the_qr_flag_is_off_the_code_shows_without_a_qr(self):
+        with mock.patch.object(feature_flags, "PAIRING_QR_VISIBLE", False), \
+                mock.patch.object(kvm_bridge_app.machines_panel.pairing, "pairing_address", return_value="192.0.2.9"):
+            self.panel._toggle_sheet()
+            self.panel._show_code()
+            self.panel.refresh()
+        self.assertEqual(self.panel.shown_code_boxes.value, "482913")
+        self.assertIn("192.0.2.9", self.panel.code_address.text)
+        self.assertTrue(self.panel.qr_view.isHidden())
+        self.assertTrue(self.panel.qr_caption.view.isHidden())
+
+    @mock.patch.object(feature_flags, "PAIRING_QR_VISIBLE", True)
     def test_the_code_is_shown_in_two_groups_with_its_address_and_a_qr(self):
         with mock.patch.object(kvm_bridge_app.machines_panel.pairing, "pairing_address", return_value="192.0.2.9"):
             self.panel._toggle_sheet()
@@ -336,6 +349,7 @@ class ShowingACodeTests(Base):
         self.assertIsNotNone(self.panel.qr_view.image())
         self.assertTrue(self.panel.show_button.view.isHidden())
 
+    @mock.patch.object(feature_flags, "PAIRING_QR_VISIBLE", True)
     def test_with_addresses_hidden_there_is_no_qr_and_no_address(self):
         self.controller.cfg.hide_addresses = True
         with mock.patch.object(kvm_bridge_app.machines_panel.pairing, "pairing_address", return_value="192.0.2.9"):

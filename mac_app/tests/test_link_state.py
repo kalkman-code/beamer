@@ -96,6 +96,7 @@ class LinkStateTest(unittest.TestCase):
             ("wrong_id", "Windows has this pairing under another machine", "token"),
             ("different", "A different Beamer answered", "token"),
             ("unreadable", "Windows could not read what this machine sent first", "token"),
+            ("forgotten", "Windows no longer has this pairing: remove Windows here and pair the two again", "forgotten"),
             ("older", "Update Beamer on Windows: it is older than this one", "version"),
             ("newer", "Windows runs a newer Beamer", "version"),
             ("not_beamer", "Windows did not answer as a Beamer", "version"),
@@ -119,6 +120,11 @@ class LinkStateTest(unittest.TestCase):
         for kind, status, key in cases:
             with self.subTest(kind=kind, status=status):
                 self.assertState(key, "amber" if key == "waiting" else "fault", kind=kind, status=status, connected=False)
+
+    def test_a_machine_that_removed_this_pairing_is_said_to_have_done_so_not_to_have_refused_a_token(self):
+        state = link_state.describe(controller(kind="forgotten", connected=False, peer_label="Desk"))
+        self.assertEqual(state.word, "Pairing removed")
+        self.assertEqual(state.detail, "Desk no longer has this pairing: remove Desk here and pair the two again.")
 
     def test_the_word_comes_from_the_kind_not_the_sentence(self):
         self.assertState("token", "fault", kind="unauthenticated", status="Something this build never said", connected=False)

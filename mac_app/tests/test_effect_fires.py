@@ -54,6 +54,7 @@ class _FakeTrayApp:
         self.notch_beam = mock.Mock()
         self.notch_island = mock.Mock()
         self.haptics = mock.Mock()
+        self.gesture_overlay = mock.Mock()
 
 
 class MainThreadHopTest(unittest.TestCase):
@@ -206,6 +207,34 @@ class HomeArrivalTest(unittest.TestCase):
         step = crossing.Step(pin=(400.0, 300.0))
         app._crossing_feedback_main("home", step)
         app.effects_overlay.switched.assert_not_called()
+
+
+class GestureOverlayOnReturnTest(unittest.TestCase):
+    """Toby 06-10: after the shortcut a grey box sat round the pointer and went only after the
+    landing animation. The gesture panel takes clicks, so it has to go as input comes home."""
+
+    def test_input_coming_home_takes_the_gesture_panel_down_at_once(self):
+        for kind, step in (("home", crossing.Step(pin=(400.0, 300.0))),
+                           ("arrive", crossing.Step(mac_edge="right", pin=(1727.0, 558.0)))):
+            with self.subTest(kind=kind):
+                app = _FakeTrayApp(_feel())
+                app._crossing_feedback_main(kind, step)
+                app.gesture_overlay.sync.assert_called_once_with()
+
+    def test_a_push_at_the_edge_leaves_the_gesture_panel_to_the_status_tick(self):
+        app = _FakeTrayApp(_feel())
+        app._crossing_feedback_main("pressure", crossing.Step(pressure=0.2))
+        app.gesture_overlay.sync.assert_not_called()
+
+    def test_the_gesture_panel_is_one_step_off_clear(self):
+        """A clear panel lets gestures through to the app beneath; 0.02 read as a grey box."""
+        from kvm_bridge_app import GestureOverlay
+        overlay = GestureOverlay(controller=None, logger=logging.getLogger("test-effect-fires"))
+        overlay._ensure_panel()
+        alpha = overlay.panel.backgroundColor().alphaComponent()
+        self.assertGreater(alpha, 0.0)
+        self.assertLessEqual(alpha, 1.0 / 255.0 + 1e-6)
+        self.assertFalse(overlay.panel.isVisible())
 
 
 class DrivenReturnEdgeTest(unittest.TestCase):

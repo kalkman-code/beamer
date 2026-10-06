@@ -13,7 +13,7 @@ from core import protocol
 from link_state import AMBER, FAULT, INK, SIGNAL, LinkState
 
 PLATFORMS = {"windows": "Windows", "macos": "Mac", "linux": "Linux", "ios": "iPhone", "android": "Android"}
-TOKEN_KINDS = ("unauthenticated", "wrong_id", "different", "unreadable")
+TOKEN_KINDS = ("unauthenticated", "wrong_id", "different", "unreadable", "forgotten")
 VERSION_KINDS = ("older", "newer", "not_beamer")
 
 

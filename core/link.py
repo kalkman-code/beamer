@@ -30,6 +30,8 @@ LOGGER = logging.getLogger("Beamer")
 CONNECT_SECONDS = 1.0
 HANDSHAKE_SECONDS = 5.0
 RECONNECT_SECONDS = 2.0
+FORGOTTEN_AFTER_SECONDS = 60.0
+FORGOTTEN_RETRY_SECONDS = 30.0
 PING_SECONDS = 1.0
 SILENCE_SECONDS = 2.0
 READ_SECONDS = 0.1
@@ -143,7 +145,7 @@ class OutboundLink:
         self._checked_at = 0.0
         self.status = ""
         # What the last report was, for the app to word in its own way: "connected", "removed",
-        # "off", "unreachable", "refused", "timeout", "stopped", "closed", "older", "newer",
+        # "off", "unreachable", "refused", "timeout", "stopped", "closed", "forgotten", "older", "newer",
         # "not_beamer", "different", "unauthenticated", "wrong_id", "unreadable", "failed".
         self.kind = "failed"
         self.dialled = None
@@ -240,6 +242,7 @@ class OutboundLink:
     # The thread
 
     def _run(self):
+        closed_since = None
         try:
             while not self._stop.is_set():
                 try:
@@ -271,22 +274,45 @@ class OutboundLink:
                     continue
                 port = target[1]
                 host = tried or target[0]
+                wait = self._reconnect
                 try:
                     self._connect(entry, host, port, direct=tried is not None)
+                    closed_since = None
                 except LinkEnded as ended:
                     # A try at a beacon's address that fails shows nothing: a forged beacon must
                     # not be able to put a message in front of the user, or block the real address.
                     if tried is None and not self._stop.is_set():
-                        self._report(False, ended.text, ended.kind)
+                        # Closed unanswered, and only that, for a minute by a machine this one has linked
+                        # with: it no longer has this pairing (WIRE.md section 2, initiator step 3). A
+                        # peer that is busy or still waking answers something else, or answers, within
+                        # that time. Said once, and dialled slowly, rather than every two seconds for
+                        # ever (06-10-2026).
+                        now = self._clock()
+                        if ended.kind == "closed" and entry.get("linked"):
+                            if closed_since is None:
+                                closed_since = now
+                        else:
+                            closed_since = None
+                        if closed_since is not None and now - closed_since >= FORGOTTEN_AFTER_SECONDS:
+                            name = self._name(entry)
+                            if self.kind != "forgotten":
+                                LOGGER.info("%s has closed every handshake for %d seconds; it no longer has this pairing",
+                                            name, FORGOTTEN_AFTER_SECONDS)
+                            self._report(False, f"{name} no longer has this pairing: remove {name} here and pair "
+                                         "the two again", "forgotten")
+                            wait = max(wait, FORGOTTEN_RETRY_SECONDS)
+                        else:
+                            self._report(False, ended.text, ended.kind)
                         if ended.stop_dialling:
                             self._blocked_for = shape
                 except Exception:
+                    closed_since = None
                     LOGGER.exception("the link to %s failed", self._name(entry))
                     if tried is None and not self._stop.is_set():
                         self._report(False, "The link failed", "failed")
                 if self._stop.is_set():
                     break
-                self._wake.wait(self._reconnect)
+                self._wake.wait(wait)
                 self._wake.clear()
         finally:
             self._live = False

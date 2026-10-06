@@ -583,5 +583,155 @@ class SharingASide(unittest.TestCase):
                 ways.share(held, "right", thirds, kinds=MAC)
 
 
+class AMachineThatIsGone(unittest.TestCase):
+    """A machine that will not link again (a live USB, a reinstall, one that removed this machine)
+    kept its edge, and a machine that is here, put on that side, lost its way back instead (1.5.0
+    beta, 06-10-2026: the PC kept a live USB on its right, the Mac arrived on its right, and input
+    on the PC had no way home)."""
+
+    def pc_with_a_gone_machine_on_the_right(self):
+        return settings(peer(A, "MacBook Pro", side="bottom"), peer(B, "live-usb", side="right"),
+                        zones=[{"peer": A, "kind": "edge"}, {"peer": B, "kind": "edge"}])
+
+    @staticmethod
+    def only(*idents):
+        return lambda ident: ident in idents
+
+    def test_an_arrangement_from_a_machine_that_is_here_takes_the_side_from_one_that_is_not(self):
+        held = self.pc_with_a_gone_machine_on_the_right()
+        changed, notices = ways.arrangement(held, A, "left", 20, A, "this PC", live=self.only(A))
+        self.assertTrue(changed)
+        self.assertEqual(notices, ["live-usb is not connected, so MacBook Pro takes that part of this PC's "
+                                   "screen for now and live-usb's edge is set aside until it connects."])
+        self.assertTrue(ways.has_way(held, A))
+        self.assertFalse(ways.has_way(held, B))
+        self.assertIsNone(ways.clash(held, "this PC"))
+
+    def test_without_liveness_the_machine_arriving_still_gives_way_as_before(self):
+        held = self.pc_with_a_gone_machine_on_the_right()
+        ways.arrangement(held, A, "left", 20, A, "this PC")
+        self.assertFalse(ways.has_way(held, A))
+
+    def test_two_machines_that_are_both_here_keep_the_rule_and_the_share_offer(self):
+        held = self.pc_with_a_gone_machine_on_the_right()
+        _, notices = ways.arrangement(held, A, "left", 20, A, "this PC", live=self.only(A, B))
+        self.assertFalse(ways.has_way(held, A))
+        self.assertIn("MacBook Pro's edge is off", notices[0])
+        self.assertEqual(ways.share_offer(held, A, live=self.only(A, B))["holders"], [B])
+
+    def test_a_machine_that_is_not_here_is_offered_no_third_and_blocks_nothing(self):
+        held = settings(peer(A, "MacBook Pro", side="right"), peer(B, "live-usb", side="right"),
+                        zones=[{"peer": A, "kind": "edge", "off": True}, {"peer": B, "kind": "edge"}])
+        self.assertIsNone(ways.share_offer(held, A, live=self.only(A)))
+        self.assertEqual(ways.blocked_sentence(held, A, "this PC", live=self.only(A)), "")
+        self.assertIn("live-usb already leads", ways.blocked_sentence(held, A, "this PC"))
+
+    def test_choosing_the_edge_on_the_crossing_page_takes_it_from_a_machine_that_is_not_here(self):
+        # "I tried to set up edge but it wasn't clicking": the edit, then the clash check the stores make.
+        held = settings(peer(A, "MacBook Pro", side="right"), peer(B, "live-usb", side="right"),
+                        zones=[{"peer": A, "kind": "edge", "off": True}, {"peer": B, "kind": "edge"}])
+        ways.edit(held, A, side="right", methods=["edge"], parts=[], corner="top_left", kinds=PC,
+                  corner_edge=pc_corner_edge, now=30)
+        self.assertIsNotNone(ways.clash(held, "this PC"))
+        self.assertEqual(len(ways.give_way(held, A, "this PC", self.only(A))), 1)
+        self.assertIsNone(ways.clash(held, "this PC"))
+        self.assertTrue(ways.has_way(held, A))
+
+    def test_giving_way_leaves_zones_elsewhere_and_machines_that_are_here_alone(self):
+        held = settings(peer(A, "Mac", side="right"), peer(B, "Gone", side="left"), peer(C, "Here", side="top"),
+                        zones=[{"peer": A, "kind": "edge"}, {"peer": B, "kind": "edge"}, {"peer": C, "kind": "edge"}])
+        self.assertEqual(ways.give_way(held, A, "this PC", self.only(A, C)), [])
+        self.assertEqual(ways.give_way(held, A, "this PC", None), [])
+        self.assertTrue(all(zone.get("off") is not True for zone in held["zones"]))
+
+
+class AMachineThatIsAsleep(unittest.TestCase):
+    """A lid shut is not a machine gone: the zone taken from a machine with no link is set aside, comes
+    back when the machine connects, and is off for good only for one that removed this pairing
+    (review of the one-sided forget fix, 06-10-2026)."""
+
+    def asleep(self):
+        held = settings(peer(A, "MacBook Pro", side="right"), peer(B, "Laptop", side="right"),
+                        zones=[{"peer": A, "kind": "edge"}, {"peer": B, "kind": "edge", "off": True}])
+        ways.edit(held, B, side="right", methods=["edge"], parts=[], corner="top_left", kinds=PC,
+                  corner_edge=pc_corner_edge, now=30)
+        return held
+
+    @staticmethod
+    def zone(held, peer_id):
+        return next(zone for zone in held["zones"] if zone["peer"] == peer_id and zone["kind"] == "edge")
+
+    def test_a_machine_with_no_link_has_its_zone_set_aside_not_lost(self):
+        held = self.asleep()
+        notices = ways.give_way(held, B, "this PC", lambda ident: ident == B)
+        self.assertEqual(len(notices), 1)
+        self.assertEqual(self.zone(held, A), {"peer": A, "kind": "edge", "off": True, "aside": True})
+        self.assertFalse(ways.has_way(held, A))
+        self.assertTrue(ways.has_way(held, B))
+
+    def test_the_zone_comes_back_when_the_machine_connects_and_the_stretch_is_free(self):
+        held = self.asleep()
+        ways.give_way(held, B, "this PC", lambda ident: ident == B)
+        self.zone(held, B)["off"] = True  # the machine that took the stretch lets it go
+        live, gone = (lambda ident: True), (lambda ident: False)
+        self.assertTrue(ways.presence_due(held, live, gone))
+        self.assertEqual(ways.settle_presence(held, "this PC", live, gone), [])
+        self.assertEqual(self.zone(held, A), {"peer": A, "kind": "edge"})
+        self.assertFalse(ways.presence_due(held, live, gone))
+
+    def test_it_waits_while_the_machine_is_still_asleep(self):
+        held = self.asleep()
+        ways.give_way(held, B, "this PC", lambda ident: ident == B)
+        before = [dict(zone) for zone in held["zones"]]
+        self.assertFalse(ways.presence_due(held, lambda ident: ident == B, lambda ident: False))
+        self.assertEqual(ways.settle_presence(held, "this PC", lambda ident: ident == B, lambda ident: False), [])
+        self.assertEqual(held["zones"], before)
+
+    def test_a_machine_back_over_a_stretch_another_holds_stays_off_and_says_so(self):
+        held = self.asleep()
+        ways.give_way(held, B, "this PC", lambda ident: ident == B)
+        notices = ways.settle_presence(held, "this PC", lambda ident: True, lambda ident: False)
+        self.assertEqual(notices, ["MacBook Pro is connected again, but Laptop leads from that part of this PC's "
+                                   "screen, so MacBook Pro's edge stays off. Share the side on the Crossing page."])
+        self.assertEqual(self.zone(held, A), {"peer": A, "kind": "edge", "off": True})
+        self.assertIsNone(ways.clash(held, "this PC"))
+        self.assertEqual(ways.share_offer(held, A, live=lambda ident: True)["holders"], [B])
+
+    def test_a_machine_that_removed_this_pairing_stays_off_for_good_and_the_page_says_so(self):
+        held = self.asleep()
+        ways.give_way(held, B, "this PC", lambda ident: ident == B)
+        gone = lambda ident: ident == A
+        notices = ways.settle_presence(held, "this PC", lambda ident: ident == B, gone)
+        self.assertEqual(notices, ["MacBook Pro no longer has this pairing, so its edge stays off. Remove "
+                                   "MacBook Pro here and pair the two again."])
+        self.assertEqual(self.zone(held, A), {"peer": A, "kind": "edge", "off": True})
+        self.assertFalse(ways.presence_due(held, lambda ident: True, lambda ident: False))
+        self.assertEqual(ways.gone_sentence(held, A, "this PC", gone),
+                         "MacBook Pro no longer has this pairing, so it has no way in. Remove MacBook Pro here and "
+                         "pair the two again.")
+        self.assertEqual(ways.gone_sentence(held, B, "this PC", gone), "")
+
+    def test_a_zone_the_user_changes_while_it_is_set_aside_is_no_longer_set_aside(self):
+        for methods in (["edge"], []):
+            with self.subTest(methods=methods):
+                held = self.asleep()
+                ways.give_way(held, B, "this PC", lambda ident: ident == B)
+                ways.edit(held, A, side="right", methods=methods, parts=[], corner="top_left", kinds=PC,
+                          corner_edge=pc_corner_edge, now=40)
+                self.assertNotIn("aside", self.zone(held, A))
+                if methods:
+                    self.zone(held, B)["off"] = True
+                ways.settle_presence(held, "this PC", lambda ident: True, lambda ident: False)
+                self.assertEqual("off" in self.zone(held, A), not methods)
+
+
+class TheShortcutIsNotTakenByAStaleEntry(unittest.TestCase):
+    def test_with_nothing_ready_the_machine_last_used_is_named_before_an_older_entry(self):
+        # The lent laptop listed the PC's old pairing first; the shortcut named it rather than the Mac.
+        peers = [peer(A, "Old PC"), peer(B, "MacBook Pro")]
+        self.assertEqual(ways.shortcut_peer(peers, B, lambda ident: False), B)
+        self.assertEqual(ways.shortcut_peer(peers, None, lambda ident: False), A)
+
+
 if __name__ == "__main__":
     unittest.main()

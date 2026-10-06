@@ -16,13 +16,13 @@ still work, and what you type never leaves your network.
 
 ## Download
 
-Free, with no account. Mac and Windows downloads are on the [releases page](https://github.com/kalkman-code/beamer/releases/latest).
+Free, with no account. Mac and Windows downloads, and an experimental Linux Flatpak, are on the [releases page](https://github.com/kalkman-code/beamer/releases/latest).
 
 | Platform | Get it | Notes |
 |---|---|---|
 | macOS 13 or later, Apple silicon or Intel | `Beamer-<version>.dmg` | One universal app, signed and notarised by Apple |
 | Windows 10 and 11 | `Beamer-Setup-<version>.exe` | Not code-signed; see step 1 below |
-| Linux, through Flatpak (experimental) | Build and install using [the Linux instructions](docs/flatpak-build.md) | GNOME on Wayland, or X11; not yet tested on a real desktop |
+| Linux, through Flatpak (experimental) | `Beamer-<version>-x86_64.flatpak`, or build it with [the Linux instructions](docs/flatpak-build.md) | GNOME on Wayland, or X11; tested on one GNOME Wayland desktop |
 
 ## Quick start
 
@@ -32,8 +32,9 @@ Free, with no account. Mac and Windows downloads are on the [releases page](http
    the pointer crosses but the keyboard does not. On Windows,
    run the installer. It is not code-signed, because a certificate costs money and Beamer is free,
    so Windows says "Windows protected your PC" the first time: choose More info, then Run anyway.
-   Beamer on Windows runs as administrator, so expect one UAC prompt when you open it. For Linux,
-   follow [the Flatpak build and install instructions](docs/flatpak-build.md).
+   Beamer on Windows runs as administrator, so expect one UAC prompt when you open it. On Linux,
+   install the Flatpak with `flatpak install --user Beamer-<version>-x86_64.flatpak`, or build it with
+   [the Flatpak instructions](docs/flatpak-build.md).
 2. **Pair them.** On one machine, choose Pair a machine to show a six-digit code. On the other,
    choose that machine from the list and enter the code. It lasts a minute and works once. If it
    does not appear in the list, enter the address shown with its code on the other machine.
@@ -137,7 +138,7 @@ when Same on all machines is on.
 - **Files do not cross**, only text and images, up to 256KB of text and an 8MB image.
 - **AltGr is out of reach from the Mac.**
 - **Linux on Wayland has fewer controls.** Its limits are listed under [Linux](#linux).
-- **Linux gestures are not supported.** Linux can still receive zoom and back/forward as key chords.
+- **Linux gestures are not supported.**
 - **The Windows installer is unsigned.** SmartScreen may warn when you first run it; choose More
   info, then Run anyway.
 
@@ -267,8 +268,8 @@ the Mac's system gestures do the equivalent thing there and nothing on the Mac:
 | Three or four fingers left or right (Spaces) | Switch virtual desktop, the same way round |
 | Thumb and three fingers spread (Show desktop) | Show desktop |
 | Thumb and three fingers pinched (Launchpad) | Start |
-| Two-finger pinch | Zoom (Ctrl+scroll) |
-| Two-finger swipe between pages | Back and forward (Alt+Left/Right) |
+
+A two-finger pinch and a two-finger swipe between pages are not passed to the other machine yet.
 
 The Mac classifies a system gesture when it ends and sends one message. The PC replays it as a real
 swipe through a synthetic Precision Touchpad, so Windows' own touchpad settings apply and Task View
@@ -360,9 +361,12 @@ password. Without it, the Mac reports `Windows is locked — unlock it at the PC
 <details>
 <summary><strong>Linux</strong></summary>
 
-Linux support is experimental: the window, tray and pairing with other machines have not yet been
-tested on a real Linux desktop. Build and install Beamer with
-[the Flatpak instructions](docs/flatpak-build.md). Flatpak needs Flathub to install the KDE runtime
+Linux support is experimental. Install the x86_64 Flatpak from the release page with
+`flatpak install --user Beamer-<version>-x86_64.flatpak`, or build it with
+[the Flatpak instructions](docs/flatpak-build.md). On one Fedora 44 GNOME desktop under Wayland,
+paired with a Mac and with a Windows PC, the window and tray, pairing, crossing both ways, typing and the clipboard work;
+there, crossings show no edge animation on the Linux machine and the selected option in settings is
+not filled in. X11 on real hardware has not been tested. Flatpak needs Flathub to install the KDE runtime
 if it is not already present. The same package is built for GNOME under Wayland and for X11.
 
 On Wayland, the desktop limits what Beamer can do:

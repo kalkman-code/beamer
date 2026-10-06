@@ -80,6 +80,8 @@ def describe(controller) -> LinkState:
     if not (cfg.host and cfg.auth_token):
         return LinkState("unpaired", AMBER, "Not paired", "Setup", "Pair a machine on Overview and Beamer connects on its own.", AMBER)
     address = f"{cfg.host} port {cfg.port}"
+    if kind == "forgotten":
+        return LinkState("forgotten", FAULT, "Pairing removed", "Refused", f"{peer} no longer has this pairing: remove {peer} here and pair the two again.", FAULT)
     if kind in ("unauthenticated", "wrong_id", "different", "unreadable"):
         return LinkState("token", FAULT, "Token mismatch", "Refused", f"{peer} refused this Mac's token. Remove it, then pair again to write a fresh one.", FAULT)
     if kind in ("older", "newer", "not_beamer"):

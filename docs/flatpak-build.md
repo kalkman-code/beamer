@@ -1,6 +1,6 @@
 # Build Beamer's Linux Flatpak
 
-Linux support in Beamer 1.5.0 is experimental. The Flatpak has been built and installed on an aarch64 Fedora 44 machine, and its Wayland back ends pass an automated test in a headless GNOME session. The normal window and tray, a physical mouse and keyboard, and pairing with a Mac or Windows PC have not yet been tested on a real Linux desktop, and neither has an x86_64 build. Please tell us how it goes.
+Linux support in Beamer 1.5 is experimental. Each release from 1.5.1 carries an x86_64 Flatpak; this page is for building it yourself, or for another architecture. On one Fedora 44 GNOME desktop under Wayland, paired with a Mac and with a Windows PC, the window and tray, pairing, crossing both ways, typing and the clipboard work; there, crossings show no edge animation on the Linux machine and the selected option in settings is not filled in. X11 on real hardware has not been tested. Please tell us how it goes.
 
 The app ID is `uk.co.kalkman.beamer`, matching the existing app's bundle identifier. The manifest uses PySide BaseApp 6.11 (PySide 6.11.2) and KDE Platform/SDK 6.11. Python modules and libei 1.6.0 are pinned, downloaded with SHA-256 verification and built offline. The KDE runtime already provides libxcb and libxkbcommon, including its X11 library.
 

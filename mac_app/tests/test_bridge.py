@@ -422,6 +422,38 @@ class ControllerTests(unittest.TestCase):
         self.assertEqual(link.dropped, [])
         self.assertFalse(link.stopped)
 
+    def test_the_shortcut_there_and_back_never_clicks_on_this_mac(self):
+        """Toby 06-10: a grey box round the pointer after the shortcut, "which clicked on return". A
+        click made while away, and one held across the return, reach this Mac as nothing but the
+        user's own events: no button is posted, made or handed back that the hand did not press."""
+        bring_up(self.controller)
+        landings = []
+        self.controller.on_crossing = lambda kind, step: landings.append(kind)
+        down = {FakeQuartz.kCGKeyboardEventKeycode: 0x3D, "flags": FakeQuartz.kCGEventFlagMaskAlternate}
+        up = {FakeQuartz.kCGKeyboardEventKeycode: 0x3D, "flags": 0}
+
+        def double_tap(start):
+            for at, event in ((start, down), (start, up), (start + 0.1, down), (start + 0.1, up)):
+                self.clock.value = at
+                self._tap(FakeQuartz.kCGEventFlagsChanged, event)
+
+        posted = []
+        with mock.patch("input_injector_mac._post", side_effect=posted.append):
+            double_tap(10.0)
+            self.assertTrue(self.controller.redirecting)
+            click = [self._tap(FakeQuartz.kCGEventLeftMouseDown, {}), self._tap(FakeQuartz.kCGEventLeftMouseUp, {})]
+            self.assertEqual(click, [None, None])
+            held = self._tap(FakeQuartz.kCGEventLeftMouseDown, {})
+            self.assertIsNone(held)
+            drain(self.controller)
+            double_tap(11.0)
+            self.assertFalse(self.controller.redirecting)
+            release = {"mine": True}
+            self.assertIs(self._tap(FakeQuartz.kCGEventLeftMouseUp, release), release)
+        self.assertEqual(posted, [])
+        self.assertEqual(landings, ["home"])
+        self.assertNotIn(protocol.MSG_MOUSEDOWN, [message["type"] for message in drain(self.controller)])
+
     def test_a_failed_connection_while_redirecting_brings_input_home_and_alerts_at_once(self):
         # Otherwise input would simply vanish into a dead connection.
         link = bring_up(self.controller)

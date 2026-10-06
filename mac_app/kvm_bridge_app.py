@@ -24,6 +24,7 @@ import config as config_module
 import crossing
 from core import return_edge
 import desktop_mac
+from core import crash_log
 from core import effects
 from core.locale import americanise
 import effects_overlay
@@ -235,6 +236,7 @@ class GestureOverlay:
     """
 
     SIZE = 400.0
+    PANEL_ALPHA = 1.0 / 255.0
 
     def __init__(self, controller, logger):
         self.controller = controller
@@ -278,7 +280,9 @@ class GestureOverlay:
         panel.setLevel_(AppKit.NSStatusWindowLevel)
         panel.setOpaque_(False)
         panel.setHasShadow_(False)
-        panel.setBackgroundColor_(AppKit.NSColor.colorWithCalibratedWhite_alpha_(0.0, 0.02))
+        # The faintest fill there is, one step in 255: a clear window lets events through to the app
+        # beneath, and 0.02 darkened a 400-point square round the pointer enough to read as a grey box.
+        panel.setBackgroundColor_(AppKit.NSColor.colorWithCalibratedWhite_alpha_(0.0, self.PANEL_ALPHA))
         panel.setIgnoresMouseEvents_(False)
         panel.setCollectionBehavior_(AppKit.NSWindowCollectionBehaviorCanJoinAllSpaces)
         view = _GestureCaptureView.alloc().initWithFrame_(
@@ -1640,7 +1644,7 @@ class ControlWindow(AppKit.NSObject):
             self.edge_select.view.setAccessibilityLabel_(caption)
         self.edge_note.set(pages.notch_or_corner_note(label))
         chosen = self.chosen_peer
-        offer = core_ways.share_offer(settings, chosen) if chosen else None
+        offer = core_ways.share_offer(settings, chosen, self._live) if chosen else None
         holders = [self._shown(peerlist.label_for(peers, peer_id=peer) or peerlist.UNNAMED)
                    for peer in offer["holders"]] if offer else []
         identity = (offer["side"], tuple(offer["holders"]), tuple(offer["thirds"].items())) if offer else None
@@ -1661,7 +1665,8 @@ class ControlWindow(AppKit.NSObject):
                 tile.value = owner == chosen
             self.share_button.set_enabled(chosen in self.share_thirds.values())
         for note, sentence in (
-                (self.blocked_note, core_ways.blocked_sentence(settings, chosen, "this Mac") if chosen and not offer else ""),
+                (self.blocked_note, (core_ways.blocked_sentence(settings, chosen, "this Mac", self._live) if chosen and not offer else "")
+                 or (core_ways.gone_sentence(settings, chosen, "this Mac", self._gone) if chosen else "")),
                 (self.missing_note, core_ways.missing_sentence(settings, chosen, "this Mac") if chosen else ""),
                 (self.no_way_back_note, core_ways.no_way_back_sentence(settings, chosen) if chosen else "")):
             note.set(self._shown(sentence))
@@ -1796,6 +1801,48 @@ class ControlWindow(AppKit.NSObject):
         """What the window calls the machine its status is about: where input is, else the first."""
         controller = self.controller
         return controller.on_label or controller.peer_label or link_state.peer_name(controller.cfg)
+
+    @objc.python_method
+    def _live(self, peer):
+        """Whether `peer` has a link up now, either way. One that has none gives way on the Crossing
+        page and to an arrangement (core/ways.py give_way)."""
+        link = self.controller._peers_up.get(peer)
+        return (link is not None and link.live()) or peer in self.inbound_ids()
+
+    @objc.python_method
+    def _gone(self, peer):
+        """Whether `peer` has removed this pairing: the link this Mac dials to it was closed unanswered
+        for a minute (core/link.py). Its zones set aside by `give_way` then stay off for good."""
+        entry = next((item for item in self.settings_store.current()["peers"] if item.get("id") == peer), None)
+        link = self.controller.links.get(entry["token"]) if entry else None
+        return link is not None and link.kind == "forgotten"
+
+    @objc.python_method
+    def settle_presence(self):
+        """Puts back the zones set aside for a machine that has connected since, and keeps off for good,
+        and says so, those of one that has removed this pairing (core/ways.py settle_presence). Run on
+        every status tick, whether or not the window is shown."""
+        if not core_ways.presence_due(self.settings_store.current(), self._live, self._gone):
+            return
+        self._flush()
+        before = core_ways.way_back_state(self.settings_store.current())
+        try:
+            changed, notices = self.settings_store.settle_presence(self._live, self._gone)
+            cfg = self.settings_store.load() if changed else None
+        except SettingsError:
+            self.logger.exception("could not settle the zones set aside")
+            return
+        if not changed:
+            return
+        self.controller.cfg = cfg
+        self.controller.zones_changed()
+        for notice in notices:
+            self.controller._alert("Beamer", notice)
+        self._load(config_to_raw(cfg))
+        self.refresh()
+        for target, state in core_ways.way_back_state(self.settings_store.current()).items():
+            if before.get(target) != state:
+                self._tell(target)
 
     @objc.python_method
     def inbound_ids(self):
@@ -3426,7 +3473,7 @@ class ControlWindow(AppKit.NSObject):
         side = self.edge_select.value or ""
         methods = [name for name in core_ways.KIND_WORDS if self.method_boxes[name].value]
         parts = [name for name, tile in self.part_boxes.items() if tile.value] or ["middle"]
-        offer = core_ways.share_offer(current, peer)
+        offer = core_ways.share_offer(current, peer, self._live)
         occupied = {part for part, owner in offer["thirds"].items() if owner in offer["holders"]} if offer else set()
         if offer and side == offer["side"] and (
                 "edge" in methods or "part" in methods and occupied.intersection(parts)):
@@ -3439,7 +3486,7 @@ class ControlWindow(AppKit.NSObject):
         try:
             moved = self.settings_store.set_ways(
                 peer, side=side, corner=self.corner_select.value,
-                methods=methods, parts=parts)
+                methods=methods, parts=parts, live=self._live)
             cfg = self.settings_store.load()
         except SettingsError as exc:
             self._say(str(exc), "fault")
@@ -3488,7 +3535,8 @@ class ControlWindow(AppKit.NSObject):
         self._flush()
         before = core_ways.way_back_state(self.settings_store.current())
         try:
-            changed, notices = self.settings_store.arrangement(peer, edge, set_at, by, way_back, way_back_by)
+            changed, notices = self.settings_store.arrangement(peer, edge, set_at, by, way_back, way_back_by,
+                                                               live=self._live)
             cfg = self.settings_store.load() if changed else None
         except (SettingsError, TypeError, ValueError):
             self.logger.exception("could not save the arrangement %s sent", peer)
@@ -3919,6 +3967,7 @@ class TrayApp(rumps.App):
 
     def refresh_status(self, _timer):
         self.windows_input.sync(self.controller.cfg)
+        self.control_window.settle_presence()
         self.measure_notch()
         if self.control_window.window.isVisible():
             self.control_window.refresh()
@@ -4117,6 +4166,10 @@ class TrayApp(rumps.App):
 
     def _crossing_feedback_main(self, kind, step):
         try:
+            if kind in ("home", "arrive"):
+                # Input is home: the gesture panel goes now, not on the next status tick up to 0.4 s
+                # later, when it would still sit over the landing animation and take the first click.
+                self.gesture_overlay.sync()
             if kind == "home":
                 self._show_landing(step.pin[0], step.pin[1])
                 return
@@ -4258,6 +4311,7 @@ def main(argv=None):
     AppKit.NSApplication.sharedApplication()
     theme.init_fonts()
     logger = configure_logging()
+    crash_log.install(LOG_DIRECTORY, logger)
     # Which faces actually carried the window: the only way to tell the bundled copies failed to
     # register is to say what was used instead.
     logger.info("type: %s / %s", theme.sans(), theme.mono())

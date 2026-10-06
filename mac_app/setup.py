@@ -77,7 +77,7 @@ setup(
             # the scan misses cannot drop out; naming the package whole would ship its tests too.
             "includes": [
                 "objc", "AppKit", "ApplicationServices", "Quartz", "UserNotifications",
-                "core.effects", "core.ignored", "core.keytable", "core.link", "core.owner", "core.pairing",
+                "core.crash_log", "core.effects", "core.ignored", "core.keytable", "core.link", "core.owner", "core.pairing",
                 "core.peerlist", "core.protocol", "core.receiver", "core.return_edge", "core.settings_sync",
                 "core.updates", "core.wol",
                 "core.fx_ink", "core.fx_instrument", "core.fx_membrane", "core.fx_sparks", "core.fx_warp",
