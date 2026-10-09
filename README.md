@@ -45,6 +45,10 @@ Free, with no account. Mac and Windows downloads, and an experimental Linux Flat
 That is all most people need. The edge, the keys and everything else can be changed in each
 machine's settings.
 
+On macOS, turn off **Show Beamer in the Dock** on Overview to keep Beamer in the menu bar
+only. The choice takes effect immediately and is remembered after relaunch. Click the menu bar
+icon to open settings, or right-click it for the menu, including Quit.
+
 ## Screenshots
 
 In your own appearance: light if your GitHub is light, dark if it is dark.

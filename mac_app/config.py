@@ -75,6 +75,8 @@ class Config:
     allow_windows_to_drive: bool = True
     # Ask GitHub once a day whether a newer release is out; see updates.py.
     check_updates: bool = True
+    # Local macOS preference; accessory mode keeps the menu bar and settings available.
+    show_in_dock: bool = True
     # Every address the window shows is hidden; see pages.redact.
     hide_addresses: bool = False
     # Same on all machines: the Crossing and Design pages kept in step with the PC's, and the unix
@@ -175,6 +177,7 @@ def parse_config(raw: dict) -> Config:
         send_to_windows=raw.get("send_to_windows", True) is not False,
         allow_windows_to_drive=raw.get("allow_windows_to_drive", True) is not False,
         check_updates=raw.get("check_updates", True) is not False,
+        show_in_dock=raw.get("show_in_dock", True) is not False,
         hide_addresses=raw.get("hide_addresses", False) is True,
         same_on_both=raw.get("same_on_both", False) is True,
         same_set_at=_stamp(raw.get("same_set_at", 0)),
