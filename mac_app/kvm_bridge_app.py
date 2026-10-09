@@ -1419,6 +1419,8 @@ class ControlWindow(AppKit.NSObject):
         self.appearance_select.value = raw["appearance"]
         self._apply_appearance(raw["appearance"])
         self.updates_switch.value = raw["check_updates"]
+        self.dock_switch.value = raw["show_in_dock"]
+        self._apply_dock_visibility()
         self.modifier_select.value = raw["key_map"] if isinstance(raw["key_map"], str) else "custom"
         crossing_raw = raw["crossing"]
         self._load_ways(crossing_raw)
@@ -2288,13 +2290,38 @@ class ControlWindow(AppKit.NSObject):
     @objc.python_method
     def _login_module(self):
         module = widgets.Module()
-        module.add(widgets.eyebrow("At login"))
+        module.add(widgets.eyebrow("Startup and Dock"))
         self.login_switch = widgets.Switch("Start Beamer when you log in", on_change=self._set_login)
         module.add(self.login_switch.view)
         self.login_note = widgets.note()
         module.add(self.login_note.view)
         self._show_login_state()
+        self.dock_switch = widgets.Switch("Show Beamer in the Dock", on_change=self._set_show_in_dock)
+        self.dock_switch.value = self.controller.cfg.show_in_dock
+        module.add(self.dock_switch.view)
+        module.add(widgets.note(
+            "Turn off to keep Beamer in the menu bar only, without a Dock or Command-Tab icon. "
+            "Click the menu bar icon to open settings; right-click it to quit."
+        ).view)
         return module
+
+    @objc.python_method
+    def _apply_dock_visibility(self):
+        policy = (AppKit.NSApplicationActivationPolicyRegular if self.controller.cfg.show_in_dock
+                  else AppKit.NSApplicationActivationPolicyAccessory)
+        AppKit.NSApp.setActivationPolicy_(policy)
+
+    @objc.python_method
+    def _set_show_in_dock(self, on):
+        try:
+            cfg = self.settings_store.save(config_to_raw(replace(self.controller.cfg, show_in_dock=bool(on))))
+        except SettingsError as exc:
+            self.logger.warning("Dock visibility not saved: %s", exc)
+            self.dock_switch.value = self.controller.cfg.show_in_dock
+            return
+        self.controller.update_config(cfg)
+        self._apply_dock_visibility()
+        self.show()
 
     @objc.python_method
     def _updates_module(self):
@@ -3794,6 +3821,7 @@ class _LaunchWatch(AppKit.NSObject):
         return self
 
     def launched_(self, note):
+        self.tray.control_window._apply_dock_visibility()
         self.tray.notices.ask()
         info = note.userInfo() or {}
         default = info.get("NSApplicationLaunchIsDefaultLaunchKey")
