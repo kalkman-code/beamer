@@ -35,7 +35,8 @@ Runner = Callable[[list], "subprocess.CompletedProcess"]
 
 
 def _run(args: list) -> subprocess.CompletedProcess:
-    return subprocess.run(args, capture_output=True, text=True, creationflags=CREATE_NO_WINDOW)
+    # schtasks/netsh use the Windows OEM code page without a console, not Python's ANSI default.
+    return subprocess.run(args, capture_output=True, text=True, encoding="oem", creationflags=CREATE_NO_WINDOW)
 
 
 def _process_user() -> str:

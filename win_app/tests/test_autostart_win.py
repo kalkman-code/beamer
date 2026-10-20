@@ -1,4 +1,5 @@
 import subprocess
+import sys
 import unittest
 import xml.etree.ElementTree as ET
 from pathlib import Path
@@ -8,6 +9,29 @@ import autostart_win
 
 NS = {"t": "http://schemas.microsoft.com/windows/2004/02/mit/task"}
 EXE = r"C:\Users\alex\AppData\Local\Beamer\Beamer.exe"
+
+
+@unittest.skipUnless(sys.platform == "win32", "Windows OEM subprocess encoding")
+class CommandEncodingTests(unittest.TestCase):
+    def test_task_xml_preserves_accented_account_with_no_console(self):
+        user = "STUDIO-PC\\\u00c9lodie"
+        xml = autostart_win.task_xml(EXE, user)
+        command = [sys.executable, "-c",
+                   "import sys; sys.stdout.buffer.write(" + repr(xml.encode("oem")) + ")"]
+        result = autostart_win._run(command)
+        self.assertEqual(result.returncode, 0)
+        self.assertIsNotNone(result.stdout)
+        root = ET.fromstring(result.stdout.lstrip("\ufeff"))
+        self.assertEqual(root.findtext("t:Principals/t:Principal/t:UserId", namespaces=NS), user)
+
+    def test_localised_failure_message_preserves_accents(self):
+        message = "\u00c9chec de la commande"
+        command = [sys.executable, "-c",
+                   "import sys; sys.stderr.buffer.write(" + repr(message.encode("oem"))
+                   + "); sys.exit(1)"]
+        result = autostart_win._run(command)
+        self.assertEqual(result.returncode, 1)
+        self.assertEqual(result.stderr, message)
 
 
 class FakeSchtasks:
