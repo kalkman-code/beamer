@@ -167,6 +167,87 @@ class SingleInstanceTests(unittest.TestCase):
         finally:
             server.close()
 
+    def test_control_command_answers_with_one_json_line_and_does_not_activate(self):
+        name = str(Path(__file__).resolve().parents[1] / f"c{os.getpid()}")
+        activated = []
+        server = kvm_bridge_win.InstanceSignal(
+            lambda token: activated.append(token), name=name, commands={"status": lambda: {"paused": True}}
+        )
+        try:
+            self.assertTrue(server.listening)
+            # Another process for the same reason as the second-launch test above.
+            code = (
+                "import json, sys\n"
+                "from PySide6.QtCore import QCoreApplication\n"
+                "from PySide6.QtNetwork import QLocalSocket\n"
+                "app = QCoreApplication([])\n"
+                "socket = QLocalSocket()\n"
+                "socket.connectToServer(sys.argv[1])\n"
+                "assert socket.waitForConnected(3000)\n"
+                "socket.write(b'{\"command\": \"status\"}\\n')\n"
+                "socket.waitForBytesWritten(3000)\n"
+                "while not socket.canReadLine() and socket.waitForReadyRead(3000):\n"
+                "    pass\n"
+                "reply = json.loads(bytes(socket.readLine()).decode('utf-8'))\n"
+                "sys.exit(0 if reply == {'ok': True, 'paused': True} else 1)\n"
+            )
+            client = subprocess.Popen(
+                [sys.executable, "-c", code, name], cwd=os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+            )
+            try:
+                deadline = time.monotonic() + 30
+                while client.poll() is None and time.monotonic() < deadline:
+                    self.app.processEvents()
+                    time.sleep(0.01)
+                self.assertEqual(client.poll(), 0)
+            finally:
+                if client.poll() is None:
+                    client.kill()
+                client.wait()
+            self.assertEqual(activated, [])
+        finally:
+            server.close()
+
+    def test_control_command_unknown_or_failing_answers_not_ok(self):
+        def broken():
+            raise RuntimeError("no sender")
+
+        server = kvm_bridge_win.InstanceSignal.__new__(kvm_bridge_win.InstanceSignal)
+        server.commands = {"status": lambda: {"paused": False}, "broken": broken}
+        self.assertEqual(server._run("status"), {"ok": True, "paused": False})
+        unknown = server._run("explode")
+        self.assertFalse(unknown["ok"])
+        self.assertEqual(unknown["commands"], ["broken", "status"])
+        self.assertFalse(server._run(["status"])["ok"])
+        with self.assertLogs(kvm_bridge_win.LOGGER, level="ERROR"):
+            self.assertEqual(server._run("broken"), {"ok": False, "error": "no sender"})
+
+    def test_control_pause_come_home_and_centre_drive_the_sender(self):
+        from core.return_edge import Rect
+
+        App = kvm_bridge_win.WindowsApplication
+        sender = mock.Mock(crossing_paused=False, redirecting=True, owner=b"laptop")
+        app = mock.Mock(sender=sender, _label_of=lambda peer: "Laptop" if peer else "")
+        app.toggle_pause.side_effect = lambda: setattr(sender, "crossing_paused", not sender.crossing_paused)
+        app.control_status.side_effect = lambda: App.control_status(app)
+
+        App._control_set_paused(app, True)
+        App._control_set_paused(app, True)
+        self.assertEqual(app.toggle_pause.call_count, 1)
+        self.assertEqual(App.control_status(app)["paused"], True)
+        self.assertEqual(App.control_status(app)["on"], "Laptop")
+
+        with mock.patch.object(kvm_bridge_win.QTimer, "singleShot") as later:
+            App.control_center_home(app)
+        sender.set_redirecting.assert_called_with(False)
+        later.assert_called_once_with(kvm_bridge_win.CENTER_HOME_DELAY_MS, app._center_pointer)
+
+        desktop = mock.Mock()
+        desktop.monitors.return_value = [Rect(-1920, 0, 1920, 1080), Rect(0, 0, 2560, 1440)]
+        with mock.patch.object(kvm_bridge_win.platform_parts, "desktop", desktop):
+            App._center_pointer(app)
+        desktop.set_cursor_position.assert_called_once_with(1280, 720)
+
     def test_closing_without_a_tray_quits_instead_of_hiding(self):
         class Window(QWidget):
             closeEvent = kvm_bridge_win.WindowsApplication.closeEvent
