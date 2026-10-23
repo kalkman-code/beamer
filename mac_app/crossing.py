@@ -43,6 +43,9 @@ DEFAULT_CROSSING = {
     "block_while_dragging": True,
     # A full-screen app in front holds this Mac's edges. This Mac's own choice, never shared.
     "hold_full_screen": False,
+    # Play the crossing effect when the pointer slides between this Mac's own displays. This Mac's
+    # own choice, never shared.
+    "local_displays": False,
     # "Part of the edge": the thirds of `edge` that cross, as return_edge.PARTS names them.
     "edge_parts": ["middle"],
     # A switch by the shortcut or a menu, not a crossing, plays an arrival around the pointer.
