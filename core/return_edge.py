@@ -446,3 +446,44 @@ class CornerPush(ReturnEdge):
             not any(_contains(m, beyond) for m in monitors)
             for beyond in ((x + (-1 if self.horizontal == "left" else 1), y), (x, y + (-1 if self.vertical == "top" else 1)))
         )
+
+
+class SeamEdge(ReturnEdge):
+    """One display's side of a seam with another of this PC's displays. Only while the pointer is on
+    its own display: once a push has carried it over, the next display is where it is, not a wall."""
+
+    def _at_edge(self, monitors: List[Rect], pointer: Tuple[int, int], display_map=None) -> bool:
+        home = display_map.get(self.display) if isinstance(display_map, dict) else None
+        return isinstance(home, Rect) and _contains(home, pointer) and super()._at_edge(monitors, pointer, display_map)
+
+
+def local_seams(monitors: List[Rect], resistance_px: int = DEFAULT_RESISTANCE_PX,
+                clock: Callable[[], float] = time.monotonic) -> List[ReturnEdge]:
+    """A model for each stretch where two of this PC's own displays touch, so a push from one to the
+    other meets the same resistance a way out to a peer does. Displays are named by their index as
+    text, as `desktop.display_map` names them; the far end of each model is the neighbouring display,
+    at the same height or column the pointer left from."""
+    models = []
+    for i, a in enumerate(monitors):
+        for j, b in enumerate(monitors):
+            if i == j:
+                continue
+            for edge in EDGES:
+                gap = {"right": b.x - a.right, "left": a.x - b.right,
+                       "bottom": b.y - a.bottom, "top": a.y - b.bottom}[edge]
+                if gap != 1:
+                    continue
+                vertical = edge in ("left", "right")
+                low = max(a.y, b.y) if vertical else max(a.x, b.x)
+                high = min(a.bottom, b.bottom) if vertical else min(a.right, b.right)
+                if low >= high:
+                    continue
+                a_start, a_length = (a.y, a.height) if vertical else (a.x, a.width)
+                b_start, b_length = (b.y, b.height) if vertical else (b.x, b.width)
+                models.append(SeamEdge(
+                    edge, resistance_px, clock, display=str(i), target_display=str(j),
+                    target_side=OPPOSITE[edge],
+                    contact_span=((low - a_start) / a_length, (high + 1 - a_start) / a_length),
+                    target_span=((low - b_start) / b_length, (high + 1 - b_start) / b_length),
+                ))
+    return models

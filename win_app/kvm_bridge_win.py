@@ -316,7 +316,9 @@ class StatusBridge(QObject):
 
     changed = Signal(object, str)
     # The fourth names which third of the edge a Part of the edge push is in, else None.
-    pressure = Signal(str, float, bool, object)
+    # (edge, pressure, crossed, part, at): `at` is where this PC's own pointer pushed, in desktop
+    # pixels, or None to read the cursor when the effect is drawn.
+    pressure = Signal(str, float, bool, object, object)
     local_pressure = Signal(str, float, bool, object)
     # (method, edge, x, y): the pointer landed on this PC at desktop pixel (x, y).
     arrived = Signal(str, str, float, float)
@@ -625,7 +627,7 @@ class WindowsApplication(QWidget):
             self.book,
             self._identity,
             status_callback=self._set_status,
-            pressure_callback=lambda edge, pressure, crossed, part=None: self.bridge.pressure.emit(edge, pressure, crossed, part),
+            pressure_callback=lambda edge, pressure, crossed, part=None: self.bridge.pressure.emit(edge, pressure, crossed, part, None),
             arrival_callback=lambda edge, x, y: self.bridge.arrived.emit(
                 arrival_method(edge, self._driver_platform()), edge or "", float(x), float(y)
             ),
@@ -2717,7 +2719,27 @@ class WindowsApplication(QWidget):
         self.dragging_switch.toggled.connect(self._set_block_while_dragging)
         module.body.addWidget(self.dragging_switch)
         module.body.addWidget(widgets.label(note, "note", wrap=True))
+        self.local_crossing_switch = widgets.Switch(tr("Cross between this PC's own displays"))
+        self.local_crossing_switch.setFont(theme.font(theme.TYPE["body"]))
+        self.local_crossing_switch.setChecked(current.local_crossing)
+        self.local_crossing_switch.toggled.connect(self._set_local_crossing)
+        module.body.addWidget(self.local_crossing_switch)
+        self.local_crossing_note = widgets.label("", "note", wrap=True)
+        module.body.addWidget(self.local_crossing_note)
+        # Windows holds the seams in its mouse hook and X11 with XFixes barriers; under Wayland only
+        # the compositor can hold the pointer, and it offers no barrier between two displays.
+        self.local_crossing_switch.setVisible(not platform_parts.WAYLAND)
+        self.local_crossing_note.setVisible(not platform_parts.WAYLAND)
+        self._reflect_local_displays()
         return module
+
+    def _reflect_local_displays(self) -> None:
+        """The local crossing switch is offered only while this PC has two displays or more."""
+        count = len(QApplication.instance().screens())
+        self.local_crossing_switch.setEnabled(count >= 2)
+        self.local_crossing_note.setText(
+            tr("Pushing from one display to the next meets the crossing resistance and plays the chosen effect.")
+            if count >= 2 else tr("Needs two displays or more; this PC has {count}.").format(count=count))
 
     # -- the machine the Crossing page shows --
 
@@ -2864,6 +2886,8 @@ class WindowsApplication(QWidget):
 
     def _displays_changed(self) -> None:
         self._refresh_own_displays()
+        if hasattr(self, "local_crossing_switch"):
+            self._reflect_local_displays()
         self._reconcile_displays()
 
     def _reconcile_displays(self) -> None:
@@ -3212,6 +3236,14 @@ class WindowsApplication(QWidget):
     def _hiding_pointer(self) -> bool:
         return self._idle_pointer is not None and (self._config is None or self._config.hide_idle_pointer)
 
+    def _set_local_crossing(self, enabled: bool) -> None:
+        if self._config is None:
+            return
+        self._config.local_crossing = bool(enabled)
+        self._persist()
+        self.sender.update_config(self._config)
+        self._sync_sending()
+
     def _set_block_while_dragging(self, enabled: bool) -> None:
         if self._config is None:
             return
@@ -3324,7 +3356,14 @@ class WindowsApplication(QWidget):
             self.resistance_pressure_timer.stop()
 
     def _relay_sender_pressure(self, edge: str, pressure: float, crossed: bool, part=None) -> None:
-        self.bridge.pressure.emit(edge, pressure, crossed, part)
+        # Read here, on the sender's thread and before a crossing between this PC's own displays
+        # moves the pointer on: read when the effect is drawn, it is already on the next display,
+        # and the edge would light there.
+        try:
+            at = platform_parts.desktop.cursor_position()
+        except Exception:
+            at = None
+        self.bridge.pressure.emit(edge, pressure, crossed, part, at)
         self.bridge.local_pressure.emit(edge, pressure, crossed, part)
 
     def _refresh_local_pressure(self) -> None:
@@ -4160,6 +4199,11 @@ class WindowsApplication(QWidget):
         shortcut_goes_to = self._config.shortcut_goes_to if self._config else "last"
         self.machines.set_peers(self._peer_items(peers), same_on=group_on, cycle_mode=shortcut_goes_to)
 
+    def _wants_hooks(self) -> bool:
+        """Whether the input hooks run: while some machine can be sent to, and for crossing between
+        this PC's own displays, which needs no other machine at all."""
+        return self._any_send() or bool(self._config is not None and self._config.local_crossing)
+
     def _any_send(self) -> bool:
         return any(entry.get("in_use", True) is True and entry.get("send") and protocol.linkable(entry)
                    for entry in peerlist.desktops(self._peer_entries))
@@ -4414,7 +4458,7 @@ class WindowsApplication(QWidget):
         """The links and the hooks that feed them run while some machine can be sent to, whatever changed the list."""
         if self._config is None:
             return
-        if self._any_send():
+        if self._wants_hooks():
             self._start_sending(self._config)
         else:
             self.sender.set_redirecting(False)
@@ -4821,7 +4865,7 @@ class WindowsApplication(QWidget):
         if callable(configure_seams):
             configure_seams(config)
         self._refresh_peers()
-        if self._any_send():
+        if self._wants_hooks():
             self._start_sending(config)
         else:
             self._stop_sending()
@@ -4833,7 +4877,7 @@ class WindowsApplication(QWidget):
             return
         try:
             configure(self.sender._cached_monitors, config.crossing_resistance_px,
-                      display_map=self.sender._cached_display_map, models=self.sender.zone_models)
+                      display_map=self.sender._cached_display_map, models=self.sender.seam_models)
         except Exception:
             LOGGER.exception("Could not configure X11 display seam holds")
 
@@ -5060,7 +5104,7 @@ class WindowsApplication(QWidget):
     def _reflect_config(self, config: Config) -> None:
         """Every control on every page set from `config`, without any of them saving back."""
         set_divisor(effects.frame_divisor(config.frame_rate))
-        for box in ( self.dragging_switch, self.hold_switch, self.glow_toggle,
+        for box in ( self.dragging_switch, self.local_crossing_switch, self.hold_switch, self.glow_toggle,
                     self.landing_toggle, self.tray_switch, self.pointer_switch,
                     self.resistance_slider, self.double_tap_slider):
             box.blockSignals(True)
@@ -5069,6 +5113,7 @@ class WindowsApplication(QWidget):
             self.tray.setVisible(self.tray_shown())
             self.pointer_switch.setChecked(config.hide_idle_pointer)
             self.dragging_switch.setChecked(config.block_while_dragging)
+            self.local_crossing_switch.setChecked(config.local_crossing)
             self.hold_switch.setChecked(config.hold_full_screen)
             self.glow_toggle.setChecked(config.edge_glow)
             self.landing_toggle.setChecked(config.shortcut_arrival)
@@ -5076,7 +5121,7 @@ class WindowsApplication(QWidget):
             self.resistance_slider.setValue(config.crossing_resistance_px)
             self.double_tap_slider.setValue(config.double_tap_ms)
         finally:
-            for box in ( self.dragging_switch, self.hold_switch, self.glow_toggle,
+            for box in ( self.dragging_switch, self.local_crossing_switch, self.hold_switch, self.glow_toggle,
                         self.landing_toggle, self.tray_switch, self.pointer_switch,
                         self.resistance_slider, self.double_tap_slider):
                 box.blockSignals(False)
@@ -5145,6 +5190,9 @@ class WindowsApplication(QWidget):
             start_injector = getattr(platform_parts.injector, "start", None)
             if start_injector is not None:
                 start_injector()
+        elif self._config is not None and self._config.local_crossing:
+            # Crossing between this PC's own displays needs the hooks even with nothing paired.
+            self._start_sending(self._config)
         # After the rules, so the firewall module reads what start() just wrote, and with no config
         # the receiver never starts, so nothing else would ever read it.
         self._check_firewall()
@@ -5180,7 +5228,7 @@ class WindowsApplication(QWidget):
         them."""
         if getattr(self, "_input_controller_blocked", False):
             return
-        if not self._any_send():
+        if not self._wants_hooks():
             return
         self._configure_trigger(config)
         self._configure_shake()
@@ -5525,7 +5573,7 @@ class WindowsApplication(QWidget):
             return None
         return self.effects
 
-    def _on_pressure(self, edge: str, pressure: float, crossed: bool, part=None) -> None:
+    def _on_pressure(self, edge: str, pressure: float, crossed: bool, part=None, at=None) -> None:
         if (self._closing or self._config is None or not self._config.edge_glow
                 or (platform_parts.WAYLAND and not os.environ.get("DISPLAY"))):
             return
@@ -5541,7 +5589,10 @@ class WindowsApplication(QWidget):
                 else:
                     overlay.push(edge, pressure, crossed, cursor=point, part=part)
             else:
-                overlay.push(edge, pressure, crossed, part=part)
+                if at is None:
+                    overlay.push(edge, pressure, crossed, part=part)
+                else:
+                    overlay.push(edge, pressure, crossed, cursor=logical_point(*at), part=part)
             return
         style = self._config.glow_style
         if self.glow is None:
@@ -5559,7 +5610,10 @@ class WindowsApplication(QWidget):
             self.glow.configure(glow_style, self._config.glow_colour,
                                  self._config.effect_length, self._config.effect_size,
                                  self._config.effect_pace, self._config.effect_size_fraction)
-        self.glow.set_pressure(edge, pressure, crossed, part)
+        if at is None or isinstance(self.glow, EffectOverlayX11Proxy):
+            self.glow.set_pressure(edge, pressure, crossed, part)
+        else:
+            self.glow.set_pressure(edge, pressure, crossed, part, cursor=logical_point(*at))
 
     def _on_arrival(self, method: str, edge: str, x: float, y: float) -> None:
         """A crossing landed the pointer on `edge`, or with method "switch" input came here by a

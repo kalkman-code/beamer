@@ -163,6 +163,9 @@ class Config:
     modifier_style: str = "semantic"
     # A push against the edge with a button held is a drag, not a crossing, as on the Mac.
     block_while_dragging: bool = True
+    # A push between two of this PC's own displays meets the crossing resistance and plays its
+    # effects, as a way out to a peer does. This PC's own choice, never shared.
+    local_crossing: bool = False
     # A full-screen app in front holds this PC's edges. This PC's own choice, never shared.
     hold_full_screen: bool = False
     # The tray icon, one key on all three apps (the Mac's is the menu bar item). This machine's own
@@ -270,6 +273,8 @@ def validate_config(config: Config) -> None:
         raise ConfigError(f"modifier_style must be one of: {', '.join(MODIFIER_STYLES)}")
     if not isinstance(config.block_while_dragging, bool):
         raise ConfigError("block_while_dragging must be true or false")
+    if not isinstance(config.local_crossing, bool):
+        raise ConfigError("local_crossing must be true or false")
     if not isinstance(config.language, str) or (config.language != "auto" and config.language not in i18n.LANGUAGES):
         raise ConfigError("language must be auto or a supported language code")
     if not isinstance(config.hold_full_screen, bool):
@@ -427,6 +432,7 @@ def config_from_dict(raw: dict) -> Config:
             double_tap_ms=int(raw.get("double_tap_ms", 300)),
             modifier_style=raw.get("modifier_style", "semantic"),
             block_while_dragging=raw.get("block_while_dragging", True),
+            local_crossing=raw.get("local_crossing", False),
             hold_full_screen=raw.get("hold_full_screen", False),
             show_in_tray=raw.get("show_in_tray", True),
             hide_idle_pointer=raw.get("hide_idle_pointer", True),
@@ -513,6 +519,7 @@ def config_to_dict(config: Config) -> dict:
         "double_tap_ms": int(config.double_tap_ms),
         "modifier_style": config.modifier_style,
         "block_while_dragging": config.block_while_dragging,
+        "local_crossing": config.local_crossing,
         "hold_full_screen": config.hold_full_screen,
         "show_in_tray": config.show_in_tray,
         "hide_idle_pointer": config.hide_idle_pointer,
