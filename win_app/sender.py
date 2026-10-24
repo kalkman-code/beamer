@@ -35,6 +35,7 @@ from core import protocol
 from core import special_keys
 from core import receiver
 from core import return_edge
+from core.escape_home import EscapeTaps
 from core.shake import HomeHold, ShakeDetector
 from core import ways
 from core import wol
@@ -195,6 +196,8 @@ class LinkSender:
         self._shake_callback = None
         self._home_hold = None
         self._shake_home_pending = False
+        self._escape_taps = None
+        self._escape_callback = None
         self._pin_point = None
         self._monitors = None
         self._display_map = {}
@@ -556,6 +559,7 @@ class LinkSender:
             self._input_method_tap_releases.add(held)
             return True
         held = vk if vk is not None else name
+        fresh = down and held not in self._keys_down
         if down:
             data = self._keys_down.get(held) or self._key_data(name, us)
             self._keys_down[held] = data
@@ -575,6 +579,8 @@ class LinkSender:
                 return False
             if self._ignore_gate.keeps(ignored.key(vk) if vk is not None else f"key:{name}", down):
                 return False
+            if fresh and self._escape_home(held, vk == 0x1B or name == "esc"):
+                return True
         elif not down:
             self._ignore_gate.keeps(ignored.key(vk) if vk is not None else f"key:{name}", False)
         target = self._peers.get(owner.on) or {}
@@ -782,6 +788,30 @@ class LinkSender:
             now = self._clock()
             self._shake_detector.arm(now)
             self._shake_detector.held(now, bool(self._buttons_held or self._keys_down))
+
+    def set_escape_home(self, enabled: bool, on_escape=None) -> None:
+        """Configure the triple-Escape return; off until the app opts in."""
+        self._escape_taps = EscapeTaps() if enabled else None
+        self._escape_callback = on_escape
+
+    def _escape_home(self, held, escape: bool) -> bool:
+        """A fresh press while away: True when it was the third Escape in a row, which brings input
+        home here and is not sent. The first two have already gone to the machine being driven."""
+        taps = self._escape_taps
+        if taps is None:
+            return False
+        if not escape:
+            taps.reset()
+            return False
+        if not taps.press(self._clock()):
+            return False
+        peer = self.owner
+        # Its release arrives at home, where nothing waits for it.
+        self._keys_down.pop(held, None)
+        self.set_redirecting(False)
+        if self._escape_callback is not None and peer is not None:
+            self._call(self._escape_callback, peer)
+        return True
 
     def _consume_shake_home(self) -> bool:
         """One-shot reason flag used by Wayland's capture release after a shake."""
