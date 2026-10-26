@@ -31,7 +31,7 @@ from win_app.tests.test_settings_layout_acceptance import SyntheticWindow
 # the test shows its own name as this machine's.
 ALLOWED_TEXT = {
     "Beamer",
-    "English", "Italiano",
+    *i18n.LANGUAGES.values(),
     "Synthetic workstation",
     socket.gethostname(), socket.gethostname().split(".", 1)[0],
     "Right Ctrl",
@@ -43,6 +43,7 @@ ALLOWED_TEXT = {
 
 class LocalisedPages(unittest.TestCase):
     maxDiff = None
+    LANGUAGE = "qps"
 
     @classmethod
     def setUpClass(cls):
@@ -51,7 +52,7 @@ class LocalisedPages(unittest.TestCase):
         cls.app.setFont(theme.font(theme.TYPE["body"]))
 
     def setUp(self):
-        os.environ["BEAMER_LANGUAGE"] = "qps"
+        os.environ["BEAMER_LANGUAGE"] = self.LANGUAGE
         i18n.install("auto")
         self.folder = tempfile.TemporaryDirectory(prefix="beamer-i18n-")
         settings = app_config.migrate(None, machine_id=protocol.id_text(responder_harness.HERE))
@@ -166,6 +167,30 @@ class LocalisedPages(unittest.TestCase):
                     if first.parentWidget() is second.parentWidget():
                         with self.subTest(page=key, first=first.text(), second=second.text()):
                             self.assertFalse(first.geometry().intersects(second.geometry()))
+
+
+class RussianLayout(unittest.TestCase):
+    LANGUAGE = "ru"
+    setUpClass = classmethod(LocalisedPages.setUpClass.__func__)
+    setUp = LocalisedPages.setUp
+    tearDown = LocalisedPages.tearDown
+    settle = LocalisedPages.settle
+
+    def test_all_russian_pages_and_pairing_fit(self):
+        for key in self.window._page_indexes:
+            self.window._select_page(key)
+            self.settle()
+            if key == "overview":
+                self.window._toggle_pairing_sheet()
+                self.settle()
+            for label in self.window.findChildren(QLabel):
+                if not label.isVisible() or not label.text().strip():
+                    continue
+                with self.subTest(page=key, text=label.text()):
+                    if label.wordWrap():
+                        self.assertGreaterEqual(label.height(), label.heightForWidth(label.width()))
+                    else:
+                        self.assertLessEqual(label.fontMetrics().horizontalAdvance(label.text()), label.width())
 
 
 if __name__ == "__main__":

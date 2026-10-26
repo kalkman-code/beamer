@@ -425,8 +425,9 @@ MSG_ACCEPT = "accept"
 MSG_REFUSE = "refuse"
 MSG_ACCEPTS = "accepts"
 MSG_PAIRED = "paired"
+MSG_INPUT_LANGUAGE = "input_language"
 MSG_TEXT = "text"
-INPUT_TYPES = frozenset({MSG_KEYDOWN, MSG_KEYUP, MSG_MOUSEMOVE, MSG_MOUSEDOWN, MSG_MOUSEUP, MSG_SCROLL, MSG_GESTURE, MSG_TEXT})
+INPUT_TYPES = frozenset({MSG_KEYDOWN, MSG_KEYUP, MSG_MOUSEMOVE, MSG_MOUSEDOWN, MSG_MOUSEUP, MSG_SCROLL, MSG_GESTURE, MSG_TEXT, MSG_INPUT_LANGUAGE})
 
 ERROR_INVALID_HELLO = "invalid_hello"
 ERROR_WRONG_ID = "wrong_id"
@@ -1043,6 +1044,11 @@ def read_focus(message, own_id: bytes):
             malformed = True
         else:
             focus["reach"] = reach
+    if "input_language" in data:
+        if data["input_language"] in ("en", "ru"):
+            focus["input_language"] = data["input_language"]
+        else:
+            malformed = True
     focus["malformed"] = malformed
     return focus
 
@@ -1226,11 +1232,19 @@ def read_input(message):
     if not _int(seq, 1, MAX_SAFE_INTEGER):
         return None
     read = {"type": kind, "seq": seq}
+    if "input_language" in data:
+        if data["input_language"] not in ("en", "ru"):
+            return None
+        read["input_language"] = data["input_language"]
     if kind in (MSG_KEYDOWN, MSG_KEYUP):
         us = data.get("us")
         if not _text(data.get("key"), 1, MAX_KEY_CHARS) or ("us" in data and not _text(us, 1, 1)):
             return None
         read.update(key=data["key"], us=us if "us" in data else None)
+    elif kind == MSG_INPUT_LANGUAGE:
+        if data.get("language") not in ("en", "ru"):
+            return None
+        read["input_language"] = data["language"]
     elif kind == MSG_MOUSEMOVE:
         if not _int(data.get("dx"), -MOVE_MAX, MOVE_MAX) or not _int(data.get("dy"), -MOVE_MAX, MOVE_MAX):
             return None

@@ -6,7 +6,7 @@ import json
 import os
 from dataclasses import dataclass, field
 
-from core import effects, settings_sync
+from core import effects, settings_sync, i18n
 from crossing import DEFAULT_CROSSING
 
 DEFAULT_CONFIG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.json")
@@ -78,6 +78,7 @@ class Config:
     # Every address the window shows is hidden; see pages.redact.
     hide_addresses: bool = False
     language: str = "auto"
+    keyboard_sync: bool = False
     # Only the machine in use shows a pointer: this Mac's after a driver lets go of it, until it
     # moves (core/idle_pointer). Its pointer always hides while it drives. This Mac's own choice.
     hide_idle_pointer: bool = True
@@ -221,7 +222,9 @@ def parse_config(raw: dict) -> Config:
         scroll_speed=raw.get("scroll_speed", 1.0),
         reverse_scroll=raw.get("reverse_scroll", False),
         appearance=raw.get("appearance") if raw.get("appearance") in APPEARANCES else "system",
-        language=raw.get("language") if raw.get("language") in ("auto", "en", "it") else "auto",
+        language=raw.get("language") if isinstance(raw.get("language"), str) and
+            (raw["language"] == "auto" or raw["language"] in i18n.LANGUAGES) else "auto",
+        keyboard_sync=raw.get("keyboard_sync") is True,
         ignored_inputs=raw.get("ignored_inputs", []),
         mouse_only=raw.get("mouse_only", False),
     )

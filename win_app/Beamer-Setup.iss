@@ -15,10 +15,18 @@ AppName=Beamer
 AppVersion={#AppVersion}
 VersionInfoVersion={#NumericVersion}.0
 VersionInfoProductTextVersion={#AppVersion}
+#ifdef CommunityPreview
+AppPublisher=Beamer community preview (unofficial)
+#else
 AppPublisher=Kalkman Code
+#endif
 DefaultDirName={localappdata}\Beamer
 DisableProgramGroupPage=yes
+#ifdef CommunityPreview
+OutputBaseFilename=Beamer-RU-Preview-Setup-{#AppVersion}
+#else
 OutputBaseFilename=Beamer-Setup-{#AppVersion}
+#endif
 Compression=lzma2/max
 SolidCompression=yes
 ; File installation and every Beamer operation stay with the original user. Only the fixed

@@ -46,6 +46,20 @@ msgstr ""
 
 
 class I18nTests(unittest.TestCase):
+    def test_shipped_russian_resolves_system_variants_and_has_no_missing_entries(self):
+        from tools.i18n_extract import template_entries, extract, problems, header_of, plural_count
+        with mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("BEAMER_LANGUAGE", None)
+            for locale_code in ("ru-RU", "ru_RU.UTF-8", "ru"):
+                self.assertEqual(i18n.resolve("auto", [locale_code, "en-US"]), "ru")
+            self.assertEqual(i18n.resolve("ru", ["en-US"]), "ru")
+            i18n.install("ru")
+            self.assertEqual(i18n.tr("Settings"), "Настройки")
+            self.assertEqual(i18n.tr("Connected to {name}").format(name="Colourful PC"),
+                             "Colourful PC: подключено")
+        entries = i18n.parse_po((i18n.locales_dir() / "ru.po").read_text(encoding="utf-8"))
+        self.assertEqual(problems(entries, template_entries(extract()), plural_count(header_of(entries))), [])
+
     def tearDown(self):
         i18n.install("en")
 

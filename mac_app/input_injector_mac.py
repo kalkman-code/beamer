@@ -27,6 +27,10 @@ import unicodedata
 from typing import Dict, List, Optional, Set, Tuple
 
 import keyboard_layout
+
+def sync_keyboard_language(language):
+    return keyboard_layout.select_language(language)
+
 from key_codes import KEY_NAME_TO_CODE, US_KEY_CODES
 
 try:

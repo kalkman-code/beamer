@@ -568,6 +568,9 @@ class LinkResponder:
         # This machine's speed for a peer's pointer and scroll, and whether
         # its edges are held (Pause crossing, a full-screen app), which keeps the zones from firing.
         self.input_scale: Optional[InputScale] = None
+        self.keyboard_sync = False
+        self._keyboard_sync_failed = {}
+        self._keyboard_sync_notice_at = float("-inf")
         self.edges_held: Callable[[], bool] = lambda: False
         # One lock for the links, the owner and everything the owner decides. Held while the owner's
         # input is injected, so an ownership ending on another thread cannot release keys between
@@ -1292,6 +1295,8 @@ class LinkResponder:
     def _takes(self, link: _Link, read: dict) -> bool:
         """Whether this machine acts on this input at all: a message its capabilities do not cover
         is dropped, and still acknowledged (section 2)."""
+        if read["type"] == protocol.MSG_INPUT_LANGUAGE:
+            return self.keyboard_sync and "input_language" in link.own_caps and "input_language" in link.caps
         if read["type"] == protocol.MSG_TEXT:
             return read["text"] is not None and "text" in link.own_caps and hasattr(self._injector_module(), "inject_text")
         if read["type"] == protocol.MSG_GESTURE:
@@ -1301,6 +1306,12 @@ class LinkResponder:
     def _inject_locked(self, link: _Link, read: dict, *, scaled=False) -> None:
         injector = self._injector_module()
         kind = read["type"]
+        if self.keyboard_sync and "input_language" in link.caps and "input_language" in link.own_caps:
+            language = read.get("input_language")
+            if language is not None:
+                self._sync_keyboard_language(language)
+        if kind == protocol.MSG_INPUT_LANGUAGE:
+            return
         if kind in (protocol.MSG_KEYDOWN, protocol.MSG_KEYUP):
             down = kind == protocol.MSG_KEYDOWN
             if down:
@@ -1566,10 +1577,35 @@ class LinkResponder:
                 # The answer goes before the pointer is placed or anything plays.
                 link.post(protocol.accept_msg(focus["route"]))
                 after += self._own_locked(link, focus, peers, zones)
+                if self.keyboard_sync and "input_language" in link.caps and "input_language" in link.own_caps:
+                    language = focus.get("input_language")
+                    if language is not None:
+                        self._sync_keyboard_language(language)
             stale = focus["here"] and generation != self._generation
         self._run(after)
         if stale:
             self._rearm_fresh()
+
+    def _sync_keyboard_language(self, language):
+        now = time.monotonic()
+        if now - self._keyboard_sync_failed.get(language, float("-inf")) < 5:
+            return False
+        try:
+            selected = getattr(self._injector_module(), "sync_keyboard_language", lambda language: False)(language)
+        except Exception:
+            LOGGER.exception("Could not synchronise the keyboard input language")
+            selected = False
+        if selected:
+            self._keyboard_sync_failed.pop(language, None)
+            return True
+        # A missing layout or an app refusing changes must not stall every key.
+        self._keyboard_sync_failed[language] = now
+        if now - self._keyboard_sync_notice_at >= 30:
+            self._keyboard_sync_notice_at = now
+            self._set_status(ServerState.CONNECTED, tr(
+                "Could not select the {language} keyboard layout. Enable it in your operating system or select it manually."
+            ).format(language=language.upper()))
+        return False
 
     def _refusal_locked(self, link: _Link, focus: dict):
         """Section 4's decision order, after the stale route (steps 2 to 7). The take is made

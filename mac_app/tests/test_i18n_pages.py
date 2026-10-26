@@ -10,7 +10,7 @@ import re
 import socket
 import unittest
 
-from core.i18n import install
+from core.i18n import install, LANGUAGES
 
 
 def walk(AppKit, view):
@@ -91,7 +91,7 @@ class PseudoLanguageTests(_Localised):
         if re.fullmatch(r"— (?:ms|px|pt|s)", text):
             return
         # Language names stay in their own language; key symbols and the product name are not prose.
-        if text in {"Beamer", "English", "Italiano", "⌃", "⌥", "⇧", "⌘"}:
+        if text in {"Beamer", "⌃", "⌥", "⇧", "⌘"} | set(LANGUAGES.values()):
             return
         self.assertTrue(text.startswith("⟦") and text.endswith("⟧"), repr(text))
 
@@ -155,6 +155,27 @@ class ItalianLayoutTests(_Localised):
                 overlap = AppKit.NSIntersectionRect(rect, other)
                 if overlap.size.width > 1 and overlap.size.height > 1:
                     self.fail(f"labels overlap: {first.stringValue()!r} and {second.stringValue()!r}")
+
+
+class RussianLayoutTests(_Localised):
+    LANGUAGE = "ru"
+    _assert_label_geometry = ItalianLayoutTests._assert_label_geometry
+
+    def test_all_pages_and_pairing_fit_at_the_narrowest_window(self):
+        from mac_app.tests.design_offscreen import settle
+        control = self.control
+        width = max(320, control.window.minSize().width)
+        control.window.setFrame_display_(((100000, 100000), (width, 900)), False)
+        for key in control.pages:
+            control._select_page(key)
+            settle(control.window)
+            with self.subTest(page=key):
+                self._assert_label_geometry(control.pages[key].documentView())
+        control._select_page("overview")
+        control.panel._toggle_sheet()
+        settle(control.window)
+        self._assert_label_geometry(control.pages["overview"].documentView())
+        self.assertFalse(control.window.isVisible())
 
 
 if __name__ == "__main__":

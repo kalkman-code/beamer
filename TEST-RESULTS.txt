@@ -1,0 +1,21 @@
+Beamer RU preview 1.5.14-ru.2
+Base: 324edd5731bcff9c28229c0c8a54d547c1b2af29
+
+Local automated checks (macOS Apple silicon, Python 3.12):
+- Latest related Mac/shared suites: 316 tests passed (Fn, keyboard sync, Caps Lock, controller routing, settings, layouts and translated UI pages).
+- Earlier targeted suites: 124 shared protocol/i18n tests; 193 Mac tests; 224 Windows modules/Qt tests on macOS; 19 responder loopback tests. These overlap with the latest run and are not a claim about the full project suite.
+- i18n extraction/completeness check: 1224 strings; en/it/ru catalogues complete.
+- Frozen arm64 Mac application: ad-hoc signature verified; packaged self-test passed; all six native settings pages constructed. No Apple notarisation or Intel build.
+
+User-reported hardware checks:
+- RU/EN input synchronisation between a Mac and a Windows PC works with the opt-in enabled at both ends.
+- A bare Fn tap on the Mac toggles RU/EN while driving Windows.
+- User confirmed the updated Windows build works.
+
+These are user-reported checks on one pair of computers, not a full compatibility certification. General native-input handling on Linux, Intel macOS and other Windows configurations has not been verified.
+
+Reproduce shared checks:
+python -m unittest core.tests.test_keyboard_sync core.tests.test_protocol_v6 core.tests.test_i18n core.tests.test_i18n_coverage
+python tools/i18n_extract.py --check --complete
+
+The Windows installer workflow runs shared/Windows tests and a frozen application import probe on Windows before compiling the setup executable. A successful workflow run is required before treating that installer as built.

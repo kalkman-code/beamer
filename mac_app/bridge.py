@@ -33,7 +33,9 @@ from core import effects
 from core import identify_screens
 import frame_clock
 import keyboard_layout
+import fn_language
 import media_keys
+from core import keyboard_sync
 from core import keytable
 from core import link as link_module
 from core import owner as owner_module
@@ -80,7 +82,7 @@ ROUND_TRIP_MAX_AGE_SECONDS = 5.0
 # the ownership by force after one second), then goes ahead.
 LET_GO_WAIT_SECONDS = 1.3
 OWN_PLATFORM = "macos"
-CAPABILITIES = ("clipboard", "clipboard_image", "gestures", "media_keys", "text", "settings", "design_sync", "layout", "profiles", "displays", "ping_rtt", "identify_screens", "motion_path")
+CAPABILITIES = ("clipboard", "clipboard_image", "gestures", "media_keys", "text", "settings", "design_sync", "layout", "profiles", "displays", "ping_rtt", "identify_screens", "motion_path", "input_language")
 MEDIA_KEY_NAMES = frozenset({"volume_mute", "volume_down", "volume_up", "media_next", "media_prev", "media_stop", "media_play_pause", "brightness_up", "brightness_down"})
 
 # Why input came home, in words, for the alert. A why that is not here comes home quietly.
@@ -634,6 +636,8 @@ class KVMController:
         self.tap_run_loop = None
         self.tap_callback_ref = self._event_tap_callback
         self.translator = QuartzEventTranslator(quartz)
+        self._keyboard_sync = keyboard_sync.Outbound(keyboard_layout)
+        self._fn_language = fn_language.FnTap(quartz)
         self._sent_names = {}
         self.trigger_code = KEY_NAME_TO_CODE[cfg.trigger_key]
         self._jump_swallowed = set()
@@ -1738,6 +1742,14 @@ class KVMController:
                 self._shake_input_event(event_type, event)
             if not self._was_injected(event) and self._handle_jump_key(event_type, event):
                 return None
+            if not self._was_injected(event):
+                consume_fn, toggle_fn = self._fn_language.feed(
+                    event_type, event, enabled=self._fn_sync_target())
+                if toggle_fn:
+                    self.outbound.put_nowait({"type": fn_language.TOGGLE,
+                                             "target": self._fn_sync_target()})
+                if consume_fn:
+                    return None
             if self.receiving:
                 # The PC is driving this Mac over the other link. Everything
                 # passes through untouched: crossing must not read a pointer
@@ -2738,6 +2750,8 @@ class KVMController:
             link.drop(owner_module.DROPPED)
 
     def _forget_held(self, peer):
+        if hasattr(self, "_keyboard_sync"):
+            self._keyboard_sync.forget(peer)
         """`peer`'s link is lost: what waited for its clipboard is for a link that is gone."""
         with self._clip_lock:
             self._clip_wait.pop(peer, None)
@@ -2746,6 +2760,17 @@ class KVMController:
                 self._sent_names.pop(held, None)
 
     def _send(self, send):
+        if not getattr(self.cfg, "keyboard_sync", False):
+            self._send_part(send)
+            return
+        link = self._peers_up.get(send.peer)
+        if link is None:
+            return
+        for message in self._keyboard_sync.messages(send.peer, send.message,
+                enabled=getattr(self.cfg, "keyboard_sync", False), caps=link.caps):
+            self._send_part(owner_module.Send(send.peer, message))
+
+    def _send_part(self, send):
         link = self._peers_up.get(send.peer)
         if link is None:
             return
@@ -3050,6 +3075,15 @@ class KVMController:
         """Handle one dequeued item: input the tap captured, which the owner routes (to the machine
         it is on, held for a hand-over, or dropped when it has already come home)."""
         kind = message.get("type")
+        if kind == fn_language.TOGGLE:
+            target = message.get("target")
+            if not target or target != self._fn_sync_target():
+                return
+            changed = self._keyboard_sync.toggle_language()
+            if changed and target == self._fn_sync_target():
+                self._step(lambda owner: owner.input(changed))
+                self.logger.info("Fn selected input language %s for Windows", changed["data"]["language"])
+            return
         if kind in (protocol.MSG_KEYUP, protocol.MSG_MOUSEUP):
             # Whether or not the input is away: the release of a key pressed there that arrives
             # after it came home is what lets the owner stop swallowing it.
@@ -3064,6 +3098,20 @@ class KVMController:
             return []
 
         self._step(route)
+
+    def _fn_sync_target(self):
+        """Fn changes language only while this Mac drives a capable Windows peer."""
+        if (not self.redirecting or self.receiving or not self.owner.away
+                or not getattr(self.cfg, "keyboard_sync", False)
+                or self.cfg.mouse_only
+                or ignored.key(fn_language.FN_CODE) in self.cfg.ignored_inputs):
+            return None
+        peer = self.owner.on
+        link = self._peers_up.get(peer)
+        if (link is None or link.peer_platform != "windows"
+                or keyboard_sync.CAPABILITY not in link.caps):
+            return None
+        return peer, self.owner._visit_route
 
     def _repair_redirecting_disagreement(self):
         """The tap is about to swallow input as redirected while the owner says it is home. Starts

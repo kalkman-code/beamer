@@ -1963,8 +1963,8 @@ class WindowsApplication(QWidget):
             "platform": OWN_PLATFORM,
             "app": VERSION[:32] if VERSION.isascii() and VERSION.isprintable() else "dev",
             # A swipe has no shortcut every Linux desktop shares, so Linux does not offer gestures.
-            "caps": [cap for cap in ("clipboard", "clipboard_image", "gestures", "media_keys", "text", "settings", "design_sync", "layout", "profiles", "displays", "identify_screens", "ping_rtt", "motion_path")
-                     if not (cap == "gestures" and OWN_PLATFORM == "linux")],
+            "caps": [cap for cap in ("clipboard", "clipboard_image", "gestures", "media_keys", "text", "settings", "design_sync", "layout", "profiles", "displays", "identify_screens", "ping_rtt", "motion_path", "input_language")
+                     if not (cap in ("gestures", "input_language") and OWN_PLATFORM == "linux")],
             "port": self._settings_port,
         }
 
@@ -3410,6 +3410,7 @@ class WindowsApplication(QWidget):
         self._debounce_save()
 
     def _apply_input_scale(self, config: Config) -> None:
+        self.server.keyboard_sync = config.keyboard_sync
         self.server.input_scale = receiver.InputScale(config.pointer_speed, config.scroll_speed, config.reverse_scroll)
 
     def _modifier_module(self, current: Config) -> QWidget:
@@ -3420,9 +3421,21 @@ class WindowsApplication(QWidget):
         )
         self.modifier_choice.set_names(tr("Modifier keys"))
         module.body.addWidget(self.modifier_choice.view)
+        self.keyboard_sync_switch = widgets.Switch(tr("Synchronise Russian and English keyboard layouts"))
+        self.keyboard_sync_switch.setChecked(current.keyboard_sync)
+        self.keyboard_sync_switch.toggled.connect(self._set_keyboard_sync)
+        module.body.addWidget(self.keyboard_sync_switch)
+        module.body.addWidget(widgets.label(tr("Enable on both computers. Alt+Shift switches RU/EN while controlling another computer."), "note", wrap=True))
         self.modifier_note = widgets.label(tr(MODIFIER_NOTES[current.modifier_style]), "note", wrap=True)
         module.body.addWidget(self.modifier_note)
         return module
+
+    def _set_keyboard_sync(self, enabled: bool) -> None:
+        if self._config is not None:
+            self._config.keyboard_sync = bool(enabled)
+            self.server.keyboard_sync = bool(enabled)
+            self._persist()
+            self.sender.update_config(self._config)
 
     def _set_modifier_style(self, value: str) -> None:
         self.modifier_note.setText(tr(MODIFIER_NOTES[value]))
@@ -5088,6 +5101,7 @@ class WindowsApplication(QWidget):
         self.trigger_recorder.set_title(TRIGGER_KEYS.get(config.trigger_key, config.trigger_key))
         self.trigger_style_choice.set_value(config.trigger_style)
         self._update_style_hint(config.trigger_style)
+        self.keyboard_sync_switch.setChecked(config.keyboard_sync)
         self.modifier_choice.set_value(config.modifier_style)
         self.modifier_note.setText(MODIFIER_NOTES[config.modifier_style])
         self.glow_style_choice.set_value(config.glow_style)

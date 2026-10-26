@@ -841,6 +841,11 @@ msgstr "Errore di input da {name}; vedi il registro"
 
 #: core/receiver.py
 #, python-brace-format
+msgid "Could not select the {language} keyboard layout. Enable it in your operating system or select it manually."
+msgstr "Impossibile selezionare il layout {language}. Abilitalo nelle impostazioni del sistema o selezionalo manualmente."
+
+#: core/receiver.py
+#, python-brace-format
 msgid "Connected to {names}"
 msgstr "Connesso a {names}"
 
@@ -1682,6 +1687,10 @@ msgstr "Scarica"
 msgid "Mouse only"
 msgstr "Solo mouse"
 
+#: mac_app/kvm_bridge_app.py win_app/kvm_bridge_win.py
+msgid "Synchronise Russian and English keyboard layouts"
+msgstr "Sincronizza i layout di tastiera russo e inglese"
+
 #: mac_app/kvm_bridge_app.py
 msgid "Reverse other machines' scrolling"
 msgstr "Inverti lo scorrimento degli altri computer"
@@ -1971,7 +1980,7 @@ msgstr "Non abbinato"
 msgid "No address"
 msgstr "Nessun indirizzo"
 
-#: mac_app/kvm_bridge_app.py win_app/kvm_bridge_win.py
+#: mac_app/kvm_bridge_app.py mac_app/preview_launcher.py win_app/kvm_bridge_win.py
 msgid "Settings"
 msgstr "Impostazioni"
 
@@ -2318,6 +2327,10 @@ msgstr "Sistema segue l'impostazione chiara o scura del Mac."
 #: mac_app/kvm_bridge_app.py win_app/kvm_bridge_win.py
 msgid "Keep this machine's keyboard here. Pointer and clipboard sharing stay on."
 msgstr "Mantieni la tastiera su questo computer. Il puntatore e gli appunti restano condivisi."
+
+#: mac_app/kvm_bridge_app.py
+msgid "Enable on both computers. A bare Fn tap on this Mac switches RU/EN while controlling Windows. Alt+Shift also works."
+msgstr "Attiva su entrambi i computer. Una pressione del solo tasto Fn su questo Mac cambia RU/EN durante il controllo di Windows. Funziona anche Alt+Shift."
 
 #: mac_app/kvm_bridge_app.py
 msgid "Pointer speed for another machine's mouse or trackpad while it drives this Mac."
@@ -4642,6 +4655,10 @@ msgstr "Segue il mouse o il trackpad di questo PC su ogni schermo; ogni schermo 
 #: win_app/kvm_bridge_win.py
 msgid "For the trackpad or mouse of whichever machine drives this PC."
 msgstr "Per il trackpad o il mouse del computer che controlla questo PC."
+
+#: win_app/kvm_bridge_win.py
+msgid "Enable on both computers. Alt+Shift switches RU/EN while controlling another computer."
+msgstr "Attiva su entrambi i computer. Alt+Maiusc alterna RU/EN durante il controllo di un altro computer."
 
 #: win_app/kvm_bridge_win.py
 msgid "That could not be saved, so the list is unchanged."

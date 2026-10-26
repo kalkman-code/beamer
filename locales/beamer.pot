@@ -839,6 +839,11 @@ msgstr ""
 
 #: core/receiver.py
 #, python-brace-format
+msgid "Could not select the {language} keyboard layout. Enable it in your operating system or select it manually."
+msgstr ""
+
+#: core/receiver.py
+#, python-brace-format
 msgid "Connected to {names}"
 msgstr ""
 
@@ -1673,6 +1678,10 @@ msgstr ""
 msgid "Mouse only"
 msgstr ""
 
+#: mac_app/kvm_bridge_app.py win_app/kvm_bridge_win.py
+msgid "Synchronise Russian and English keyboard layouts"
+msgstr ""
+
 #: mac_app/kvm_bridge_app.py
 msgid "Reverse other machines' scrolling"
 msgstr ""
@@ -1945,7 +1954,7 @@ msgstr ""
 msgid "No address"
 msgstr ""
 
-#: mac_app/kvm_bridge_app.py win_app/kvm_bridge_win.py
+#: mac_app/kvm_bridge_app.py mac_app/preview_launcher.py win_app/kvm_bridge_win.py
 msgid "Settings"
 msgstr ""
 
@@ -2274,6 +2283,10 @@ msgstr ""
 
 #: mac_app/kvm_bridge_app.py win_app/kvm_bridge_win.py
 msgid "Keep this machine's keyboard here. Pointer and clipboard sharing stay on."
+msgstr ""
+
+#: mac_app/kvm_bridge_app.py
+msgid "Enable on both computers. A bare Fn tap on this Mac switches RU/EN while controlling Windows. Alt+Shift also works."
 msgstr ""
 
 #: mac_app/kvm_bridge_app.py
@@ -4573,6 +4586,10 @@ msgstr ""
 
 #: win_app/kvm_bridge_win.py
 msgid "For the trackpad or mouse of whichever machine drives this PC."
+msgstr ""
+
+#: win_app/kvm_bridge_win.py
+msgid "Enable on both computers. Alt+Shift switches RU/EN while controlling another computer."
 msgstr ""
 
 #: win_app/kvm_bridge_win.py

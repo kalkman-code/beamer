@@ -15,6 +15,13 @@ win_app/build/
 win_app/dist/
 mac_app/build/
 mac_app/dist/
+mac_app/build-preview/
+mac_app/dist-preview/
+mac_app/build-preview-spec/
+.venv-test/
+test-data/
+build-windows/
+dist-windows/
 
 
 # Rendered documents, never committed
