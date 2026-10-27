@@ -122,6 +122,9 @@ try:
 except OSError:
     VERSION = "dev"
 
+# How long the control line's center_home waits after bringing input home before it places the pointer.
+CENTER_HOME_DELAY_MS = 80
+
 HOME_PAGE = "https://kalkmancode.co.uk/beamer"
 HOME_PAGE_TEXT = N_("Beamer's website")
 
@@ -340,6 +343,7 @@ class StatusBridge(QObject):
     settings = Signal(str, object)
     identify = Signal(object)
     shook_home = Signal(object)
+    escaped_home = Signal(object)
     alert = Signal(str, str)
     # (version, url) when a newer Beamer is out, else None.
     update = Signal(object)
@@ -381,10 +385,16 @@ def send_instance_activation(name: Optional[str] = None, activation_token: Optio
 
 
 class InstanceSignal(QObject):
-    def __init__(self, activate, name: Optional[str] = None, parent=None):
+    """The second-launch listener, and the local control line for tools on this machine (a Stream
+    Deck, a script): one JSON line in, `{"command": "pause"}` and the like, and for a command one
+    JSON line back. The pipe is this user's alone (UserAccessOption), so nothing off this machine
+    or under another account reaches it. A line with no command is a second launch, as before."""
+
+    def __init__(self, activate, name: Optional[str] = None, parent=None, commands=None):
         super().__init__(parent)
         self.name = name or _instance_server_name()
         self.activate = activate
+        self.commands = commands or {}
         QLocalServer.removeServer(self.name)
         self.server = QLocalServer(self)
         self.server.setSocketOptions(QLocalServer.SocketOption.UserAccessOption)
@@ -403,12 +413,46 @@ class InstanceSignal(QObject):
             request = json.loads(bytes(connection.readLine()).decode("utf-8"))
         except (UnicodeDecodeError, json.JSONDecodeError):
             request = {}
-        self.activate(request.get("activation_token") or None)
+        if not isinstance(request, dict):
+            request = {}
+        if "command" in request:
+            connection.write(json.dumps(self._run(request.get("command"))).encode("utf-8") + b"\n")
+            connection.flush()
+        else:
+            self.activate(request.get("activation_token") or None)
         connection.disconnectFromServer()
+
+    def _run(self, command) -> dict:
+        handler = self.commands.get(command) if isinstance(command, str) else None
+        if handler is None:
+            return {"ok": False, "error": f"unknown command: {command!r}", "commands": sorted(self.commands)}
+        try:
+            return {"ok": True, **(handler() or {})}
+        except Exception as exc:
+            LOGGER.exception("Control command %r failed", command)
+            return {"ok": False, "error": str(exc)}
 
     def close(self) -> None:
         self.server.close()
         QLocalServer.removeServer(self.name)
+
+
+def escape_home_on(settings: dict) -> bool:
+    """Three presses of Esc bring input home unless this machine turned it off."""
+    return settings.get("escape_home", True) is not False
+
+
+def first_notice(config_path, key: str) -> bool:
+    """Whether a way home's notice is still among its first three, counting this one."""
+    with app_config.SETTINGS_LOCK:
+        settings = app_config.load_settings(config_path)
+        count = settings.get(key, 0)
+        count = count if type(count) is int and count >= 0 else 0
+        if count >= 3:
+            return False
+        settings[key] = count + 1
+        app_config.write_settings(config_path, settings)
+    return True
 
 
 def ways_summary_for_label(label: QLabel, *args) -> str:
@@ -553,6 +597,7 @@ class WindowsApplication(QWidget):
         self._same_before_sync = None
         self._profile_last_heard = {}
         self._shake_enabled = None
+        self._escape_enabled = None
         self._shake_sensitivity = None
         self._displays_signature = object()
         self._design_follow_signature = object()
@@ -588,6 +633,7 @@ class WindowsApplication(QWidget):
         self.bridge.identify.connect(self._on_identify_screens)
         self.identify_screens = IdentifyScreens(self)
         self.bridge.shook_home.connect(self._on_shake)
+        self.bridge.escaped_home.connect(self._on_escape_home)
         self.bridge.update.connect(self._on_update)
         self.bridge.update_check.connect(self._on_update_check)
         self.bridge.permission.connect(self._on_permission)
@@ -1444,6 +1490,56 @@ class WindowsApplication(QWidget):
     def toggle_pause(self) -> None:
         self.sender.crossing_paused = not self.sender.crossing_paused
         self._refresh_window()
+
+    # -- the control line (InstanceSignal): each answers what the status command does ---------
+
+    def control_commands(self) -> dict:
+        return {
+            "status": self.control_status,
+            "pause": lambda: self._control_set_paused(True),
+            "resume": lambda: self._control_set_paused(False),
+            "toggle_pause": lambda: self._control_set_paused(not self.sender.crossing_paused),
+            "come_home": self.control_come_home,
+            "center_home": self.control_center_home,
+        }
+
+    def control_status(self) -> dict:
+        return {
+            "version": VERSION,
+            "paused": bool(self.sender.crossing_paused),
+            "redirecting": bool(self.sender.redirecting),
+            "on": self._label_of(self.sender.owner) or None,
+        }
+
+    def _control_set_paused(self, paused: bool) -> dict:
+        if bool(self.sender.crossing_paused) != paused:
+            self.toggle_pause()
+        return self.control_status()
+
+    def control_come_home(self) -> dict:
+        """Brings this machine's input back from whichever machine it is on, the way a shake does:
+        this machine decides, so a peer with its own crossing paused cannot keep it."""
+        self.sender.set_redirecting(False)
+        return self.control_status()
+
+    def control_center_home(self) -> dict:
+        """The escape hatch: input home, then the pointer to the middle of the main display. The
+        placement waits a moment, so the return's own pointer restore lands first."""
+        self.sender.set_redirecting(False)
+        QTimer.singleShot(CENTER_HOME_DELAY_MS, self._center_pointer)
+        return self.control_status()
+
+    def _center_pointer(self) -> None:
+        try:
+            desktop = platform_parts.desktop
+            screens = desktop.monitors()
+            if not screens:
+                return
+            # The main display holds the desktop's origin on Windows and X11.
+            main = next((r for r in screens if r.x <= 0 < r.x + r.width and r.y <= 0 < r.y + r.height), screens[0])
+            desktop.set_cursor_position(main.x + main.width // 2, main.y + main.height // 2)
+        except Exception:
+            LOGGER.exception("Could not centre the pointer")
 
     def _crossing_state_args(self) -> tuple:
         entries = peerlist.desktops(self._peer_entries)
@@ -2505,6 +2601,10 @@ class WindowsApplication(QWidget):
         module.body.addWidget(self.shake_sensitivity_row)
         module.body.addWidget(self.shake_sensitivity)
         module.body.addWidget(widgets.label(tr("Shake the mouse or trackpad left and right a few times while you drive another machine, and input comes straight back to the machine you are using."), "note", wrap=True))
+        self.escape_home_switch = widgets.Switch(tr("Press Esc three times to come home"))
+        self.escape_home_switch.toggled.connect(self._escape_home_toggled)
+        module.body.addWidget(self.escape_home_switch)
+        module.body.addWidget(widgets.label(tr("Tap Esc three times quickly while you drive another machine. The first two taps still reach that machine; the third brings input home."), "note", wrap=True))
         self.profile_shortcut = widgets.label("", "note", wrap=True)
         self.profile_shortcut.setTextFormat(Qt.TextFormat.RichText)
         self.profile_shortcut.setTextInteractionFlags(Qt.TextInteractionFlag.TextBrowserInteraction)
@@ -2753,6 +2853,10 @@ class WindowsApplication(QWidget):
         self.shake_home_switch.setChecked(profiles.shake_on(settings))
         self.shake_home_switch.blockSignals(False)
         self.shake_home_switch.setEnabled(self._config is not None)
+        self.escape_home_switch.blockSignals(True)
+        self.escape_home_switch.setChecked(escape_home_on(settings))
+        self.escape_home_switch.blockSignals(False)
+        self.escape_home_switch.setEnabled(self._config is not None)
         self.shake_sensitivity.blockSignals(True)
         self.shake_sensitivity.setValue(profiles.shake_sensitivity(settings))
         self.shake_sensitivity_figure.setText(f"{self.shake_sensitivity.value()} %")
@@ -2912,21 +3016,32 @@ class WindowsApplication(QWidget):
             self.sender.set_shake(enabled, shake_stroke(capture_win, sensitivity), on_shake=self.bridge.shook_home.emit)
             self._shake_enabled = enabled
             self._shake_sensitivity = sensitivity
+        escape = escape_home_on(settings)
+        if escape != self._escape_enabled:
+            self.sender.set_escape_home(escape, on_escape=self.bridge.escaped_home.emit)
+            self._escape_enabled = escape
+
+    def _escape_home_toggled(self, on: bool) -> None:
+        """This machine's own keyboard, so the switch stays here and is not one of the ways Same on
+        all machines shares."""
+        with app_config.SETTINGS_LOCK:
+            settings = app_config.load_settings(self.config_path)
+            settings["escape_home"] = bool(on)
+            app_config.write_settings(self.config_path, settings)
+        self._configure_shake(settings)
 
     def _shake_sensitivity_changed(self, sensitivity: int) -> None:
         self._profile_event(crossing_state.set_shake_sensitivity, sensitivity)
 
     def _on_shake(self, peer) -> None:
-        with app_config.SETTINGS_LOCK:
-            settings = app_config.load_settings(self.config_path)
-            count = settings.get("shake_notices", 0)
-            count = count if type(count) is int and count >= 0 else 0
-            if count >= 3:
-                return
-            settings["shake_notices"] = count + 1
-            app_config.write_settings(self.config_path, settings)
-        self._on_alert(tr("Beamer"), tr("Shook home from {name}. Turn this off in Crossing → Way home.").format(
-            name=self._label_of(peer)))
+        if first_notice(self.config_path, "shake_notices"):
+            self._on_alert(tr("Beamer"), tr("Shook home from {name}. Turn this off in Crossing → Way home.").format(
+                name=self._label_of(peer)))
+
+    def _on_escape_home(self, peer) -> None:
+        if first_notice(self.config_path, "escape_notices"):
+            self._on_alert(tr("Beamer"), tr("Came home from {name} on three presses of Esc. Turn this off in Crossing → Way home.").format(
+                name=self._label_of(peer)))
 
     def _displays_changed(self) -> None:
         self._refresh_own_displays()
@@ -6045,7 +6160,7 @@ def main() -> None:
         if startup_admin_error is not None:
             application._on_admin_mode_changed(startup_admin_error)
         quit_signals = quit_signals_module.QuitSignals(application.quit, parent=app)
-        instance_signal = InstanceSignal(application.show_window, parent=app)
+        instance_signal = InstanceSignal(application.show_window, parent=app, commands=application.control_commands())
         if not instance_signal.listening:
             LOGGER.warning("Could not start the second-launch listener: %s", instance_signal.server.errorString())
         if not arguments.hidden or not application.tray_shown():
