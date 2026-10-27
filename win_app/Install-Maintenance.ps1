@@ -14,8 +14,22 @@ function Resolve-BeamerUserSid([string]$Identity) {
     return ([Security.Principal.NTAccount]$Identity).Translate([Security.Principal.SecurityIdentifier]).Value
 }
 
+function Get-BeamerAdministratorPreference([string]$UserSid) {
+    $key = [Microsoft.Win32.Registry]::Users.OpenSubKey("$UserSid\Software\KalkmanCode\Beamer")
+    if ($null -eq $key) { return $false }
+    try {
+        if ($key.GetValueKind('RunAsAdministrator') -ne [Microsoft.Win32.RegistryValueKind]::DWord) { return $false }
+        return $key.GetValue('RunAsAdministrator', 0) -eq 1
+    } catch [System.IO.IOException] {
+        return $false
+    } finally {
+        $key.Dispose()
+    }
+}
+
 function Update-BeamerAutostart([string]$ExePath, [string]$UserSid, [switch]$Remove) {
     $expectedPath = [IO.Path]::GetFullPath($ExePath)
+    $runLevel = if (-not $Remove -and (Get-BeamerAdministratorPreference -UserSid $UserSid)) { 'HighestAvailable' } else { 'LeastPrivilege' }
     foreach ($task in @(Get-ScheduledTask -TaskPath '\' -ErrorAction Stop)) {
         if ($task.TaskName -ne 'Beamer' -and $task.TaskName -notlike 'Beamer-*') { continue }
         [xml]$xml = Export-ScheduledTask -TaskName $task.TaskName -TaskPath '\' -ErrorAction Stop
@@ -36,9 +50,15 @@ function Update-BeamerAutostart([string]$ExePath, [string]$UserSid, [switch]$Rem
             Unregister-ScheduledTask -TaskName $task.TaskName -TaskPath '\' -Confirm:$false -ErrorAction Stop
             continue
         }
-        if ($principal.RunLevel -ne 'HighestAvailable') { continue }
+        $runLevelNode = $principal.SelectSingleNode('t:RunLevel', $ns)
+        $currentRunLevel = if ($null -eq $runLevelNode) { 'LeastPrivilege' } else { $runLevelNode.InnerText }
+        if ($currentRunLevel -eq $runLevel) { continue }
         # Keep the existing task definition: disabled startup, arguments and logon triggers are user choices.
-        $principal.RunLevel = 'LeastPrivilege'
+        if ($null -eq $runLevelNode) {
+            $runLevelNode = $xml.CreateElement('RunLevel', $principal.NamespaceURI)
+            [void]$principal.AppendChild($runLevelNode)
+        }
+        $runLevelNode.InnerText = $runLevel
         Register-ScheduledTask -TaskName $task.TaskName -TaskPath '\' -Xml $xml.OuterXml -Force -ErrorAction Stop | Out-Null
     }
 }
@@ -77,6 +97,39 @@ function Repair-BeamerGameInput {
     }
 }
 
+function Update-BeamerGameInputRecovery([switch]$Remove) {
+    $taskName = 'Beamer-GameInputRecovery'
+    if ($Remove) {
+        if (Get-ScheduledTask -TaskName $taskName -TaskPath '\' -ErrorAction SilentlyContinue) {
+            Unregister-ScheduledTask -TaskName $taskName -TaskPath '\' -Confirm:$false -ErrorAction Stop
+        }
+        return
+    }
+
+    $scheduler = New-Object -ComObject 'Schedule.Service'
+    $scheduler.Connect()
+    $folder = $scheduler.GetFolder('\')
+    $definition = $scheduler.NewTask(0)
+    $definition.RegistrationInfo.Description = 'Restarts GameInput when its service window blocks remote pointer control.'
+    $definition.Principal.UserId = 'S-1-5-18'
+    $definition.Principal.LogonType = 5
+    $definition.Principal.RunLevel = 1
+    $definition.Settings.Enabled = $true
+    $definition.Settings.AllowDemandStart = $true
+    $definition.Settings.DisallowStartIfOnBatteries = $false
+    $definition.Settings.StopIfGoingOnBatteries = $false
+    $definition.Settings.ExecutionTimeLimit = 'PT30S'
+    $definition.Settings.MultipleInstances = 2
+    $windows = [Environment]::GetFolderPath([Environment+SpecialFolder]::Windows)
+    $action = $definition.Actions.Create(0)
+    $action.Path = Join-Path $windows 'System32\WindowsPowerShell\v1.0\powershell.exe'
+    $action.Arguments = '-NoLogo -NoProfile -NonInteractive -Command "Restart-Service -Name ''GameInputSvc'' -ErrorAction Stop"'
+    $action.WorkingDirectory = Join-Path $windows 'System32'
+    # Set the protected ACL at registration: no interval with an elevated, user-writable task.
+    $sddl = 'O:SYG:SYD:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;GRGX;;;IU)'
+    $folder.RegisterTaskDefinition($taskName, $definition, (0x6 -bor 0x10), 'S-1-5-18', $null, 5, $sddl) | Out-Null
+}
+
 if ($MyInvocation.InvocationName -ne '.') {
     try {
         $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
@@ -91,9 +144,11 @@ if ($MyInvocation.InvocationName -ne '.') {
         $UserSid = ([Security.Principal.SecurityIdentifier]$UserSid).Value
         Update-BeamerAutostart -ExePath $ExePath -UserSid $UserSid -Remove:$Remove
         if ($Remove) {
+            Update-BeamerGameInputRecovery -Remove
             Remove-BeamerFirewall -ExePath $ExePath
         } else {
             Repair-BeamerFirewall -ExePath $ExePath
+            Update-BeamerGameInputRecovery
             Repair-BeamerGameInput
         }
         exit 0

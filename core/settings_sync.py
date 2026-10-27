@@ -19,6 +19,7 @@ settings, so the adapters read and write it there.
 Never shared, whatever the switch says: zones (the ways, thirds and corner), `side`, the direction
 switches, the Mac's notch way in and notch look, the haptics, whether crossings animate on each
 screen, whether a full-screen app holds the edges, appearance, and per-system keyboard mapping.
+Windows administrator mode is a per-PC registry preference, outside settings and this protocol.
 """
 
 import base64

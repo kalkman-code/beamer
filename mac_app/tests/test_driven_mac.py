@@ -23,6 +23,7 @@ class FakeEvent:
 
 class FakeQuartz:
     kCGEventSourceUserData = 42
+    kCGKeyboardEventAutorepeat = 8
     kCGScrollEventUnitLine = 1
     kCGScrollEventUnitPixel = 0
     kCGEventFlagMaskCommand = 1 << 20

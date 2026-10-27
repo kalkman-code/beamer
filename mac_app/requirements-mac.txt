@@ -6,3 +6,4 @@ rumps==0.4.0
 py2app==0.28.10
 PyNaCl>=1.6
 dmgbuild==1.6.7
+pycparser==3.0

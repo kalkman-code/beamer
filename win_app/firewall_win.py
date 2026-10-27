@@ -198,7 +198,11 @@ def advise(status: FirewallStatus) -> Advice:
     pairing_udp = status.pairing_allowed and status.pairing_covered
     pairing_tcp = status.pairing_tcp_allowed and status.pairing_tcp_covered
     if status.error:
-        return Advice(tr("Beamer could not read the Windows Firewall: {error}").format(error=status.error), tr("Check again"), "check")
+        if status.error == "permission-denied" and not status.elevated:
+            sentence = tr("Beamer cannot check Windows Firewall without administrator permission; run the Beamer installer again to repair its rules.")
+        else:
+            sentence = tr("Beamer could not check Windows Firewall. Check again; if the problem continues, run the Beamer installer again to repair its rules.")
+        return Advice(sentence, tr("Check again"), "check")
     if status.blocked:
         return Advice(
             tr("Windows Firewall has a block rule affecting Beamer's input or pairing traffic; ask your administrator "
@@ -272,6 +276,7 @@ _RULES_FOR_LEAF = (
 )
 
 _STATUS_SCRIPT = _PREAMBLE + """
+try {{
 $exe = {exe}
 $rules = @()
 foreach ($filter in $({filters})) {{
@@ -291,6 +296,28 @@ $networks = @(Get-NetConnectionProfile | ForEach-Object {{
     }}
 }})
 [pscustomobject]@{{ rules = @($rules); networks = $networks }} | ConvertTo-Json -Depth 4 -Compress
+}} catch {{
+    $category = [int]$_.CategoryInfo.Category
+    $denied = $_.CategoryInfo.Category -eq [System.Management.Automation.ErrorCategory]::PermissionDenied
+    $hresult = $_.Exception.HResult
+    $nativeError = $null
+    for ($failure = $_.Exception; $null -ne $failure; $failure = $failure.InnerException) {{
+        if ($failure -is [Microsoft.Management.Infrastructure.CimException]) {{
+            $nativeError = [int]$failure.NativeErrorCode
+            if ($failure.NativeErrorCode -eq [Microsoft.Management.Infrastructure.NativeErrorCode]::AccessDenied) {{
+                $denied = $true
+            }}
+        }}
+        # E_ACCESSDENIED and WBEM_E_ACCESS_DENIED remain stable across display languages.
+        if ($failure -is [System.UnauthorizedAccessException] -or
+            $failure.HResult -eq -2147024891 -or $failure.HResult -eq -2147217405) {{
+            $denied = $true
+            $hresult = $failure.HResult
+        }}
+    }}
+    $kind = if ($denied) {{ 'permission-denied' }} else {{ 'query-failed' }}
+    [pscustomobject]@{{error=$kind; category=$category; hresult=$hresult; native_error=$nativeError}} | ConvertTo-Json -Compress
+}}
 """
 
 # The same rule is reached more than once (by its program and again by its display name), and a
@@ -337,10 +364,15 @@ def status(exe: str, port: int) -> FirewallStatus:
     elevated = is_elevated()
     try:
         raw = _powershell(_STATUS_SCRIPT.format(exe=_quote(exe), filters=_RULES_FOR_LEAF))
-        return interpret(json.loads(raw), exe, port, elevated)
-    except Exception as exc:
+        payload = json.loads(raw)
+        if "error" not in payload:
+            return interpret(payload, exe, port, elevated)
+        error = "permission-denied" if payload["error"] == "permission-denied" else "query-failed"
+        LOGGER.warning("Firewall status query failed: %s", payload)
+    except Exception:
         LOGGER.exception("Firewall status failed")
-        return FirewallStatus(port, False, False, (), (), False, (), elevated, error=str(exc) or type(exc).__name__)
+        error = "query-failed"
+    return FirewallStatus(port, False, False, (), (), False, (), elevated, error=error)
 
 
 def repair(exe: str, port: int, profiles: Sequence[str] = ("Private",)) -> None:

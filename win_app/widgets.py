@@ -8,13 +8,15 @@ import math
 from shiboken6 import isValid
 
 from PySide6.QtCore import QEvent, QObject, QPointF, QRect, QRectF, QSignalBlocker, QSize, Qt
-from PySide6.QtGui import QAction, QColor, QFont, QFontMetrics, QLinearGradient, QPainter, QPalette, QPen
+from PySide6.QtGui import QAction, QColor, QFont, QFontMetrics, QLinearGradient, QPainter, QPalette, QPen, QWheelEvent
 from PySide6.QtWidgets import (
     QAbstractButton,
+    QAbstractSpinBox,
     QApplication,
     QBoxLayout,
     QButtonGroup,
     QCheckBox,
+    QComboBox,
     QFrame,
     QGraphicsOpacityEffect,
     QGridLayout,
@@ -23,6 +25,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QLayout,
     QPushButton,
+    QScrollArea,
     QSizePolicy,
     QSlider,
     QSystemTrayIcon,
@@ -68,6 +71,7 @@ _NAVIGATION_KEYS = {Qt.Key.Key_Tab, Qt.Key.Key_Backtab, Qt.Key.Key_Left, Qt.Key.
                     Qt.Key.Key_Up, Qt.Key.Key_Down}
 _SHORTCUT_MODIFIERS = (Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.AltModifier
                        | Qt.KeyboardModifier.MetaModifier)
+_WHEEL_CONTROLS = (QSlider, QAbstractSpinBox, QComboBox)
 
 
 def is_navigation_key(key, modifiers) -> bool:
@@ -80,7 +84,8 @@ class _KeyboardNavigation(QObject):
     """The one app-wide answer to "is the user moving focus by keyboard": on for a navigation
     key, off for any mouse press. The stylesheet's :focus rings match only a widget whose
     `keyboard_ring` property is true, which is kept in step on the focused widget alone, so a
-    change repolishes one widget rather than the window."""
+    change repolishes one widget rather than the window. Scrollable settings require focus
+    before their controls can take the wheel."""
 
     def __init__(self, app) -> None:
         super().__init__(app)
@@ -89,6 +94,8 @@ class _KeyboardNavigation(QObject):
 
     def eventFilter(self, watched, event) -> bool:
         kind = event.type()
+        if kind in (QEvent.Type.Polish, QEvent.Type.Wheel):
+            return self._scroll_wheel(watched, event)
         if kind not in (QEvent.Type.KeyPress, QEvent.Type.MouseButtonPress,
                         QEvent.Type.MouseButtonDblClick, QEvent.Type.FocusIn):
             return False
@@ -99,6 +106,44 @@ class _KeyboardNavigation(QObject):
         elif kind == QEvent.Type.FocusIn and isinstance(watched, QWidget):
             self._mark(watched)
         return False
+
+    def _scroll_wheel(self, watched, event) -> bool:
+        control = watched
+        if not isinstance(control, QWidget):
+            return False
+        if event.type() == QEvent.Type.Polish and not isinstance(control, _WHEEL_CONTROLS):
+            return False
+        while not isinstance(control, _WHEEL_CONTROLS):
+            if control.isWindow() or isinstance(control, QScrollArea):
+                return False
+            control = control.parentWidget()
+            if control is None:
+                return False
+        area = control.parentWidget()
+        while area is not None and not isinstance(area, QScrollArea):
+            if area.isWindow():
+                return False
+            area = area.parentWidget()
+        if area is None:
+            return False
+        if event.type() == QEvent.Type.Polish:
+            # WheelFocus acquires focus before application filters see a real wheel event.
+            if control.focusPolicy() == Qt.FocusPolicy.WheelFocus:
+                control.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+            return False
+        if control.hasFocus():
+            return False
+        viewport = area.viewport()
+        forwarded = QWheelEvent(
+            QPointF(viewport.mapFromGlobal(event.globalPosition().toPoint())),
+            event.globalPosition(), event.pixelDelta(), event.angleDelta(),
+            event.buttons(), event.modifiers(), event.phase(), event.inverted(),
+            event.source(), event.pointingDevice())
+        forwarded.setTimestamp(event.timestamp())
+        # Explicit forwarding also handles synthetic wheels, which Qt does not propagate.
+        QApplication.sendEvent(viewport, forwarded)
+        event.setAccepted(forwarded.isAccepted())
+        return True
 
     def set(self, active: bool) -> None:
         if active == self.active:

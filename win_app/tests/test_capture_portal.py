@@ -496,10 +496,15 @@ class HooksTest(unittest.TestCase):
         with self.assertLogs(capture_portal.LOGGER, level="INFO") as said:
             h = self.make()
             h.start()
-            h.hooks._key = None
-            h.hooks._place_barriers(h.hooks._session)
+            h.models = [return_edge.ReturnEdge("bottom")]
+            wait_for(lambda: len(h.bus.made("Enable")) == 2, what="the session enabled again")
         ready = [line for line in said.output if "Input capture is ready" in line]
         self.assertEqual(ready, ["INFO:capture_portal:Input capture is ready: 1 of 1 edge barriers placed"])
+        self.assertEqual(
+            [[item["position"] for item in call[2]] for call in h.bus.made("SetPointerBarriers")],
+            [[("(iiii)", (1920, 0, 1920, 1079))], [("(iiii)", (0, 1080, 1919, 1080))]],
+        )
+        self.assertEqual(h.failures, [])
 
     def test_push_through_moves_to_a_barrier_then_steps_outward_and_captures_once(self):
         h = self.make()

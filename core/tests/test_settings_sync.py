@@ -45,6 +45,17 @@ def pc_config(**fields):
 
 
 class MessageTests(unittest.TestCase):
+    def test_admin_mode_is_never_transmitted_or_applied(self):
+        config = pc_config(run_as_administrator=True)
+        self.assertNotIn("run_as_administrator", settings_sync.pc_values(config))
+        data = settings_sync.message_data(True, 1, {"run_as_administrator": True})
+        self.assertNotIn("run_as_administrator", data["crossing"])
+        self.assertNotIn("run_as_administrator", data["design"])
+        settings_sync.apply_pc(config, {"run_as_administrator": False})
+        self.assertTrue(config.run_as_administrator)
+        raw = mac_raw()
+        self.assertNotIn("run_as_administrator", settings_sync.apply_mac(raw, {"run_as_administrator": True}))
+
     def test_pc_modifier_style_is_local_and_not_part_of_same_on_all_machines(self):
         self.assertNotIn("modifier_style", settings_sync.CROSSING_KEYS + settings_sync.DESIGN_KEYS)
 

@@ -126,6 +126,7 @@ _FN_CODES |= {KEY_NAME_TO_CODE[f"f{number}"] for number in range(1, 21)}
 
 _mods_down: Set[str] = set()
 _held_codes: Dict[str, int] = {}
+_keys_down: Set[str] = set()
 _buttons_down: Set[str] = set()
 _last_click: Dict[str, Tuple[float, int, int, int]] = {}
 _warned_names: Set[str] = set()
@@ -372,6 +373,9 @@ def inject_key(name: str, down: bool, us: Optional[str] = None) -> None:
     event = quartz.CGEventCreateKeyboardEvent(None, key_code, bool(down))
     if event is None:
         raise RuntimeError(f"CGEventCreateKeyboardEvent failed for {name!r}")
+    # Repeated downs arrive without a wire flag. Fresh CGEvents otherwise turn a hold into taps.
+    quartz.CGEventSetIntegerValueField(event, quartz.kCGKeyboardEventAutorepeat,
+                                     int(down and name in _keys_down))
     if text is None:
         quartz.CGEventSetFlags(event, current_flags(_mods_down) | key_flags(key_code))
     else:
@@ -380,6 +384,11 @@ def inject_key(name: str, down: bool, us: Optional[str] = None) -> None:
         # leaving shift set would have some apps type it twice over.
         quartz.CGEventSetFlags(event, 0)
     _post(event)
+    if lowered not in MODIFIER_FLAG_NAMES:
+        if down:
+            _keys_down.add(name)
+        else:
+            _keys_down.discard(name)
 
 
 def clamp_to_displays(x: int, y: int, rects) -> Tuple[int, int]:
@@ -616,7 +625,7 @@ def release_all() -> None:
     """Let go of every key and button this module is holding. Called when the
     link drops mid-chord, so a Command key held at the moment the PC went
     away does not stay down on the Mac."""
-    for name in sorted(_mods_down) + sorted(_held_codes):
+    for name in sorted(_mods_down) + sorted(_keys_down | _held_codes.keys()):
         try:
             inject_key(name, down=False)
         except Exception:
@@ -628,5 +637,6 @@ def release_all() -> None:
             LOGGER.exception("Could not release the %s mouse button", button)
     _mods_down.clear()
     _held_codes.clear()
+    _keys_down.clear()
     _buttons_down.clear()
     reset_scroll_remainders()

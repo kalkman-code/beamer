@@ -54,6 +54,10 @@ NOT_SHOWN = {
     "beginActivityWithOptions_reason_", "asset_path", "CreateMutexW", "OpenMutexW", "QKeySequence",
     "_turn_off_clashes", "exception", "_force_local", "stringForKey_", "open_dbus_connection", "update",
     "require_version", "_log_helper_failure",
+    "report_input_problem",  # Operation names are log diagnostics; the blocker supplies translated UI text.
+    # XML paths and scheduled-task run levels are Windows data, not translated prose.
+    "find", "findall", "findtext", "SubElement", "task_xml",
+    "_FlagAsMethod",  # COM method identifiers must retain their registered spelling.
 }
 
 

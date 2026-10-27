@@ -18,7 +18,10 @@ drives it, the position here is stale until the peer's next move puts it back: n
 the local pointer.
 
 A full-screen app cannot be seen and no button can be asked after (button_down is False), so the
-full-screen hold and the drag guard have nothing to go on here."""
+full-screen hold and the drag guard have nothing to go on here. GNOME and KDE hide the pointer
+for the lifetime of active InputCapture, restoring it on release or client disconnection.
+Outside capture, Wayland provides no global hide or local-motion notification. A blank-cursor
+surface would have to take pointer focus from other apps, so idle hiding is left unavailable."""
 
 import logging
 import math

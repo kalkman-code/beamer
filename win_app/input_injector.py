@@ -3,6 +3,8 @@
 import ctypes
 import functools
 import logging
+import os
+import subprocess
 import sys
 import threading
 import time
@@ -10,20 +12,38 @@ import unicodedata
 from typing import Callable, Dict, List, Optional, Set, Tuple
 
 from core.keytable import EVDEV_US
-from core.i18n import tr
+from input_blocker import foreground_blocker
+from firewall_win import is_elevated
 
 
 LOGGER = logging.getLogger(__name__)
 on_problem = None
 _problem_at = float("-inf")
+_problem_logged = None
+_problem_notified = set()
+_problem_lock = threading.Lock()
 
 
-def report_input_problem() -> None:
-    global _problem_at
-    now = time.monotonic()
-    if on_problem is not None and now - _problem_at >= 30:
-        _problem_at = now
-        on_problem(tr("Windows blocked Beamer's input; use administrator windows locally and click a normal window on this PC to continue."))
+def report_input_problem(blocker=None, *, operation="input", error=None) -> None:
+    global _problem_at, _problem_logged
+    blocker = blocker if blocker is not None else foreground_blocker()
+    with _problem_lock:
+        log_problem = blocker.key != _problem_logged
+        _problem_logged = blocker.key
+        now = time.monotonic()
+        notify = on_problem if (on_problem is not None and blocker.key not in _problem_notified
+                                and now - _problem_at >= 30) else None
+        if notify is not None:
+            _problem_at = now
+            _problem_notified.add(blocker.key)
+    if log_problem:
+        LOGGER.warning(
+            "%s refused (last_error=%s): process=%r pid=%s class=%r elevated=%s integrity=%s query_error=%s",
+            operation, error, blocker.process_name, blocker.pid, blocker.window_class,
+            blocker.elevated, blocker.integrity, blocker.query_error,
+        )
+    if notify is not None:
+        notify(blocker.message(receiver_elevated=is_elevated()))
 
 _IS_WINDOWS = sys.platform == "win32"
 
@@ -117,11 +137,15 @@ def _send_input(*inputs: INPUT) -> None:
         raise RuntimeError("Win32 SendInput is only available on Windows")
     count = len(inputs)
     array = (INPUT * count)(*inputs)
+    ctypes.set_last_error(0)
     sent = user32.SendInput(count, array, ctypes.sizeof(INPUT))
     if sent != count:
-        error = ctypes.get_last_error()
-        report_input_problem()
-        raise OSError(error, "Windows refused Beamer's input (administrator windows require local input)")
+        error = ctypes.get_last_error() or None
+        blocker = foreground_blocker()
+        report_input_problem(blocker, operation="SendInput", error=error)
+        if blocker.window_class == GAMEINPUT_WINDOW_CLASS:
+            release_gameinput_foreground()
+        raise OSError(error or 0, "Windows refused Beamer's input")
 
 
 def _vk_key_scan(ch: str) -> int:
@@ -485,9 +509,14 @@ def inject_mouse_move(dx: int, dy: int) -> None:
     watch_foreground()
 
 
-# GameInput can leave a SYSTEM-owned window in front; only local input can leave it.
+# GameInput can leave a SYSTEM-owned window in front after another window closes.
 GAMEINPUT_WINDOW_CLASS = "GameInputServiceWindow"
+GAMEINPUT_RECOVERY_TASK = "Beamer-GameInputRecovery"
 _seen_foreground = [None]
+_gameinput_lock = threading.Lock()
+_gameinput_restarted_at = float("-inf")
+_gameinput_running = False
+_gameinput_afters = []
 
 
 def _window_class(hwnd) -> str:
@@ -515,10 +544,75 @@ def watch_foreground() -> None:
 
 
 def release_gameinput_foreground(after: Optional[Callable[[], None]] = None) -> bool:
-    """Report the SYSTEM-window limitation; service recovery belongs to installation."""
-    if foreground_class() == GAMEINPUT_WINDOW_CLASS:
-        report_input_problem()
-    return False
+    """Request the installer's fixed SYSTEM task without elevating the input process."""
+    global _gameinput_restarted_at, _gameinput_running, _gameinput_afters
+    if foreground_class() != GAMEINPUT_WINDOW_CLASS:
+        return False
+    report_input_problem()
+    with _gameinput_lock:
+        if _gameinput_running:
+            if after is not None:
+                _gameinput_afters.append(after)
+            return True
+        now = time.monotonic()
+        if now - _gameinput_restarted_at < 60:
+            return False
+        _gameinput_restarted_at = now
+        _gameinput_running = True
+        _gameinput_afters = [after] if after is not None else []
+
+    def recover():
+        global _gameinput_running, _gameinput_afters
+        finished = False
+        try:
+            # Never resolve a privileged helper through the current directory or PATH.
+            system = ctypes.create_unicode_buffer(32768)
+            kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+            if not kernel.GetSystemDirectoryW(system, len(system)):
+                raise ctypes.WinError(ctypes.get_last_error())
+            completed = subprocess.run(
+                [os.path.join(system.value, "schtasks.exe"), "/Run", "/TN", GAMEINPUT_RECOVERY_TASK],
+                capture_output=True, timeout=10,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            )
+            if completed.returncode:
+                LOGGER.warning("GameInput recovery task could not start (exit %s); repair Beamer with its installer",
+                               completed.returncode)
+                return
+            # /Run acknowledges dispatch, not completion. Only retry after the blocking window leaves.
+            for _ in range(100):
+                if foreground_class() != GAMEINPUT_WINDOW_CLASS:
+                    with _gameinput_lock:
+                        callbacks = _gameinput_afters
+                        _gameinput_afters = []
+                        _gameinput_running = False
+                        finished = True
+                    LOGGER.info("GameInput foreground released after recovery task")
+                    # Different link threads can register out of visit order; each callback owns its guard.
+                    for callback in callbacks:
+                        try:
+                            callback()
+                        except Exception:
+                            LOGGER.exception("Could not place the pointer after GameInput recovery")
+                    return
+                time.sleep(0.1)
+            LOGGER.warning("GameInput still holds foreground after recovery task; a local click is needed")
+        except Exception:
+            LOGGER.exception("GameInput recovery failed; a local click is needed")
+        finally:
+            if not finished:
+                with _gameinput_lock:
+                    _gameinput_running = False
+                    _gameinput_afters = []
+
+    try:
+        threading.Thread(target=recover, name="Beamer-gameinput", daemon=True).start()
+    except Exception:
+        with _gameinput_lock:
+            _gameinput_running = False
+            _gameinput_afters = []
+        raise
+    return True
 
 
 BUTTON_DOWN_FLAGS = {

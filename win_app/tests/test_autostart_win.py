@@ -45,6 +45,14 @@ class TaskXmlTests(unittest.TestCase):
     def test_escapes_the_path(self):
         ET.fromstring(autostart_win.task_xml(r"C:\A & B\Beamer.exe", "u").replace('encoding="UTF-16"', ""))
 
+    def test_omitted_runlevel_matches_only_the_default_privilege_preference(self):
+        root = ET.fromstring(autostart_win.task_xml(EXE, r"STUDIO-PC\alex", run_level="LeastPrivilege").replace(
+            "<RunLevel>LeastPrivilege</RunLevel>", ""))
+        with patch.object(autostart_win, "preferred_run_level", return_value="LeastPrivilege"):
+            self.assertTrue(autostart_win._replacement_ready(root, EXE, "--hidden"))
+        with patch.object(autostart_win, "preferred_run_level", return_value="HighestAvailable"):
+            self.assertFalse(autostart_win._replacement_ready(root, EXE, "--hidden"))
+
 
 class SwitchTests(unittest.TestCase):
     def test_empty_session_identity_is_reported_as_unavailable(self):

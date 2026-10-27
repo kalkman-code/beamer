@@ -113,6 +113,40 @@ class HidePointerSettingTests(unittest.TestCase):
     def test_an_earlier_runs_hidden_pointer_is_given_back_at_start(self):
         self.assertEqual(self.desktop.calls[0], ("restore",))
 
+    def test_wayland_explains_idle_hiding_without_offering_an_ineffective_switch(self):
+        from PySide6.QtWidgets import QLabel
+
+        self.desktop.CAN_HIDE_POINTER = False
+        self.window._idle_pointer.cancel()
+        self.window._idle_pointer = self.window._make_idle_pointer()
+        with mock.patch.object(kvm_bridge_win.platform_parts, "WAYLAND", True):
+            module = self.window._input_module()
+        self.addCleanup(module.deleteLater)
+        self.assertIsNone(self.window._idle_pointer)
+        self.assertTrue(self.window.pointer_switch.isHidden())
+        notes = [label for label in module.findChildren(QLabel)
+                 if "cannot hide the pointer after another machine stops driving" in label.text()]
+        self.assertEqual(len(notes), 1)
+        self.assertFalse(notes[0].isHidden())
+        self.desktop.calls.clear()
+        self.window._on_sender_redirecting(True)
+        self.window._on_sender_redirecting(False)
+        self.window._on_owner("peer")
+        self.window._on_owner("")
+        self.assertEqual(self.desktop.calls, [])
+
+    def test_x11_keeps_the_existing_pointer_setting_without_the_wayland_limitation(self):
+        from PySide6.QtWidgets import QLabel
+
+        with mock.patch.object(kvm_bridge_win.platform_parts, "WAYLAND", False):
+            module = self.window._input_module()
+        self.addCleanup(module.deleteLater)
+        self.assertFalse(self.window.pointer_switch.isHidden())
+        notes = [label for label in module.findChildren(QLabel)
+                 if "cannot hide the pointer after another machine stops driving" in label.text()]
+        self.assertEqual(len(notes), 1)
+        self.assertTrue(notes[0].isHidden())
+
 
 if __name__ == "__main__":
     unittest.main()

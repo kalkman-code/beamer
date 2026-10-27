@@ -9,12 +9,19 @@ from unittest.mock import patch
 import desktop_win
 import firewall_win
 import input_injector
+from input_blocker import ForegroundBlocker
 
 
 class OrdinaryInputTests(unittest.TestCase):
+    def setUp(self):
+        notified = patch.object(input_injector, "_problem_notified", set())
+        notified.start()
+        self.addCleanup(notified.stop)
+
     def test_sendinput_refusal_reports_problem_without_spamming(self):
         notices = []
         with patch.object(input_injector, "user32", SimpleNamespace(SendInput=lambda *a: 0)), \
+                patch.object(input_injector, "foreground_blocker", return_value=ForegroundBlocker(process_name="admin.exe", elevated=True)), \
                 patch.object(input_injector, "on_problem", notices.append, create=True), \
                 patch.object(input_injector, "_problem_at", float("-inf"), create=True), \
                 patch.object(ctypes, "get_last_error", return_value=0, create=True):
@@ -22,7 +29,7 @@ class OrdinaryInputTests(unittest.TestCase):
                 with self.assertRaises(OSError):
                     input_injector._send_input(input_injector.INPUT())
         self.assertEqual(len(notices), 1)
-        self.assertIn("locally", notices[0])
+        self.assertIn("admin.exe", notices[0])
 
     def test_successful_input_has_no_warning(self):
         notices = []
@@ -31,22 +38,25 @@ class OrdinaryInputTests(unittest.TestCase):
             input_injector._send_input(input_injector.INPUT())
         self.assertEqual(notices, [])
 
-    def test_gameinput_refusal_never_runs_service_maintenance(self):
+    def test_gameinput_refusal_delegates_recovery_without_inline_maintenance(self):
         notices, commands = [], []
         with patch.object(input_injector, "foreground_class", return_value="GameInputServiceWindow"), \
+                patch.object(input_injector, "foreground_blocker", return_value=ForegroundBlocker(window_class="GameInputServiceWindow")), \
+                patch.object(input_injector, "_gameinput_running", False), \
+                patch.object(input_injector, "_gameinput_restarted_at", float("-inf")), \
                 patch.object(input_injector, "on_problem", notices.append, create=True), \
                 patch.object(input_injector, "_problem_at", float("-inf"), create=True), \
                 patch.object(subprocess, "run", side_effect=lambda *a, **k: commands.append(a)), \
                 patch.object(input_injector.threading, "Thread") as thread:
-            self.assertFalse(input_injector.release_gameinput_foreground())
+            self.assertTrue(input_injector.release_gameinput_foreground())
         self.assertEqual(commands, [])
-        thread.assert_not_called()
+        thread.return_value.start.assert_called_once()
         self.assertEqual(len(notices), 1)
 
     def test_failed_cursor_placement_reports_problem(self):
         notices = []
         with patch.object(desktop_win, "user32", SimpleNamespace(SetCursorPos=lambda *a: 0)), \
-                patch.object(input_injector, "foreground_class", return_value="AdminWindow"), \
+                patch.object(input_injector, "foreground_blocker", return_value=ForegroundBlocker(window_class="AdminWindow", process_name="admin.exe", elevated=True)), \
                 patch.object(input_injector, "on_problem", notices.append, create=True), \
                 patch.object(input_injector, "_problem_at", float("-inf"), create=True), \
                 patch.object(desktop_win, "_refused_under", [None]), \

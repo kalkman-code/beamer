@@ -108,31 +108,41 @@ def set_cursor_position_with_callback(x: int, y: int, on_placed=None, *, place_i
     """Report blocked placement without claiming that the receiver arrived."""
     _require()
     x, y = int(x), int(y)
+    error = None
     def place():
+        nonlocal error
+        # Capture here: the ownership guard and foreground queries also call Win32.
+        ctypes.set_last_error(0)
         if user32.SetCursorPos(x, y):
             _refused_under[0] = None
             if on_placed is not None:
                 on_placed()
             return True
+        error = ctypes.get_last_error() or None
         return False
 
     # The warp and its completion share the receiver's ownership lock.
     result = place_if_current(place) if place_if_current is not None else place()
     if result is not False:
         return
-    error = ctypes.get_last_error()
     import input_injector
 
-    blocker = input_injector.foreground_class()
+    blocker = input_injector.foreground_blocker()
+    input_injector.report_input_problem(blocker, operation="SetCursorPos", error=error)
     # A hold at the return edge lands here on every move, so once per blocker.
-    if blocker != _refused_under[0]:
-        _refused_under[0] = blocker
-        input_injector.report_input_problem()
+    if blocker.key != _refused_under[0]:
+        _refused_under[0] = blocker.key
         LOGGER.warning(
-            "SetCursorPos refused (error %s) with %r in the foreground; Windows refuses Beamer's input "
-            "while a window above its integrity level is in front, until a click on this PC",
-            error, blocker,
+            "SetCursorPos refused (last_error=%s): process=%r pid=%s class=%r elevated=%s integrity=%s query_error=%s",
+            error, blocker.process_name, blocker.pid, blocker.window_class,
+            blocker.elevated, blocker.integrity, blocker.query_error,
         )
+    def retry():
+        place_if_current(place)
+
+    if blocker.window_class == input_injector.GAMEINPUT_WINDOW_CLASS:
+        # Sender pins and return-edge corrections have no visit guard and can become stale.
+        input_injector.release_gameinput_foreground(after=retry if place_if_current is not None else None)
 
 
 # What SHQueryUserNotificationState says while something owns the whole screen. 3 is a Direct3D

@@ -1,8 +1,8 @@
 """Start at logon, owned by the app: each interactive account has its own scheduled task, so there
 is no config field to disagree with it.
 
-The task uses the signed-in user's ordinary token, including standard accounts. The installer
-lowers old elevated tasks without changing whether the user enabled them.
+The task uses the signed-in user's ordinary token unless that administrator explicitly opts in
+on this PC. The installer lowers old elevated tasks when that preference is absent.
 
 Registered from XML, not `schtasks /create /sc onlogon`: that form cannot set a working directory
 and gives every task a 72-hour execution limit, which would stop Beamer three days after logon.
@@ -97,7 +97,15 @@ def installed_exe() -> Optional[str]:
     return sys.executable if getattr(sys, "frozen", False) and not portable_runtime.enabled() else None
 
 
-def task_xml(exe: str, user: str, arguments: str = "--hidden") -> str:
+def preferred_run_level() -> str:
+    import admin_mode
+    return "HighestAvailable" if admin_mode.enabled() else "LeastPrivilege"
+
+
+def task_xml(exe: str, user: str, arguments: str = "--hidden", *, run_level: Optional[str] = None) -> str:
+    run_level = preferred_run_level() if run_level is None else run_level
+    if run_level not in ("LeastPrivilege", "HighestAvailable"):
+        raise ValueError("invalid Windows task run level")
     return f"""<?xml version="1.0" encoding="UTF-16"?>
 <Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
   <Triggers>
@@ -110,7 +118,7 @@ def task_xml(exe: str, user: str, arguments: str = "--hidden") -> str:
     <Principal id="Author">
       <UserId>{escape(user)}</UserId>
       <LogonType>InteractiveToken</LogonType>
-      <RunLevel>LeastPrivilege</RunLevel>
+      <RunLevel>{run_level}</RunLevel>
     </Principal>
   </Principals>
   <Settings>
@@ -152,7 +160,10 @@ def _task_root(name: str, run: Runner):
 def _task_enabled(name: str, run: Runner) -> bool:
     root = _task_root(name, run)
     ns = {"t": "http://schemas.microsoft.com/windows/2004/02/mit/task"}
-    return root is not None and root.findtext("t:Settings/t:Enabled", "true", ns).lower() == "true"
+    return (root is not None
+            and root.findtext("t:Settings/t:Enabled", "true", ns).lower() == "true"
+            and any(trigger.findtext("t:Enabled", "true", ns).lower() == "true"
+                    for trigger in root.findall("t:Triggers/t:LogonTrigger", ns)))
 
 
 def _replacement_ready(root, exe: str, arguments: str) -> bool:
@@ -166,7 +177,7 @@ def _replacement_ready(root, exe: str, arguments: str) -> bool:
                 for trigger in root.findall("t:Triggers/t:LogonTrigger", ns))
         and ntpath.normcase(command) == ntpath.normcase(exe)
         and root.findtext("t:Actions/t:Exec/t:Arguments", "", ns) == arguments
-        and root.findtext("t:Principals/t:Principal/t:RunLevel", "", ns) == "LeastPrivilege"
+        and root.findtext("t:Principals/t:Principal/t:RunLevel", "LeastPrivilege", ns) == preferred_run_level()
         and root.findtext("t:Principals/t:Principal/t:LogonType", "", ns) == "InteractiveToken"
     )
 
@@ -222,6 +233,13 @@ def set_enabled(enabled: bool, exe: str, user: Optional[str] = None, run: Runner
         raise OSError("Portable Beamer cannot change start at sign-in")
     user = user or current_user()
     name = task_name(user)
+    if preferred_run_level() == "HighestAvailable":
+        import admin_mode
+        if not admin_mode._is_elevated():
+            if enabled and _replacement_ready(_task_root(name, run), exe, arguments):
+                return
+            admin_mode.change_startup(enabled)
+            return
     if not enabled:
         remove_legacy_task(run)
         if run(["schtasks", "/query", "/tn", name]).returncode != 0:
@@ -230,6 +248,9 @@ def set_enabled(enabled: bool, exe: str, user: Optional[str] = None, run: Runner
     else:
         if not can_run_for_current_user():
             raise OSError("Start at sign-in needs Beamer to run as the signed-in account")
+        if _replacement_ready(_task_root(name, run), exe, arguments):
+            remove_legacy_task(run, disable_first=True)
+            return
         fd, path = tempfile.mkstemp(suffix=".xml")
         try:
             with os.fdopen(fd, "w", encoding="utf-16") as handle:

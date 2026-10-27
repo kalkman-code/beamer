@@ -5,6 +5,7 @@ the status script emits, so the decisions run on the Mac with no Windows at all.
 """
 
 import unittest
+import json
 import os
 import sys
 from unittest import mock
@@ -253,10 +254,52 @@ class InterpretTests(InstallerAdviceAssertions, unittest.TestCase):
         self.assertIn("administrator", advice.sentence)
 
     def test_error_offers_a_recheck(self):
-        status = firewall_win.FirewallStatus(PORT, False, False, (), (), False, (), True, error="Access is denied")
+        status = firewall_win.FirewallStatus(PORT, False, False, (), (), False, (), True,
+                                           error="Get-NetFirewallApplicationFilter : Acceso denegado")
         advice = advise(status)
         self.assertEqual(advice.action, "check")
-        self.assertIn("Access is denied", advice.sentence)
+        self.assertNotIn("Get-NetFirewall", advice.sentence)
+        self.assertNotIn("Acceso denegado", advice.sentence)
+
+    def test_permission_refusal_does_not_claim_missing_rules(self):
+        raw = json.dumps({"error": "permission-denied", "category": 18, "hresult": -2147024891})
+        with mock.patch.object(firewall_win, "is_elevated", return_value=False), \
+                mock.patch.object(firewall_win, "_powershell", return_value=raw):
+            status = firewall_win.status(EXE, PORT)
+        self.assertEqual(status.error, "permission-denied")
+        self.assertFalse(status.elevated)
+        self.assertFalse(status.allowed)
+        self.assertFalse(firewall_win.missing_rule(status))
+        advice = advise(status)
+        self.assertIn("administrator", advice.sentence)
+        self.assertIn("installer", advice.sentence)
+        self.assertNotIn("need attention", advice.sentence)
+        self.assertEqual(advice.action, "check")
+
+    def test_unexpected_status_errors_never_reach_the_advice(self):
+        failures = (RuntimeError("Get-NetFirewallApplicationFilter : Acceso denegado"),
+                    TimeoutError("private PowerShell diagnostic"))
+        for failure in failures:
+            with self.subTest(failure=type(failure).__name__), \
+                    mock.patch.object(firewall_win, "is_elevated", return_value=False), \
+                    mock.patch.object(firewall_win, "_powershell", side_effect=failure):
+                status = firewall_win.status(EXE, PORT)
+            self.assertEqual(status.error, "query-failed")
+            self.assertFalse(firewall_win.missing_rule(status))
+            self.assertNotIn(str(failure), advise(status).sentence)
+
+    def test_structured_unexpected_failure_does_not_claim_missing_rules(self):
+        with mock.patch.object(firewall_win, "_powershell", return_value='{"error":"query-failed","category":0}'):
+            status = firewall_win.status(EXE, PORT)
+        self.assertEqual(status.error, "query-failed")
+        self.assertFalse(firewall_win.missing_rule(status))
+
+    def test_malformed_status_payload_does_not_claim_missing_rules(self):
+        for raw in ('{"error":"unrecognised diagnostic"}', '{"rules":[],"networks":[]} trailing'):
+            with self.subTest(raw=raw), mock.patch.object(firewall_win, "_powershell", return_value=raw):
+                status = firewall_win.status(EXE, PORT)
+            self.assertEqual(status.error, "query-failed")
+            self.assertFalse(firewall_win.missing_rule(status))
 
     def test_status_off_windows_reports_an_error_not_a_crash(self):
         if firewall_win._IS_WINDOWS:
@@ -264,6 +307,51 @@ class InterpretTests(InstallerAdviceAssertions, unittest.TestCase):
         status = firewall_win.status(EXE, PORT)
         self.assertTrue(status.error)
         self.assertFalse(status.allowed)
+
+
+@unittest.skipUnless(sys.platform == "win32", "native Windows PowerShell error records")
+class StatusErrorRecordTests(unittest.TestCase):
+    def test_cim_native_error_code_requires_a_typed_access_denied_exception(self):
+        for code, expected in ((2, "permission-denied"), (5, "query-failed")):
+            script = f"""
+$failure = [Microsoft.Management.Infrastructure.CimException]::new('Acceso denegado')
+$field = $failure.GetType().GetField('<NativeErrorCode>k__BackingField', 'Instance,NonPublic')
+$field.SetValue($failure, [Microsoft.Management.Infrastructure.NativeErrorCode]{code})
+$record = [System.Management.Automation.ErrorRecord]::new($failure, 'FW26CimFixture',
+    [System.Management.Automation.ErrorCategory]::InvalidOperation, $null)
+Write-Error -ErrorRecord $record
+"""
+            with self.subTest(code=code):
+                raw = firewall_win._powershell(firewall_win._STATUS_SCRIPT.format(
+                    exe=firewall_win._quote(EXE), filters=script))
+                payload = json.loads(raw)
+                self.assertNotEqual(payload["category"], 18)
+                self.assertNotIn(payload["hresult"], (-2147024891, -2147217405))
+                self.assertEqual(payload["error"], expected)
+                self.assertEqual(payload["native_error"], code)
+
+    def test_localised_permission_category_is_classified_without_message_matching(self):
+        with mock.patch.object(firewall_win, "_RULES_FOR_LEAF", "Write-Error 'Acceso denegado' -Category PermissionDenied"), \
+                mock.patch.object(firewall_win, "is_elevated", return_value=False):
+            status = firewall_win.status(EXE, PORT)
+        self.assertEqual(status.error, "permission-denied")
+        self.assertIn("administrator", advise(status).sentence)
+        self.assertFalse(firewall_win.missing_rule(status))
+
+    def test_access_denied_hresult_is_classified_without_message_matching(self):
+        for hresult in (-2147024891, -2147217405):
+            with self.subTest(hresult=hresult), mock.patch.object(
+                firewall_win, "_RULES_FOR_LEAF",
+                f"throw [System.Runtime.InteropServices.COMException]::new('Refus', {hresult})",
+            ):
+                status = firewall_win.status(EXE, PORT)
+            self.assertEqual(status.error, "permission-denied")
+
+    def test_localised_access_words_alone_are_not_classified_as_permission(self):
+        with mock.patch.object(firewall_win, "_RULES_FOR_LEAF", "throw 'Acceso denegado'"):
+            status = firewall_win.status(EXE, PORT)
+        self.assertEqual(status.error, "query-failed")
+        self.assertNotIn("Acceso denegado", advise(status).sentence)
 
 
 class RepairScriptTests(unittest.TestCase):

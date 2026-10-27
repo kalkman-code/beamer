@@ -321,6 +321,7 @@ class StatusBridge(QObject):
     # (method, edge, x, y): the pointer landed on this PC at desktop pixel (x, y).
     arrived = Signal(str, str, float, float)
     firewall = Signal(object)
+    admin_changed = Signal(object)
     # A pairing this PC hosted finished and was stored: the new peer entry.
     paired = Signal(object)
     # A pairing this PC requested ended: (the entry stored or None, the error or None).
@@ -570,6 +571,7 @@ class WindowsApplication(QWidget):
         self.bridge.local_pressure.connect(self._on_local_pressure)
         self.bridge.arrived.connect(self._on_arrival)
         self.bridge.firewall.connect(self._on_firewall)
+        self.bridge.admin_changed.connect(self._on_admin_mode_changed)
         self.bridge.paired.connect(self._on_paired)
         self.bridge.pair_finished.connect(self._on_pair_finished)
         self.bridge.sending.connect(self._on_sending)
@@ -1340,21 +1342,83 @@ class WindowsApplication(QWidget):
             tr("This PC's pointer hides while it drives another machine, and after another machine stops driving it, "
             "until its own mouse moves."), "note", wrap=True)
         module.body.addWidget(pointer_note)
+        wayland_pointer_note = widgets.label(
+            tr("On Wayland your desktop controls pointer hiding while this PC drives another machine. "
+               "Beamer cannot hide the pointer after another machine stops driving this PC."), "note", wrap=True)
+        wayland_pointer_note.setVisible(platform_parts.WAYLAND)
+        module.body.addWidget(wayland_pointer_note)
         self.wayland_crossing_note = widgets.label(
             tr("On Wayland Beamer cannot see a full-screen app, or a mouse button held before the pointer reaches an "
             "edge, so the edges are never held for one and a drag can cross."), "note", wrap=True)
         module.body.addWidget(self.wayland_crossing_note)
         if sys.platform == "win32":
-            module.body.addWidget(widgets.label(
-                tr("Beamer controls normal windows; use administrator windows and Windows permission prompts locally."),
-                "note", wrap=True))
+            self._admin_control(module)
         for widget in (self.hold_switch, own_note, hold_note):
             widget.setVisible(not platform_parts.WAYLAND)
-        # Wayland gives an app no way to hide the pointer.
+        # Wayland owns hiding during capture; it offers no global idle-pointer hide.
         for widget in (self.pointer_switch, pointer_note):
             widget.setVisible(self._idle_pointer is not None)
         self.wayland_crossing_note.setVisible(platform_parts.WAYLAND)
         return module
+
+    def _admin_control(self, module) -> None:
+        self.admin_switch = widgets.Switch(tr("Control administrator windows"))
+        self.admin_switch.setFont(theme.font(theme.TYPE["body"]))
+        self.admin_switch.toggled.connect(self._set_admin_mode)
+        module.body.addWidget(self.admin_switch)
+        self.admin_note = widgets.label("", "note", wrap=True)
+        module.body.addWidget(self.admin_note)
+        module.body.addWidget(widgets.label(
+            tr("Use Windows permission prompts locally."), "note", wrap=True))
+        self._refresh_admin_mode()
+
+    def _refresh_admin_mode(self) -> None:
+        import admin_mode
+        try:
+            self._admin_mode_enabled = admin_mode.enabled()
+            reason = admin_mode.unavailable_reason()
+        except OSError:
+            self._admin_mode_enabled = False
+            reason = tr("Beamer could not read this PC's administrator setting. Restart Beamer to try again.")
+        self.admin_switch.blockSignals(True)
+        self.admin_switch.setChecked(self._admin_mode_enabled)
+        self.admin_switch.blockSignals(False)
+        self.admin_switch.setEnabled(not reason)
+        self.admin_note.setText(reason or tr(
+            "Beamer will run as administrator on this PC. Changing this restarts Beamer; Windows may ask for permission."))
+
+    def _set_admin_mode(self, enabled: bool) -> None:
+        import admin_mode
+        self.admin_switch.blockSignals(True)
+        self.admin_switch.setChecked(self._admin_mode_enabled)
+        self.admin_switch.blockSignals(False)
+        self.admin_switch.setEnabled(False)
+        self.admin_note.setText(tr("Waiting for Windows permission…"))
+
+        def work():
+            result = None
+            try:
+                if not admin_mode.change(enabled, config_path=self.config_path):
+                    result = False
+            except Exception as exc:
+                LOGGER.exception("Could not change administrator mode")
+                result = exc
+            self.bridge.admin_changed.emit(result)
+
+        threading.Thread(target=work, name="Beamer-administrator", daemon=True).start()
+
+    def _on_admin_mode_changed(self, error) -> None:
+        if error is False:
+            self._refresh_admin_mode()
+            return
+        if error is None:
+            self.quit()
+            return
+        self.admin_switch.blockSignals(True)
+        self.admin_switch.setChecked(self._admin_mode_enabled)
+        self.admin_switch.blockSignals(False)
+        self.admin_switch.setEnabled(True)
+        self.admin_note.setText(str(error))
 
     def _redirect_text(self) -> str:
         """Names the machine the button sends input to, which is the one the shortcut would pick."""
@@ -5786,8 +5850,13 @@ def _claim_instance():
         # and 183 (already exists) is the whole single-instance check.
         kernel32 = _windows_kernel32()
         mutex = kernel32.CreateMutexW(None, False, "Local\\Beamer.Receiver" + portable_runtime.instance_suffix())
-        already_running = ctypes.get_last_error() == 183
+        error = ctypes.get_last_error()
+        already_running = error == 183
         if not mutex:
+            # A medium replacement cannot open the high instance's mutex with all-access.
+            # Treat it as occupied so --relaunched waits until the old process has quit.
+            if error == 5:
+                return None
             raise OSError("Beamer could not create its single-instance lock")
         if already_running:
             kernel32.CloseHandle(mutex)
@@ -5913,6 +5982,18 @@ def main() -> None:
     if release is None:
         activate_existing_instance(arguments.hidden, os.environ.get("XDG_ACTIVATION_TOKEN"))
         return
+    startup_admin_error = None
+    if sys.platform == "win32":
+        import admin_mode
+        try:
+            relaunched_as_admin = admin_mode.relaunch_if_required(
+                arguments.config.expanduser().resolve(), hidden=arguments.hidden)
+        except OSError as exc:
+            startup_admin_error = exc
+        else:
+            if relaunched_as_admin:
+                release()
+                return
     log_path = configure_logging()
     if log_path is not None:
         crash_log.install(log_path.parent, LOGGER)
@@ -5954,6 +6035,8 @@ def main() -> None:
         )
         application._input_controller_release = controller_release
         controller_release = None
+        if startup_admin_error is not None:
+            application._on_admin_mode_changed(startup_admin_error)
         quit_signals = quit_signals_module.QuitSignals(application.quit, parent=app)
         instance_signal = InstanceSignal(application.show_window, parent=app)
         if not instance_signal.listening:
@@ -6046,6 +6129,9 @@ def cleanup_for_uninstall() -> int:
 
 
 if __name__ == "__main__":
+    if sys.platform == "win32" and sys.argv[1:2] in (["--set-admin-mode"], ["--set-admin-startup"]):
+        import admin_mode
+        sys.exit(admin_mode.run_helper(sys.argv[1:]))
     # Before the single-instance lock, so a Beamer already running does not turn the probe away.
     if sys.argv[1:2] == ["--import-probe"]:
         sys.exit(import_probe(sys.argv[2], sys.argv[3:]))

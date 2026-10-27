@@ -55,6 +55,6 @@ executable = EXE(
     codesign_identity=None,
     entitlements_file=None,
     icon=str(source_dir / "Beamer.ico"),
-    # Elevated targets remain protected by UIPI; installation owns maintenance privileges.
+    # Default launches stay ordinary; administrator control needs explicit per-PC consent.
     uac_admin=False,
 )

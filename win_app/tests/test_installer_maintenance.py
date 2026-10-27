@@ -63,6 +63,152 @@ class MaintenanceBehaviourTests(unittest.TestCase):
             )
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
+    def test_explicit_administrator_preference_survives_upgrade(self):
+        self.run_probe(r'''
+$script:registered = @()
+function Get-BeamerAdministratorPreference($UserSid) { return $true }
+function Resolve-BeamerUserSid($Identity) { return $Identity }
+function Get-ScheduledTask { param($TaskPath, $ErrorAction)
+    return @([pscustomobject]@{ TaskName='Beamer-owner'; TaskPath='\' })
+}
+function Export-ScheduledTask { param($TaskName, $TaskPath, $ErrorAction)
+    return '<Task xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task"><Triggers><LogonTrigger><Enabled>false</Enabled></LogonTrigger></Triggers><Principals><Principal><UserId>S-1-5-21-123</UserId><LogonType>InteractiveToken</LogonType><RunLevel>HighestAvailable</RunLevel></Principal></Principals><Settings><Enabled>false</Enabled></Settings><Actions><Exec><Command>C:\Beamer\Beamer.exe</Command><Arguments>--hidden --keep-this</Arguments></Exec></Actions></Task>'
+}
+function Register-ScheduledTask { param($TaskName, $TaskPath, $Xml, [switch]$Force, $ErrorAction)
+    $script:registered += $Xml
+}
+Update-BeamerAutostart -ExePath 'C:\Beamer\Beamer.exe' -UserSid 'S-1-5-21-123'
+if ($script:registered.Count) { throw 'Upgrade rewrote an opted-in administrator task' }
+''')
+
+    def test_upgrade_preserves_omitted_default_runlevel_without_registration(self):
+        self.run_probe(r'''
+$script:registered = @()
+function Get-BeamerAdministratorPreference($UserSid) { return $false }
+function Resolve-BeamerUserSid($Identity) { return $Identity }
+function Get-ScheduledTask { param($TaskPath, $ErrorAction)
+    return @([pscustomobject]@{ TaskName='Beamer-owner'; TaskPath='\' })
+}
+function Export-ScheduledTask { param($TaskName, $TaskPath, $ErrorAction)
+    return '<Task xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task"><Principals><Principal><UserId>S-1-5-21-123</UserId><LogonType>InteractiveToken</LogonType></Principal></Principals><Actions><Exec><Command>C:\Beamer\Beamer.exe</Command></Exec></Actions></Task>'
+}
+function Register-ScheduledTask { param($TaskName, $TaskPath, $Xml, [switch]$Force, $ErrorAction)
+    $script:registered += $Xml
+}
+Update-BeamerAutostart -ExePath 'C:\Beamer\Beamer.exe' -UserSid 'S-1-5-21-123'
+if ($script:registered.Count) { throw 'Upgrade rewrote the existing default-privilege task' }
+''')
+
+    def test_upgrade_materialises_omitted_runlevel_only_for_administrator_preference(self):
+        self.run_probe(r'''
+$script:registered = @()
+$script:original = '<Task xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task"><Triggers><LogonTrigger><Enabled>false</Enabled></LogonTrigger></Triggers><Principals><Principal id="Author"><UserId>S-1-5-21-123</UserId><LogonType>InteractiveToken</LogonType></Principal></Principals><Settings><Enabled>false</Enabled></Settings><Actions Context="Author"><Exec><Command>C:\Beamer\Beamer.exe</Command><Arguments>--hidden --keep-this</Arguments></Exec></Actions></Task>'
+function Get-BeamerAdministratorPreference($UserSid) { return $true }
+function Resolve-BeamerUserSid($Identity) { return $Identity }
+function Get-ScheduledTask { param($TaskPath, $ErrorAction)
+    return @([pscustomobject]@{ TaskName='Beamer-owner'; TaskPath='\' })
+}
+function Export-ScheduledTask { param($TaskName, $TaskPath, $ErrorAction) return $script:original }
+function Register-ScheduledTask { param($TaskName, $TaskPath, $Xml, [switch]$Force, $ErrorAction)
+    $script:registered += $Xml
+}
+Update-BeamerAutostart -ExePath 'C:\Beamer\Beamer.exe' -UserSid 'S-1-5-21-123'
+if ($script:registered.Count -ne 1) { throw 'Expected exactly one administrator task update' }
+[xml]$actual = $script:registered[0]
+$ns = New-Object Xml.XmlNamespaceManager($actual.NameTable)
+$ns.AddNamespace('t', 'http://schemas.microsoft.com/windows/2004/02/mit/task')
+$runLevel = $actual.SelectSingleNode('/t:Task/t:Principals/t:Principal/t:RunLevel', $ns)
+if ($null -eq $runLevel -or $runLevel.InnerText -ne 'HighestAvailable') { throw 'Upgrade did not add the namespaced administrator run level' }
+[void]$runLevel.ParentNode.RemoveChild($runLevel)
+[xml]$wanted = $script:original
+if ($actual.OuterXml -ne $wanted.OuterXml) { throw 'Upgrade changed existing task choices' }
+''')
+
+    def test_gameinput_recovery_registers_only_fixed_system_action_and_run_permissions(self):
+        self.run_probe(r'''
+$script:registrations = @()
+$script:action = [pscustomobject]@{ Path=''; Arguments=''; WorkingDirectory='' }
+$actions = [pscustomobject]@{ Count=0 }
+$actions | Add-Member ScriptMethod Create {
+    param($type)
+    if ($type -ne 0) { throw 'Recovery must use one executable action' }
+    $this.Count++
+    return $script:action
+}
+$script:definition = [pscustomobject]@{
+    RegistrationInfo=[pscustomobject]@{ Description='' }
+    Principal=[pscustomobject]@{ UserId=''; LogonType=0; RunLevel=0 }
+    Settings=[pscustomobject]@{ Enabled=$false; AllowDemandStart=$false; DisallowStartIfOnBatteries=$true; StopIfGoingOnBatteries=$true; ExecutionTimeLimit=''; MultipleInstances=0 }
+    Triggers=[pscustomobject]@{ Count=0 }
+    Actions=$actions
+}
+$script:folder = [pscustomobject]@{}
+$script:folder | Add-Member ScriptMethod RegisterTaskDefinition {
+    param($name, $definition, $flags, $userId, $password, $logonType, $sddl)
+    $script:registrations += [pscustomobject]@{ Name=$name; Definition=$definition; Flags=$flags; UserId=$userId; Password=$password; LogonType=$logonType; Sddl=$sddl }
+}
+$script:scheduler = [pscustomobject]@{}
+$script:scheduler | Add-Member ScriptMethod Connect {}
+$script:scheduler | Add-Member ScriptMethod GetFolder {
+    param($path)
+    if ($path -ne '\') { throw 'Recovery task escaped the root folder' }
+    return $script:folder
+}
+$script:scheduler | Add-Member ScriptMethod NewTask {
+    param($flags)
+    if ($flags -ne 0) { throw 'Unexpected task definition flags' }
+    return $script:definition
+}
+function New-Object { param($ComObject)
+    if ($ComObject -ne 'Schedule.Service') { throw 'Unexpected COM server' }
+    return $script:scheduler
+}
+Update-BeamerGameInputRecovery
+if ($script:registrations.Count -ne 1) { throw 'Expected exactly one task registration' }
+$registration = $script:registrations[0]
+if ($registration.Name -ne 'Beamer-GameInputRecovery') { throw 'Recovery task name is not fixed' }
+if ($registration.UserId -ne 'S-1-5-18' -or $registration.Password -or $registration.LogonType -ne 5) { throw 'Recovery must run as SYSTEM without a password' }
+if ($script:definition.Principal.UserId -ne 'S-1-5-18' -or $script:definition.Principal.LogonType -ne 5) { throw 'Task principal disagrees with registration' }
+if (($registration.Flags -band 6) -ne 6) { throw 'Reinstall must replace the task definition' }
+if ($script:definition.Triggers.Count -ne 0 -or -not $script:definition.Settings.AllowDemandStart -or -not $script:definition.Settings.Enabled) { throw 'Recovery must be enabled and on demand only' }
+if ($script:definition.Settings.DisallowStartIfOnBatteries -or $script:definition.Settings.StopIfGoingOnBatteries) { throw 'Recovery must work on battery power' }
+if ($script:definition.Settings.MultipleInstances -ne 2 -or $script:definition.Settings.ExecutionTimeLimit -ne 'PT30S') { throw 'Recovery must not queue or run indefinitely' }
+if ($actions.Count -ne 1) { throw 'Expected exactly one action' }
+$windows = [Environment]::GetFolderPath([Environment+SpecialFolder]::Windows)
+if ($script:action.Path -cne (Join-Path $windows 'System32\WindowsPowerShell\v1.0\powershell.exe')) { throw 'Privileged action must use the absolute Windows PowerShell path' }
+if ($script:action.Arguments -cne '-NoLogo -NoProfile -NonInteractive -Command "Restart-Service -Name ''GameInputSvc'' -ErrorAction Stop"') { throw 'Recovery action accepts something other than the constant service restart' }
+if ($script:action.WorkingDirectory -cne (Join-Path $windows 'System32')) { throw 'Recovery uses a user-writable working directory' }
+$sd = [Security.AccessControl.RawSecurityDescriptor]::new($registration.Sddl)
+if ($sd.Owner.Value -ne 'S-1-5-18' -or $sd.Group.Value -ne 'S-1-5-18') { throw 'Interactive user can own or change the task' }
+if (-not ($sd.ControlFlags -band [Security.AccessControl.ControlFlags]::DiscretionaryAclProtected)) { throw 'Task permissions can inherit write access' }
+if ($sd.DiscretionaryAcl.Count -ne 3) { throw 'Unexpected task permission grants' }
+$expected = @{ 'S-1-5-18'=268435456; 'S-1-5-32-544'=268435456; 'S-1-5-4'=-1610612736 }
+foreach ($ace in $sd.DiscretionaryAcl) {
+    $sid = $ace.SecurityIdentifier.Value
+    if (-not $expected.ContainsKey($sid) -or $ace.AccessMask -ne $expected[$sid] -or $ace.AceQualifier -ne [Security.AccessControl.AceQualifier]::AccessAllowed) { throw 'Task permissions allow changing or deleting the privileged action' }
+    $expected.Remove($sid)
+}
+if ($expected.Count) { throw 'Missing recovery task permissions' }
+''')
+
+    def test_gameinput_recovery_uninstall_removes_only_fixed_task_and_is_idempotent(self):
+        self.run_probe(r'''
+$script:removed = @()
+$script:present = $true
+function New-Object { throw 'Uninstall must not create a task definition' }
+function Get-ScheduledTask { param($TaskName, $TaskPath, $ErrorAction)
+    if ($TaskName -ne 'Beamer-GameInputRecovery' -or $TaskPath -ne '\') { throw 'Uninstall queried unrelated tasks' }
+    if ($script:present) { return [pscustomobject]@{ TaskName=$TaskName; TaskPath=$TaskPath } }
+}
+function Unregister-ScheduledTask { param($TaskName, $TaskPath, $Confirm, $ErrorAction)
+    $script:removed += [pscustomobject]@{ Name=$TaskName; Path=$TaskPath }
+    $script:present = $false
+}
+Update-BeamerGameInputRecovery -Remove
+Update-BeamerGameInputRecovery -Remove
+if ($script:removed.Count -ne 1 -or $script:removed[0].Name -ne 'Beamer-GameInputRecovery' -or $script:removed[0].Path -ne '\') { throw 'Uninstall removed another task or failed when already absent' }
+''')
+
     def test_migration_preserves_choices_and_ignores_other_users_and_actions(self):
         self.run_probe(r'''
 $script:registered = @()

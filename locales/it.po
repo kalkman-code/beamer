@@ -4038,6 +4038,50 @@ msgstr "{name}  ⌘{key}"
 msgid "{name}, needs attention"
 msgstr "{name}, richiede attenzione"
 
+#: win_app/admin_mode.py
+msgid "This setting is only available on Windows."
+msgstr "Questa impostazione è disponibile solo su Windows."
+
+#: win_app/admin_mode.py
+msgid "Install Beamer to control administrator windows. This setting is unavailable in portable mode."
+msgstr "Installa Beamer per controllare le finestre con privilegi di amministratore. Questa impostazione non è disponibile in modalità portatile."
+
+#: win_app/admin_mode.py
+msgid "This setting needs Beamer to run as the signed-in account."
+msgstr "Questa impostazione richiede che Beamer venga eseguito con l'account attualmente connesso."
+
+#: win_app/admin_mode.py
+msgid "This setting needs a Windows administrator account."
+msgstr "Questa impostazione richiede un account amministratore di Windows."
+
+#: win_app/admin_mode.py
+msgid "Enable Windows User Account Control to use this setting."
+msgstr "Attiva il Controllo dell'account utente di Windows per usare questa impostazione."
+
+#: win_app/admin_mode.py
+msgid "Windows could not check this account's administrator permission."
+msgstr "Windows non ha potuto verificare i privilegi di amministratore di questo account."
+
+#: win_app/admin_mode.py
+msgid "Windows could not start the administrator setting change."
+msgstr "Windows non ha potuto avviare la modifica dell'impostazione dei privilegi di amministratore."
+
+#: win_app/admin_mode.py
+msgid "The administrator setting could not be changed. Your previous setting has been kept."
+msgstr "Non è stato possibile modificare l'impostazione dei privilegi di amministratore. L'impostazione precedente è stata mantenuta."
+
+#: win_app/admin_mode.py
+msgid "Start at sign-in could not be changed. Your previous setting has been kept."
+msgstr "Non è stato possibile modificare l'avvio all'accesso. L'impostazione precedente è stata mantenuta."
+
+#: win_app/admin_mode.py
+msgid "Windows could not find the desktop shell. Start Windows Explorer and try again. Your previous setting has been kept."
+msgstr "Windows non ha trovato la shell del desktop. Avvia Esplora file e riprova. L'impostazione precedente è stata mantenuta."
+
+#: win_app/admin_mode.py
+msgid "Administrator permission was cancelled. Your previous setting has been kept."
+msgstr "La richiesta dei privilegi di amministratore è stata annullata. L'impostazione precedente è stata mantenuta."
+
 #: win_app/crossing_ledger.py
 msgid "Return saves, Escape cancels · Only on this PC"
 msgstr "Invio salva, Esc annulla · Solo su questo PC"
@@ -4249,6 +4293,16 @@ msgstr "Le regole del firewall di Beamer vanno corrette; esegui di nuovo il prog
 msgid "Check again"
 msgstr "Controlla di nuovo"
 
+# New in 1.5.15: English fallback awaiting Lorenzo's check
+#: win_app/firewall_win.py
+msgid "Beamer cannot check Windows Firewall without administrator permission; run the Beamer installer again to repair its rules."
+msgstr "Beamer cannot check Windows Firewall without administrator permission; run the Beamer installer again to repair its rules."
+
+# New in 1.5.15: English fallback awaiting Lorenzo's check
+#: win_app/firewall_win.py
+msgid "Beamer could not check Windows Firewall. Check again; if the problem continues, run the Beamer installer again to repair its rules."
+msgstr "Beamer could not check Windows Firewall. Check again; if the problem continues, run the Beamer installer again to repair its rules."
+
 #: win_app/firewall_win.py
 msgid "Windows Firewall has a block rule affecting Beamer's input or pairing traffic; ask your administrator to review Beamer's inbound block rules in Windows Firewall."
 msgstr "Una regola di blocco del Firewall di Windows riguarda il traffico di input o di abbinamento di Beamer; chiedi all'amministratore di controllare le regole di blocco in entrata di Beamer nel Firewall di Windows."
@@ -4260,11 +4314,6 @@ msgstr "questa rete privata"
 #: win_app/firewall_win.py
 msgid "this network"
 msgstr "questa rete"
-
-#: win_app/firewall_win.py
-#, python-brace-format
-msgid "Beamer could not read the Windows Firewall: {error}"
-msgstr "Beamer non è riuscito a leggere Windows Firewall: {error}"
 
 #: win_app/firewall_win.py
 #, python-brace-format
@@ -4289,9 +4338,40 @@ msgstr "Invia input a un altro computer"
 msgid "Beamer — Identify screens"
 msgstr "Beamer — Identifica gli schermi"
 
-#: win_app/input_injector.py
-msgid "Windows blocked Beamer's input; use administrator windows locally and click a normal window on this PC to continue."
-msgstr "Windows ha bloccato l'input di Beamer; usa localmente le finestre con privilegi di amministratore e fai clic su una finestra normale di questo PC per continuare."
+# New in 1.5.15: English fallback awaiting Lorenzo's check
+#: win_app/input_blocker.py
+msgid "the foreground window"
+msgstr "the foreground window"
+
+# New in 1.5.15: English fallback awaiting Lorenzo's check
+#: win_app/input_blocker.py
+#, python-brace-format
+msgid "Windows blocked Beamer's input while {app} was in front. Click a normal window on this PC to continue."
+msgstr "Windows blocked Beamer's input while {app} was in front. Click a normal window on this PC to continue."
+
+# New in 1.5.15: English fallback awaiting Lorenzo's check
+#: win_app/input_blocker.py
+#, python-brace-format
+msgid "Windows blocked Beamer's input because {app} is GameInput's system window. Click a normal window on this PC to continue."
+msgstr "Windows blocked Beamer's input because {app} is GameInput's system window. Click a normal window on this PC to continue."
+
+# New in 1.5.15: English fallback awaiting Lorenzo's check
+#: win_app/input_blocker.py
+#, python-brace-format
+msgid "Windows blocked Beamer's input because {app} is a system-level window. Use it locally and click a normal window on this PC to continue."
+msgstr "Windows blocked Beamer's input because {app} is a system-level window. Use it locally and click a normal window on this PC to continue."
+
+# New in 1.5.15: English fallback awaiting Lorenzo's check
+#: win_app/input_blocker.py
+#, python-brace-format
+msgid "Windows blocked Beamer's input because {app} is running as administrator. Click a normal window on this PC to continue."
+msgstr "Windows blocked Beamer's input because {app} is running as administrator. Click a normal window on this PC to continue."
+
+# New in 1.5.15: English fallback awaiting Lorenzo's check
+#: win_app/input_blocker.py
+#, python-brace-format
+msgid "Windows blocked Beamer's input while {app} was in front. Windows did not allow Beamer to inspect this window's process. Click a normal window on this PC to continue."
+msgstr "Windows blocked Beamer's input while {app} was in front. Windows did not allow Beamer to inspect this window's process. Click a normal window on this PC to continue."
 
 #: win_app/kvm_bridge_win.py
 msgid "Beamer's website"
@@ -4428,8 +4508,20 @@ msgid "This PC's pointer hides while it drives another machine, and after anothe
 msgstr "Il puntatore di questo PC si nasconde mentre controlla un altro computer, e dopo che un altro computer smette di controllarlo, finché il suo mouse non si muove."
 
 #: win_app/kvm_bridge_win.py
+msgid "On Wayland your desktop controls pointer hiding while this PC drives another machine. Beamer cannot hide the pointer after another machine stops driving this PC."
+msgstr "Su Wayland è l'ambiente desktop a gestire la visibilità del puntatore mentre questo PC controlla un altro computer. Beamer non può nascondere il puntatore quando un altro computer smette di controllare questo PC."
+
+#: win_app/kvm_bridge_win.py
 msgid "On Wayland Beamer cannot see a full-screen app, or a mouse button held before the pointer reaches an edge, so the edges are never held for one and a drag can cross."
 msgstr "Su Wayland Beamer non vede un'app a schermo intero, né un pulsante del mouse tenuto premuto prima che il puntatore raggiunga un bordo, quindi i bordi non vengono mai bloccati per un'app e un trascinamento può passare."
+
+#: win_app/kvm_bridge_win.py
+msgid "Control administrator windows"
+msgstr "Controlla le finestre con privilegi di amministratore"
+
+#: win_app/kvm_bridge_win.py
+msgid "Waiting for Windows permission…"
+msgstr "In attesa dell'autorizzazione di Windows…"
 
 #: win_app/kvm_bridge_win.py
 msgid "At sign-in"
@@ -4622,6 +4714,18 @@ msgid "Delay:"
 msgstr "Ritardo:"
 
 #: win_app/kvm_bridge_win.py
+msgid "Use Windows permission prompts locally."
+msgstr "Gestisci localmente le richieste di autorizzazione di Windows."
+
+#: win_app/kvm_bridge_win.py
+msgid "Beamer could not read this PC's administrator setting. Restart Beamer to try again."
+msgstr "Beamer non ha potuto leggere l'impostazione dei privilegi di amministratore di questo PC. Riavvia Beamer per riprovare."
+
+#: win_app/kvm_bridge_win.py
+msgid "Beamer will run as administrator on this PC. Changing this restarts Beamer; Windows may ask for permission."
+msgstr "Beamer verrà eseguito come amministratore su questo PC. La modifica riavvia Beamer; Windows potrebbe chiedere l'autorizzazione."
+
+#: win_app/kvm_bridge_win.py
 msgid "Start at sign-in needs Beamer to run as the signed-in account."
 msgstr "Per avviarsi all'accesso, Beamer deve essere eseguito con l'account attualmente connesso."
 
@@ -4711,10 +4815,6 @@ msgstr "Questo desktop non ha un'area di notifica, quindi la finestra di Beamer 
 #: win_app/kvm_bridge_win.py
 msgid "Update through your software store, or download the Flatpak from the release page and open it."
 msgstr "Aggiorna tramite il tuo negozio di software oppure scarica il file Flatpak dalla pagina della versione e aprilo."
-
-#: win_app/kvm_bridge_win.py
-msgid "Beamer controls normal windows; use administrator windows and Windows permission prompts locally."
-msgstr "Beamer controlla le finestre normali; gestisci localmente le finestre con privilegi di amministratore e le richieste di autorizzazione di Windows."
 
 #: win_app/kvm_bridge_win.py
 msgid "Starts in the tray when you sign in, without an administrator prompt."
