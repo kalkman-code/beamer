@@ -317,30 +317,30 @@ class CapsLockLayoutSwitchTests(unittest.TestCase):
         if sources_h and core.CFArrayGetCount(sources_h):
             try:
                 src_h = core.CFArrayGetValueAtIndex(sources_h, 0)
-                chars_h = carbon.layout_chars(src_h)
+                chars_h, _dead_h = carbon.layout_chars(src_h)
                 self.assertEqual(len(chars_h), 48)
                 self.assertEqual(chars_h.get(0x00), "ㅁ")
             finally:
                 core.CFRelease(sources_h)
 
-        # 2. 2SetKorean IME mode has no uchr data; layout_chars returns {} safely
+        # 2. 2SetKorean IME mode has no uchr data; layout_chars returns ({}, {}) safely
         q_ime = Foundation.NSDictionary.dictionaryWithObject_forKey_("com.apple.inputmethod.Korean.2SetKorean", key)
         sources_ime = lib.TISCreateInputSourceList(objc.pyobjc_id(q_ime), True)
         if sources_ime and core.CFArrayGetCount(sources_ime):
             try:
                 src_ime = core.CFArrayGetValueAtIndex(sources_ime, 0)
-                chars_ime = carbon.layout_chars(src_ime)
+                chars_ime, _dead_ime = carbon.layout_chars(src_ime)
                 self.assertEqual(chars_ime, {})
             finally:
                 core.CFRelease(sources_ime)
 
     def test_korean_input_source_without_uchr_data_retains_fallbacks_safely(self):
         """Korean input methods (e.g. com.apple.inputmethod.Korean.2SetKorean) have no
-        kTISPropertyUnicodeKeyLayoutData. When selected, layout_chars returns an empty dict
+        kTISPropertyUnicodeKeyLayoutData. When selected, layout_chars returns ({}, {})
         and refresh() safely logs info and returns False, leaving US fallbacks intact without raising."""
         class FakeCarbonWithoutLayoutData:
             def current_chars(self):
-                return {}
+                return {}, {}
 
         saved_carbon = keyboard_layout._carbon
         try:

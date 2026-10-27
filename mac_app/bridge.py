@@ -11,6 +11,7 @@ import threading
 import time
 import traceback
 import types
+import unicodedata
 import dataclasses
 from dataclasses import dataclass
 
@@ -27,6 +28,7 @@ import gestures
 from core import idle_pointer
 from core import ignored
 from core import crossing_state
+from core.dead_keys import compose_combining
 from core import profiles
 from core import shake
 from core import effects
@@ -113,6 +115,7 @@ INPUT_METHOD_KEY_CODES = frozenset({0x66, 0x68})  # Hanja and Han/Yeong, sent as
 # Command, Option and Control, left and right. Shift and caps lock are
 # excluded on purpose -- see _unicode_character.
 CHORD_MODIFIER_KEY_CODES = frozenset({0x36, 0x37, 0x3A, 0x3B, 0x3D, 0x3E})
+SHIFT_KEY_CODES = frozenset({0x38, 0x3C})
 
 # CoreGraphics numbers the other buttons from 2; 3 and 4 are a mouse's back and forward side
 # buttons, which Windows calls XBUTTON1 and XBUTTON2.
@@ -136,6 +139,10 @@ class QuartzEventTranslator:
         self.quartz = quartz
         self.modifier_down = set()
         self.printable_down = {}
+        # A held dead key as (spacing accent, combining mark) until the next
+        # key, so an accent never rides on macOS keeping a pending state across
+        # two intercepted events. Mirrors win_app/capture_win's pending_dead_key.
+        self.pending_dead_key = None
         # Sub-pixel remainder carried across mousemove events: slow, precise
         # trackpad motion reports fractional per-event deltas that truncate
         # to zero if read as integers and dropped outright. Accumulating as
@@ -191,9 +198,31 @@ class QuartzEventTranslator:
             # Only the keyboard's own key: an input-source switch may post these keycodes itself.
             physical = quartz.CGEventGetIntegerValueField(event, quartz.kCGEventSourceStateID) == quartz.kCGEventSourceStateHIDSystemState
             return KeyResult(False, is_down, is_repeat, keytable.tap_messages(name, physical and is_down and not is_repeat))
+        chord = bool(self.modifier_down & CHORD_MODIFIER_KEY_CODES)
+        if chord:
+            # A chord makes the next key a shortcut, not an accent; let go of any held dead key.
+            self.pending_dead_key = None
+        if is_down and self.pending_dead_key is not None and name is not None:
+            # A named key ends a held accent: space types it alone, anything else drops it.
+            if name == "space":
+                spacing, _mark = self.pending_dead_key
+                self.pending_dead_key = None
+                return KeyResult(False, True, is_repeat, [{"type": protocol.MSG_TEXT, "data": {"text": spacing}}])
+            self.pending_dead_key = None
         special_messages = self._special_key_messages(keycode, is_down, key_map)
         if special_messages:
             return KeyResult(False, is_down, is_repeat, special_messages)
+        dead_accent = None
+        if is_down and not chord:
+            shift = bool(self.modifier_down & SHIFT_KEY_CODES)
+            dead_accent = keyboard_layout.dead_accent_for(keycode, shift)
+        if dead_accent is not None:
+            # A dead key (acute unshifted, grave/diaeresis shifted): hold its
+            # accent here and type nothing, to compose with the next key below
+            # rather than lean on macOS's pending state across two tapped events.
+            if not is_repeat:
+                self.pending_dead_key = dead_accent
+            return KeyResult(False, True, is_repeat, [])
         if is_down:
             # A repeat sends what the first press sent, so switching layout mid-hold cannot start
             # a second key on Windows that the release, which sends the saved one, never lets go.
@@ -208,6 +237,18 @@ class QuartzEventTranslator:
                 character = self._unicode_character(event, keycode)
         if character is None:
             return KeyResult(False, is_down, is_repeat, [])
+        if is_down and self.pending_dead_key is not None:
+            # Combine the held accent with this key's bare letter and send it as
+            # text. NFD first so a letter macOS may have already precomposed is
+            # reduced to its base and never accented twice. Text, not a key: the
+            # combined character has no US key. The bare letter is kept as the
+            # repeat character, so a held vowel repeats it, as it does natively
+            # once the dead key is spent.
+            (spacing, mark), self.pending_dead_key = self.pending_dead_key, None
+            base = unicodedata.normalize("NFD", character)[0]
+            self.printable_down[keycode] = base
+            text = compose_combining(mark, spacing, base)
+            return KeyResult(False, True, is_repeat, [{"type": protocol.MSG_TEXT, "data": {"text": text}}])
         message_type = protocol.MSG_KEYDOWN if is_down else protocol.MSG_KEYUP
         data = {"key": character}
         # Where the key sits on a US keyboard, for a PC whose layout cannot type the character.
@@ -1276,6 +1317,7 @@ class KVMController:
         self.trigger_suppressed = False
         self.translator.modifier_down.clear()
         self.translator.printable_down.clear()
+        self.translator.pending_dead_key = None
         self.translator.reset_mouse_accumulators()
         self.ignore_gate.configure(cfg.ignored_inputs, mouse_only=cfg.mouse_only)
         if self._memory is not None:

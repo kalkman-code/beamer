@@ -20,7 +20,8 @@ readers only ever look up.
 import ctypes
 import ctypes.util
 import logging
-from typing import Dict, Optional
+import unicodedata
+from typing import Dict, Optional, Tuple
 
 from key_codes import PRINTABLE_KEY_FALLBACKS
 
@@ -34,9 +35,14 @@ INPUT_SOURCE_CHANGED = "com.apple.Carbon.TISNotifySelectedKeyboardInputSourceCha
 
 _K_UC_KEY_ACTION_DOWN = 0
 _K_UC_KEY_TRANSLATE_NO_DEAD_KEYS = 1
+SPACE_KEY_CODE = 0x31
+# UCKeyTranslate's modifierKeyState for Shift (the event's shiftKey, >> 8), so the grave and
+# diaeresis dead keys that sit on a layout's Shift layer are read too, not just the acute.
+_SHIFT_MODIFIER = 1 << 1
 
 _chars: Dict[int, Optional[str]] = dict(PRINTABLE_KEY_FALLBACKS)
 _codes: Dict[str, int] = {}
+_dead_accents: Dict[Tuple[int, bool], Tuple[str, str]] = {}
 for _code, _char in sorted(PRINTABLE_KEY_FALLBACKS.items()):
     _codes.setdefault(_char, _code)
 
@@ -51,10 +57,19 @@ def code_for(character) -> Optional[int]:
     return _codes.get(character)
 
 
-def install(chars: Dict[int, Optional[str]]) -> None:
+def dead_accent_for(keycode, shift: bool = False) -> Optional[Tuple[str, str]]:
+    """(spacing accent, combining mark) for a dead key on the current layout, or None when the
+    keycode is not a dead key. The spacing accent is what the key types alone (before a space); the
+    combining mark is what composes with the next letter. `shift` picks the Shift layer, where grave
+    and diaeresis usually sit."""
+    return _dead_accents.get((keycode, bool(shift)))
+
+
+def install(chars: Dict[int, Optional[str]], dead_accents: Optional[Dict[Tuple[int, bool], Tuple[str, str]]] = None) -> None:
     """Swaps in a table read from a layout, where a dead key maps to None. Keys the layout leaves
-    out keep the US answer, so a shortcut on an unreadable key still goes somewhere sensible."""
-    global _chars, _codes
+    out keep the US answer, so a shortcut on an unreadable key still goes somewhere sensible.
+    `dead_accents` maps each dead key's keycode to the accent it holds, for software composition."""
+    global _chars, _codes, _dead_accents
     merged: Dict[int, Optional[str]] = dict(PRINTABLE_KEY_FALLBACKS)
     merged.update(chars)
     codes: Dict[str, int] = {}
@@ -66,7 +81,7 @@ def install(chars: Dict[int, Optional[str]]) -> None:
     for code, char in sorted(PRINTABLE_KEY_FALLBACKS.items()):
         if code not in chars and char not in codes:
             codes[char] = code
-    _chars, _codes = merged, codes
+    _chars, _codes, _dead_accents = merged, codes, dict(dead_accents or {})
 
 
 class _Carbon:
@@ -90,12 +105,12 @@ class _Carbon:
         core.CFRelease.argtypes = [ctypes.c_void_p]
         self.layout_data_key = ctypes.c_void_p.in_dll(carbon, "kTISPropertyUnicodeKeyLayoutData").value
 
-    def translate(self, layout, keycode, kbd_type, options):
-        dead = ctypes.c_uint32(0)
+    def translate(self, layout, keycode, kbd_type, options, dead_state=0, modifiers=0):
+        dead = ctypes.c_uint32(dead_state)
         length = ctypes.c_ulong(0)
         buffer = (ctypes.c_uint16 * 8)()
         status = self.carbon.UCKeyTranslate(
-            layout, keycode, _K_UC_KEY_ACTION_DOWN, 0, kbd_type, options,
+            layout, keycode, _K_UC_KEY_ACTION_DOWN, modifiers, kbd_type, options,
             ctypes.byref(dead), len(buffer), ctypes.byref(length), buffer,
         )
         if status != 0:
@@ -103,28 +118,50 @@ class _Carbon:
         text = bytes(bytearray(ctypes.string_at(buffer, 2 * length.value))).decode("utf-16-le", "ignore")
         return text, dead.value
 
-    def layout_chars(self, source) -> Dict[int, Optional[str]]:
-        """The table for one input source (a TISInputSourceRef), None for a dead key, and empty
-        when it has no `uchr` data."""
+    def layout_chars(self, source):
+        """(chars, dead_accents) for one input source (a TISInputSourceRef). chars holds each key's
+        unshifted character, None for a dead key; dead_accents maps a dead key's keycode to the
+        accent it types alone, read by pressing space on top of its dead state. Empty when the
+        source has no `uchr` data."""
         data = self.carbon.TISGetInputSourceProperty(source, self.layout_data_key)
         if not data:
-            return {}
+            return {}, {}
         layout = self.core.CFDataGetBytePtr(data)
         kbd_type = self.carbon.LMGetKbdType()
         chars = {}
+        dead_accents = {}
         for code in LAYOUT_KEY_CODES:
-            text, dead = self.translate(layout, code, kbd_type, 0)
-            if dead:
-                chars[code] = None
-                continue
-            if text and len(text) == 1 and text.isprintable() and not text.isspace():
-                chars[code] = text
-        return chars
+            for shift, modifiers in ((False, 0), (True, _SHIFT_MODIFIER)):
+                text, dead = self.translate(layout, code, kbd_type, 0, modifiers=modifiers)
+                if dead:
+                    if not shift:
+                        chars[code] = None
+                    spacing, _ = self.translate(layout, SPACE_KEY_CODE, kbd_type, 0, dead_state=dead)
+                    mark = self._combining_mark(layout, kbd_type, dead)
+                    if mark and spacing and len(spacing) == 1 and spacing.isprintable() and not spacing.isspace():
+                        dead_accents[(code, shift)] = (spacing, mark)
+                    continue
+                if not shift and text and len(text) == 1 and text.isprintable() and not text.isspace():
+                    chars[code] = text
+        return chars, dead_accents
 
-    def current_chars(self) -> Dict[int, Optional[str]]:
+    def _combining_mark(self, layout, kbd_type, dead_state) -> str:
+        """The combining mark a dead key adds, read by composing it with each key until one yields a
+        precomposed letter, then decomposing that. Taken this way, not from the spacing accent,
+        because U.S. International's acute and diaeresis terminate to an ASCII quote whose name
+        carries no accent."""
+        for code in LAYOUT_KEY_CODES:
+            composed, _ = self.translate(layout, code, kbd_type, 0, dead_state=dead_state)
+            if composed and len(composed) == 1:
+                decomposed = unicodedata.normalize("NFD", composed)
+                if len(decomposed) == 2 and unicodedata.combining(decomposed[1]):
+                    return decomposed[1]
+        return ""
+
+    def current_chars(self):
         source = self.carbon.TISCopyCurrentKeyboardLayoutInputSource()
         if not source:
-            return {}
+            return {}, {}
         try:
             return self.layout_chars(source)
         finally:
@@ -141,14 +178,14 @@ def refresh() -> bool:
     try:
         if _carbon is None:
             _carbon = _Carbon()
-        chars = _carbon.current_chars()
+        chars, dead_accents = _carbon.current_chars()
     except Exception:
         LOGGER.exception("could not read the keyboard layout; keys follow US positions")
         return False
     if not chars:
         LOGGER.info("the keyboard layout has no key table; keys follow US positions")
         return False
-    install(chars)
+    install(chars, dead_accents)
     return True
 
 

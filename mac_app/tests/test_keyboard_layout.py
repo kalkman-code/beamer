@@ -192,6 +192,12 @@ class SystemLayoutTests(unittest.TestCase):
     without selecting either, so the machine running the tests keeps its own."""
 
     def chars(self, source_id):
+        return self._tables(source_id)[0]
+
+    def dead_accents(self, source_id):
+        return self._tables(source_id)[1]
+
+    def _tables(self, source_id):
         import Foundation
         import objc
 
@@ -235,6 +241,22 @@ class SystemLayoutTests(unittest.TestCase):
         chars = self.chars("com.apple.keylayout.German")
         self.assertIn(0x18, chars)
         self.assertIsNone(chars[0x18])
+
+    def test_dead_key_accents_are_read(self):
+        # Each dead key's (spacing accent, combining mark). German's 0x18 is acute unshifted and
+        # grave on the Shift layer.
+        accents = self.dead_accents("com.apple.keylayout.German")
+        self.assertEqual(accents.get((0x18, False)), ("´", "́"))
+        self.assertEqual(accents.get((0x18, True)), ("`", "̀"))
+
+    def test_us_international_accents_carry_the_combining_mark(self):
+        # U.S. International's acute and diaeresis terminate to ASCII quotes, but the combining mark
+        # is read from the layout's own composition, so á and ü still compose (not 'a / "u).
+        accents = self.dead_accents("com.apple.keylayout.USInternational-PC")
+        if not accents:
+            self.skipTest("US International is not installed")
+        self.assertEqual(accents.get((0x27, False)), ("'", "́"))
+        self.assertEqual(accents.get((0x27, True)), ('"', "̈"))
 
     def test_this_macs_own_layout_reads(self):
         self.assertTrue(keyboard_layout.refresh())

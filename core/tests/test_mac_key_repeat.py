@@ -158,6 +158,8 @@ class MacKeyRepeatTests(unittest.TestCase):
         from core.tests.app_methods import load_methods
         namespace = {"KeyResult": namedtuple("KeyResult", "is_trigger is_down is_repeat messages"),
                      "SPECIAL_KEY_NAMES": {}, "MODIFIER_KEY_CODES": set(),
+                     "CHORD_MODIFIER_KEY_CODES": set(), "SHIFT_KEY_CODES": set(),
+                     "keyboard_layout": SimpleNamespace(dead_accent_for=lambda code, shift=False: None),
                      "PRINTABLE_KEY_FALLBACKS": {0: "a"}, "protocol": protocol}
         Translator = load_methods("mac_app/bridge.py", "QuartzEventTranslator", ["key_result"], namespace)
         translator = Translator()
@@ -165,6 +167,8 @@ class MacKeyRepeatTests(unittest.TestCase):
                                            kCGEventFlagsChanged=12, kCGEventKeyDown=10, kCGEventKeyUp=11,
                                            CGEventGetIntegerValueField=lambda event, field: event[field])
         translator.printable_down = {}
+        translator.modifier_down = set()
+        translator.pending_dead_key = None
         translator._unicode_character = lambda event, code: "a"
         translator._special_key_messages = lambda *args: []
         messages = []

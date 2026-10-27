@@ -17,6 +17,7 @@ from unittest import mock
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 import config
+import keyboard_layout
 import media_keys
 from core import protocol
 from core.tests import pngs
@@ -130,6 +131,72 @@ class TranslatorTests(unittest.TestCase):
         self.assertEqual(result.messages, [
             {"type": protocol.MSG_KEYUP, "data": {"key": "A", "us": "a"}}
         ])
+
+    def _install_dead_key(self, dead_code, spacing, mark, shift=False):
+        keyboard_layout.install({}, {(dead_code, shift): (spacing, mark)})
+        self.addCleanup(keyboard_layout.install, {})
+
+    def _down(self, keycode, unicode=""):
+        event = {
+            FakeQuartz.kCGKeyboardEventKeycode: keycode,
+            FakeQuartz.kCGKeyboardEventAutorepeat: 0,
+            "unicode": unicode,
+        }
+        return self.translator.key_result(FakeQuartz.kCGEventKeyDown, event, 0x3D, self.key_map)
+
+    def test_dead_key_then_vowel_composes_in_software(self):
+        self._install_dead_key(0x18, "´", "́")  # acute
+        held = self._down(0x18)
+        self.assertEqual(held.messages, [])  # the accent types nothing on its own
+        self.assertEqual(self.translator.pending_dead_key, ("´", "́"))
+        result = self._down(0x00, "a")
+        self.assertEqual(result.messages, [{"type": protocol.MSG_TEXT, "data": {"text": "á"}}])
+        self.assertIsNone(self.translator.pending_dead_key)
+
+    def test_dead_key_composes_even_when_macos_precomposed_the_vowel(self):
+        # The vowel event may already carry "á" from macOS's own transient state;
+        # NFD reduces it to the base so it is never accented twice.
+        self._install_dead_key(0x18, "´", "́")
+        self._down(0x18)
+        result = self._down(0x00, "á")
+        self.assertEqual(result.messages, [{"type": protocol.MSG_TEXT, "data": {"text": "á"}}])
+
+    def test_us_international_acute_composes_not_an_apostrophe(self):
+        # U.S. International's acute terminates to an ASCII apostrophe, not U+00B4; composing from
+        # the combining mark still yields á, where inferring from the spacing char would give 'a.
+        self._install_dead_key(0x27, "'", "́")
+        self._down(0x27)
+        result = self._down(0x00, "a")
+        self.assertEqual(result.messages, [{"type": protocol.MSG_TEXT, "data": {"text": "á"}}])
+
+    def test_dead_key_then_space_types_the_accent_alone(self):
+        self._install_dead_key(0x18, "´", "́")
+        self._down(0x18)
+        result = self._down(0x31, " ")  # space
+        self.assertEqual(result.messages, [{"type": protocol.MSG_TEXT, "data": {"text": "´"}}])
+
+    def test_dead_key_then_uncomposable_key_sends_both_as_text(self):
+        self._install_dead_key(0x18, "´", "́")
+        self._down(0x18)
+        result = self._down(0x12, "1")
+        self.assertEqual(result.messages, [{"type": protocol.MSG_TEXT, "data": {"text": "´1"}}])
+
+    def test_shift_layer_dead_key_composes(self):
+        # Grave sits on the Shift layer; holding Shift must reach it, then compose.
+        self._install_dead_key(0x18, "`", "̀", shift=True)  # grave
+        self.translator.modifier_down.add(0x38)  # Shift held
+        held = self._down(0x18)
+        self.assertEqual(held.messages, [])
+        self.assertEqual(self.translator.pending_dead_key, ("`", "̀"))
+        result = self._down(0x00, "a")
+        self.assertEqual(result.messages, [{"type": protocol.MSG_TEXT, "data": {"text": "à"}}])
+
+    def test_chord_lets_go_of_a_held_accent(self):
+        self._install_dead_key(0x18, "´", "́")
+        self._down(0x18)
+        self.translator.modifier_down.add(0x3A)  # Option held: next key is a shortcut
+        self._down(0x09, "√")
+        self.assertIsNone(self.translator.pending_dead_key)
 
     def test_command_modifier_uses_configured_mapping(self):
         event = {

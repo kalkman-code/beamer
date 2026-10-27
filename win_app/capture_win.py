@@ -46,10 +46,10 @@ import ctypes
 import logging
 import sys
 import threading
-import unicodedata
 from typing import Callable, Dict, List, Optional, Set, Tuple, Union
 
 from core.capture_types import DeadKey, TextInput
+from core.dead_keys import compose as _compose_dead_key
 from input_injector import INJECTED_MARK, SCAN_TO_US
 
 LOGGER = logging.getLogger(__name__)
@@ -354,18 +354,6 @@ class KeyboardState:
         if altgr and self.altgr_down and not self.ctrl_down:
             state.update({0x11: 0x80, 0x12: 0x80, 0xA5: 0x80})
         return state
-
-
-def _compose_dead_key(dead_key: str, character: str) -> Union[str, TextInput]:
-    name = unicodedata.name(dead_key, "")
-    if name.startswith("MODIFIER LETTER "):
-        name = name[len("MODIFIER LETTER "):]
-    try:
-        combining = unicodedata.lookup("COMBINING " + name)
-    except KeyError:
-        return TextInput(dead_key + character)
-    composed = unicodedata.normalize("NFC", character + combining)
-    return composed if len(composed) == 1 else TextInput(dead_key + character)
 
 
 def key_name(
