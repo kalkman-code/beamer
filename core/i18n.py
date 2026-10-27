@@ -34,6 +34,7 @@ from core.locale import americanise
 LANGUAGES = {
     "en": "English",
     "it": "Italiano",
+    "ru": "Русский",
 }
 # Not a language: every string bracketed and a third longer, so a test can find text that never
 # went through tr() and see where longer languages run out of room. Only BEAMER_LANGUAGE sets it.

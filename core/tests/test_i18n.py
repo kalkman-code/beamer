@@ -46,6 +46,14 @@ msgstr ""
 
 
 class I18nTests(unittest.TestCase):
+    def test_shipped_russian_resolves_system_variants(self):
+        with mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("BEAMER_LANGUAGE", None)
+            for code in ("ru-RU", "ru_RU.UTF-8", "ru"):
+                self.assertEqual(i18n.resolve("auto", [code, "en-US"]), "ru")
+            self.assertEqual(i18n.install("ru"), "ru")
+            self.assertEqual(i18n.tr("Settings"), "Настройки")
+
     def tearDown(self):
         i18n.install("en")
 
