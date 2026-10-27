@@ -95,6 +95,7 @@ class WindowsInput:
         return any("settings" in caps for caps in known) if known else None
 
     def sync(self, cfg) -> None:
+        self.server.keyboard_sync = getattr(cfg, "keyboard_sync", False)
         self._controller.crossing_displays_changed()
         speeds = (cfg.pointer_speed, cfg.scroll_speed, cfg.reverse_scroll)
         if self.server.input_scale is None or speeds != self._speeds:

@@ -14,6 +14,8 @@ from typing import Callable, Dict, List, Optional, Set, Tuple
 from core.keytable import EVDEV_US
 from input_blocker import foreground_blocker
 from firewall_win import is_elevated
+from keyboard_language import foreground_layout, select_language as sync_keyboard_language
+from core.i18n import tr
 
 
 LOGGER = logging.getLogger(__name__)
@@ -50,8 +52,10 @@ _IS_WINDOWS = sys.platform == "win32"
 user32 = ctypes.WinDLL("user32", use_last_error=True) if _IS_WINDOWS else None
 
 if _IS_WINDOWS:
-    user32.VkKeyScanW.restype = ctypes.c_short
-    user32.VkKeyScanW.argtypes = [ctypes.c_wchar]
+    user32.VkKeyScanExW.restype = ctypes.c_short
+    user32.VkKeyScanExW.argtypes = [ctypes.c_wchar, ctypes.c_void_p]
+    user32.MapVirtualKeyExW.restype = ctypes.c_uint
+    user32.MapVirtualKeyExW.argtypes = [ctypes.c_uint, ctypes.c_uint, ctypes.c_void_p]
     user32.MapVirtualKeyW.restype = ctypes.c_uint
     user32.MapVirtualKeyW.argtypes = [ctypes.c_uint, ctypes.c_uint]
     user32.GetKeyboardLayout.restype = ctypes.c_void_p
@@ -156,14 +160,14 @@ def _vk_key_scan(ch: str) -> int:
     """
     if user32 is None:
         raise RuntimeError("VkKeyScanW is only available on Windows")
-    return user32.VkKeyScanW(ch)
+    return user32.VkKeyScanExW(ch, foreground_layout())
 
 
 def _map_virtual_key(vk: int) -> int:
     """Look up the hardware scan code for a virtual-key code."""
     if user32 is None:
         raise RuntimeError("MapVirtualKeyW is only available on Windows")
-    return user32.MapVirtualKeyW(vk, MAPVK_VK_TO_VSC)
+    return user32.MapVirtualKeyExW(vk, MAPVK_VK_TO_VSC, foreground_layout())
 
 
 def _key_at(us: str) -> Optional[Tuple[int, Optional[str]]]:
@@ -174,14 +178,15 @@ def _key_at(us: str) -> Optional[Tuple[int, Optional[str]]]:
     scan = US_SCAN_CODES.get(us)
     if scan is None:
         return None
-    vk = user32.MapVirtualKeyW(scan, MAPVK_VSC_TO_VK)
+    layout = foreground_layout()
+    vk = user32.MapVirtualKeyExW(scan, MAPVK_VSC_TO_VK, layout)
     if not vk:
         return None
     # Not MapVirtualKeyW's MAPVK_VK_TO_CHAR, which answers A to Z for the letter keys on every
     # layout: on Russian the C key would read as "c" and a letter from an English Mac stay text.
     # Flag 1<<2 leaves the keyboard state alone, so a dead key here eats no accent being typed.
     buffer = ctypes.create_unicode_buffer(8)
-    count = user32.ToUnicodeEx(vk, scan, (ctypes.c_char * 256)(), buffer, len(buffer), 1 << 2, user32.GetKeyboardLayout(0))
+    count = user32.ToUnicodeEx(vk, scan, (ctypes.c_char * 256)(), buffer, len(buffer), 1 << 2, layout)
     return vk, buffer.value[:count] if count == 1 else None
 
 

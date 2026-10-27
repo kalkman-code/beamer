@@ -27,6 +27,8 @@ import threading
 import time
 from typing import Callable, Optional
 
+from core import keyboard_sync
+import keyboard_language
 from core import ignored
 from core import keytable
 from core import owner as owner_module
@@ -189,6 +191,7 @@ class LinkSender:
         self._intent_keys_up: set = set()
         self._intent_windows_up: set = set()
         self._accepts: dict = {}        # peer id: whether it lets this PC drive it
+        self._keyboard_sync = keyboard_sync.Outbound(keyboard_language)
         self._sent_names: dict = {}     # (peer, physical key): the name its press went out under
         self._buttons_held = set()
         self._shake_detector = None
@@ -1328,6 +1331,7 @@ class LinkSender:
                 LOGGER.exception("Clipboard work failed")
 
     def _forget_held(self, peer: bytes) -> None:
+        self._keyboard_sync.forget(peer)
         """`peer`'s link is lost: what waited for its clipboard is for a link that is gone."""
         with self._clip_lock:
             self._clip_wait.pop(peer, None)
@@ -1336,6 +1340,11 @@ class LinkSender:
                 self._sent_names.pop(held, None)
 
     def _send(self, peer: bytes, message: dict) -> None:
+        for part in self._keyboard_sync.messages(peer, message,
+                enabled=self._setting("keyboard_sync", False), caps=self.links.caps(peer)):
+            self._send_part(peer, part)
+
+    def _send_part(self, peer: bytes, message: dict) -> None:
         kind = message["type"]
         if kind == protocol.MSG_KEYDOWN and message.get("data", {}).get("key") == "tab":
             for transition in self._switcher_transition(peer):
@@ -1349,6 +1358,8 @@ class LinkSender:
                 data.get("resistance_px"), data.get("reach"), bool(data.get("stay")),
                 display=data.get("display"), side=data.get("side"),
             )
+            if data.get("input_language") is not None:
+                message["data"]["input_language"] = data["input_language"]
         elif kind in (protocol.MSG_KEYDOWN, protocol.MSG_KEYUP):
             preserve = message.pop("_preserve_key_name", False)
             message = self._key_message(peer, message, preserve=preserve)
