@@ -1556,6 +1556,7 @@ class ControlWindow(AppKit.NSObject):
         self.scroll_numeral.set(str(self.scroll_ruler.value))
         self.reverse_scroll_box.value = raw["reverse_scroll"]
         self.mouse_only_box.value = raw["mouse_only"]
+        self.keyboard_sync_box.value = raw["keyboard_sync"]
         self.appearance_select.value = raw["appearance"]
         self.language_select.value = raw["language"]
         self._apply_appearance(raw["appearance"])
@@ -3246,6 +3247,9 @@ class ControlWindow(AppKit.NSObject):
         module.add(self.mouse_only_box.view)
         module.add(widgets.note(tr("Keep this machine's keyboard here. Pointer and clipboard sharing stay on.")).view)
         widgets.add(body, module.view)
+        self.keyboard_sync_box = widgets.Switch(tr("Synchronise Russian and English keyboard layouts"), on_change=self._changed)
+        module.add(self.keyboard_sync_box.view)
+        module.add(widgets.note(tr("Enable on both computers. A bare Fn tap on this Mac switches RU/EN while controlling Windows. Alt+Shift also works.")).view)
         widgets.add(body, self._modifier_module().view)
         widgets.add(body, self._ignored_module().view)
         widgets.add(body, self._speed_module().view)
@@ -4628,6 +4632,7 @@ class ControlWindow(AppKit.NSObject):
             raw["trigger_key"] = self.key_recorder.value
             raw["ignored_inputs"] = list(self.ignored_entries)
             raw["mouse_only"] = self.mouse_only_box.value
+            raw["keyboard_sync"] = self.keyboard_sync_box.value
             raw["trigger_style"] = self.style_select.value
             raw["double_tap_ms"] = self.double_tap_ruler.value
             raw["pointer_speed"] = self.pointer_ruler.value / 100

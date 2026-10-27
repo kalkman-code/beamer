@@ -128,6 +128,7 @@ class Config:
     # Every address the window shows is hidden.
     hide_addresses: bool = False
     language: str = "auto"
+    keyboard_sync: bool = False
     # Same on all machines: the Crossing and Design pages kept in step with the Mac's, and the unix
     # seconds of the last change to that or to a shared value; see settings_sync.
     same_on_both: bool = False
@@ -404,6 +405,7 @@ def config_from_dict(raw: dict) -> Config:
             check_updates=raw.get("check_updates", True),
             hide_addresses=raw.get("hide_addresses", False),
             language=raw.get("language", "auto"),
+            keyboard_sync=raw.get("keyboard_sync") is True,
             same_on_both=raw.get("same_on_both", False),
             same_set_at=_stamp(raw.get("same_set_at", 0)),
             same_groups=raw.get("same_groups", ["crossing", "design", "shortcut", "names"]
@@ -512,6 +514,7 @@ def config_to_dict(config: Config) -> dict:
         "trigger_style": config.trigger_style,
         "double_tap_ms": int(config.double_tap_ms),
         "modifier_style": config.modifier_style,
+        "keyboard_sync": config.keyboard_sync,
         "block_while_dragging": config.block_while_dragging,
         "hold_full_screen": config.hold_full_screen,
         "show_in_tray": config.show_in_tray,

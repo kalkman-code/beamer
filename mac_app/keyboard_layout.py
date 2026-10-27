@@ -20,6 +20,7 @@ readers only ever look up.
 import ctypes
 import ctypes.util
 import logging
+import threading
 from typing import Dict, Optional
 
 from key_codes import PRINTABLE_KEY_FALLBACKS
@@ -37,6 +38,7 @@ _K_UC_KEY_TRANSLATE_NO_DEAD_KEYS = 1
 
 _chars: Dict[int, Optional[str]] = dict(PRINTABLE_KEY_FALLBACKS)
 _codes: Dict[str, int] = {}
+_language = None
 for _code, _char in sorted(PRINTABLE_KEY_FALLBACKS.items()):
     _codes.setdefault(_char, _code)
 
@@ -76,6 +78,11 @@ class _Carbon:
         self.carbon = carbon
         self.core = core
         carbon.TISCopyCurrentKeyboardLayoutInputSource.restype = ctypes.c_void_p
+        carbon.TISCopyCurrentKeyboardInputSource.restype = ctypes.c_void_p
+        carbon.TISCreateInputSourceList.argtypes = [ctypes.c_void_p, ctypes.c_bool]
+        carbon.TISCreateInputSourceList.restype = ctypes.c_void_p
+        carbon.TISSelectInputSource.argtypes = [ctypes.c_void_p]
+        carbon.TISSelectInputSource.restype = ctypes.c_int32
         carbon.TISGetInputSourceProperty.restype = ctypes.c_void_p
         carbon.TISGetInputSourceProperty.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
         carbon.LMGetKbdType.restype = ctypes.c_uint8
@@ -137,10 +144,11 @@ _carbon = None
 def refresh() -> bool:
     """Main thread only. Re-reads the current layout into the table; on any failure the table
     keeps what it had, and the US answers stay underneath."""
-    global _carbon
+    global _carbon, _language
     try:
         if _carbon is None:
             _carbon = _Carbon()
+        _language = _read_language()
         chars = _carbon.current_chars()
     except Exception:
         LOGGER.exception("could not read the keyboard layout; keys follow US positions")
@@ -150,6 +158,92 @@ def refresh() -> bool:
         return False
     install(chars)
     return True
+
+
+def _source_property(source, key):
+    import objc
+    pointer = _carbon.carbon.TISGetInputSourceProperty(
+        source, ctypes.c_void_p.in_dll(_carbon.carbon, key).value)
+    return objc.objc_object(c_void_p=pointer) if pointer else None
+
+
+def _source_language(source):
+    languages = _source_property(source, "kTISPropertyInputSourceLanguages") or ()
+    for code in languages:
+        base = str(code).replace("_", "-").split("-")[0].lower()
+        if base in {"en", "ru"}:
+            return base
+    return None
+
+
+def _read_language():
+    source = _carbon.carbon.TISCopyCurrentKeyboardInputSource()
+    if not source:
+        return None
+    try:
+        return _source_language(source)
+    finally:
+        _carbon.core.CFRelease(source)
+
+
+def current_language():
+    """Cached by the main-thread observer; safe on the event-tap and link threads."""
+    return _language
+
+
+def _select_language(language):
+    import objc
+    if _carbon is None:
+        refresh()
+    if _read_language() == language:
+        return True
+    pointer = _carbon.carbon.TISCreateInputSourceList(None, False)
+    if not pointer:
+        return False
+    try:
+        for source in objc.objc_object(c_void_p=pointer):
+            address = objc.pyobjc_id(source)
+            if (bool(_source_property(address, "kTISPropertyInputSourceIsEnabled"))
+                    and bool(_source_property(address, "kTISPropertyInputSourceIsSelectCapable"))
+                    and _source_language(address) == language):
+                if _carbon.carbon.TISSelectInputSource(address) == 0:
+                    refresh()
+                    return current_language() == language
+    finally:
+        _carbon.core.CFRelease(pointer)
+    LOGGER.warning("No enabled keyboard input source for %s; leaving the active source unchanged", language)
+    return False
+
+
+def select_language(language):
+    """TIS APIs run on the main thread; a timed-out queued change is cancelled."""
+    if language not in {"en", "ru"}:
+        return False
+    if threading.current_thread() is threading.main_thread():
+        return _select_language(language)
+    if current_language() == language:
+        return True
+    from PyObjCTools import AppHelper
+    done = threading.Event()
+    cancelled = threading.Event()
+    result = []
+
+    def apply():
+        if cancelled.is_set():
+            return
+        try:
+            result.append(_select_language(language))
+        except Exception:
+            LOGGER.exception("Could not select the keyboard input source")
+        finally:
+            done.set()
+
+    AppHelper.callAfter(apply)
+    if not done.wait(0.5):
+        cancelled.set()
+        LOGGER.warning("Timed out waiting for the keyboard input-source change")
+        return False
+    return bool(result and result[0])
 
 
 try:

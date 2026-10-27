@@ -158,6 +158,7 @@ def config_to_raw(cfg):
         "check_updates": cfg.check_updates,
         "hide_addresses": cfg.hide_addresses,
         "language": cfg.language,
+        "keyboard_sync": cfg.keyboard_sync,
         "hide_idle_pointer": cfg.hide_idle_pointer,
         "same_on_both": cfg.same_on_both,
         "same_set_at": cfg.same_set_at,
