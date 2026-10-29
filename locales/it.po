@@ -1774,6 +1774,10 @@ msgstr "Questo Mac mantiene le proprie vie"
 msgid "Don't cross while dragging with this Mac's pointer"
 msgstr "Non passare mentre trascini con il puntatore di questo Mac"
 
+#: mac_app/kvm_bridge_app.py
+msgid "Cross between this Mac's own displays"
+msgstr "Attraversa gli schermi di questo Mac"
+
 # New in 1.5.5: awaiting Lorenzo's check
 #: mac_app/kvm_bridge_app.py win_app/kvm_bridge_win.py
 msgid "Shake to come home"
@@ -2069,6 +2073,10 @@ msgstr "●  Non in linea, vie mantenute"
 #: mac_app/kvm_bridge_app.py
 msgid "Back to This Mac"
 msgstr "Torna a questo Mac"
+
+#: mac_app/kvm_bridge_app.py win_app/kvm_bridge_win.py
+msgid "Pushing from one display to the next meets the crossing resistance and plays the chosen effect."
+msgstr "Spingendo da uno schermo all'altro si incontra la resistenza dell'attraversamento e si riproduce l'effetto scelto."
 
 # New in 1.5.5: awaiting Lorenzo's check
 #: mac_app/kvm_bridge_app.py
@@ -2581,6 +2589,11 @@ msgstr "Stato dell'elemento login: richiede approvazione. Consenti Beamer in Imp
 #: mac_app/kvm_bridge_app.py
 msgid "Login item status: Requires approval. Move Beamer to Applications and reopen it before allowing it in Login Items."
 msgstr "Stato dell'elemento login: richiede approvazione. Sposta Beamer in Applicazioni e riaprilo prima di consentirlo in Elementi login."
+
+#: mac_app/kvm_bridge_app.py
+#, python-brace-format
+msgid "Needs two displays or more; this Mac has {count}."
+msgstr "Servono due o più schermi; questo Mac ne ha {count}."
 
 # New in 1.5.5: awaiting Lorenzo's check
 #: mac_app/kvm_bridge_app.py win_app/kvm_bridge_win.py
@@ -4562,6 +4575,10 @@ msgid "Don't cross while dragging with this PC's pointer"
 msgstr "Non passare mentre trascini con il puntatore di questo PC"
 
 #: win_app/kvm_bridge_win.py
+msgid "Cross between this PC's own displays"
+msgstr "Attraversa gli schermi di questo PC"
+
+#: win_app/kvm_bridge_win.py
 msgid "Switches the moment this PC's pointer touches the edge. Each screen supplies its own zones."
 msgstr "Passa nell'istante in cui il puntatore di questo PC tocca il bordo. Ogni schermo fornisce le proprie zone."
 
@@ -4908,6 +4925,11 @@ msgstr "Solo l'app installata può avviarsi all'accesso."
 #: win_app/kvm_bridge_win.py
 msgid "These ways could not be changed."
 msgstr "Impossibile modificare queste vie."
+
+#: win_app/kvm_bridge_win.py
+#, python-brace-format
+msgid "Needs two displays or more; this PC has {count}."
+msgstr "Servono due o più schermi; questo PC ne ha {count}."
 
 # New in 1.5.5: awaiting Lorenzo's check
 #: win_app/kvm_bridge_win.py

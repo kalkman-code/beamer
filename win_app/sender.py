@@ -178,6 +178,8 @@ class LinkSender:
         self._entries: list = []        # every entry, in the order the UI shows them
         self._zone_list: list = []
         self._models: list = []         # [(peer id, model)], this PC's zones in use
+        self._local_models: list = []   # seams between this PC's own displays, when that is on
+        self._local_key = None
         self._pressure_model = None
         self._edge_cursor_error_logged = False
         self._ignore_gate = ignored.Gate()
@@ -824,7 +826,8 @@ class LinkSender:
         INJECTED_MARK and never arrives, so what does is this PC's own mouse, and its push out
         means the pointer is going on with this mouse behind it."""
         if ((self._home_hold is not None and self._home_hold.blocks(self._clock()))
-                or not self._models or self.edges_held or self._owner is None):
+                or not (self._models or self._setting("local_crossing", False))
+                or self.edges_held or self._owner is None):
             return
         if self._buttons_held and self._setting("block_while_dragging", True) and self._still_dragging():
             # A drag that reaches the edge is dragging, not leaving: the push so far is dropped,
@@ -851,6 +854,13 @@ class LinkSender:
                     outcome, model, target = result, candidate, peer
                     break
             if outcome is None:
+                local_map = {str(index): monitor for index, monitor in enumerate(monitors)}
+                for candidate in self._local_seam_models():
+                    result = candidate.feed(monitors, pointer, float(dx), float(dy), display_map=local_map)
+                    if result.action != return_edge.PASS:
+                        outcome, model = result, candidate
+                        break
+            if outcome is None:
                 return
         except Exception:
             LOGGER.exception("The way out failed; crossing out is off until the next change")
@@ -869,7 +879,42 @@ class LinkSender:
             # The model names the edge on the far side, not the one just left: it is the same
             # border, read from the other end. The display it leads to lands the pointer there, as
             # the Mac's own crossing does.
-            self._go(target, outcome.edge, offset, outcome.display, outcome.side)
+            if target is None:
+                self._cross_locally(model, outcome)
+            else:
+                self._go(target, outcome.edge, offset, outcome.display, outcome.side)
+
+    def _local_seam_models(self) -> list:
+        """The seams between this PC's own displays, as ways that lead on to the next display. None
+        while the setting is off, with a single display, or while a button is held: a window dragged
+        to the next display must not be stopped at the seam."""
+        if not self._setting("local_crossing", False) or self._buttons_held:
+            return []
+        monitors = self._cached_monitors()
+        key = (tuple(monitors), self._resistance())
+        if key != self._local_key:
+            self._local_key = key
+            self._local_models = return_edge.local_seams(monitors, self._resistance(), self._clock)
+        return self._local_models
+
+    def _cross_locally(self, model, outcome) -> None:
+        """A push through a seam between two of this PC's own displays: the pointer goes on to the
+        next display. No arrival plays: the landing is a pixel from the seam, where the push's own
+        breakthrough is already playing, and the two side by side read as one effect drawn twice."""
+        model.armed = True
+        try:
+            desktop = self._desktop_module()
+            monitors = self._cached_monitors()
+            local_map = {str(index): monitor for index, monitor in enumerate(monitors)}
+            x, y = return_edge.arrival_position(monitors, outcome.edge, outcome.offset,
+                                                outcome.display, outcome.side, local_map)
+            desktop.set_cursor_position(x, y)
+        except Exception:
+            LOGGER.exception("Could not move the pointer on to the next display")
+            return
+        for other in self._local_models:
+            if other.display == outcome.display and other.edge == outcome.side:
+                other.start_grace()
 
     def zone_models(self) -> list:
         """The models of this PC's ways out, where a desktop that captures input at barriers puts
@@ -879,18 +924,28 @@ class LinkSender:
                 return []
             return [model for _peer, model in self._models]
 
+    def seam_models(self) -> list:
+        """The models that hold the pointer at a seam between this PC's displays: the ways out that
+        start there, and the seams themselves when crossing between this PC's own displays is on."""
+        return self.zone_models() + ([] if self.edges_held else self._local_seam_models())
+
     def seam_clip_position(self, x: int, y: int):
         """Keep a local pointer on an armed display edge when it enters an adjacent display."""
         if self.redirecting:
             return None
-        models = self.zone_models()
+        models = self.seam_models()
         if not models:
             return None
         monitors = self._cached_monitors()
         display_map = {str(index): monitor for index, monitor in enumerate(monitors)}
         from capture_win import internal_seam_position
 
-        return internal_seam_position((x, y), monitors, display_map, models)
+        try:
+            # Inside the hook the cursor has not moved yet: this is where the move starts.
+            current = self._desktop_module().cursor_position()
+        except Exception:
+            return None
+        return internal_seam_position((x, y), monitors, display_map, models, current)
 
     def pressure_at(self, now: float | None = None) -> float:
         """The active local way's pressure fraction at `now`, without advancing its model."""

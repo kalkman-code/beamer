@@ -67,11 +67,20 @@ class PressureRoutingTest(unittest.TestCase):
         kvm_bridge_win.WindowsApplication._on_pressure(owner, "left", 0.4, False)
         overlay.push.assert_called_once_with("left", 0.4, False, part=None)
 
+    def test_a_push_draws_where_it_was_made_not_where_the_pointer_went_on_to(self):
+        # A crossing between this PC's own displays moves the pointer before the effect is drawn.
+        owner = _owner(glow_style="rupture")
+        overlay = mock.Mock()
+        owner._effect_overlay = mock.Mock(return_value=overlay)
+        with mock.patch.object(kvm_bridge_win, "logical_point", side_effect=lambda x, y: (x, y)):
+            kvm_bridge_win.WindowsApplication._on_pressure(owner, "left", 1.0, True, None, (1920, 500))
+        overlay.push.assert_called_once_with("left", 1.0, True, cursor=(1920, 500), part=None)
+
     def test_sender_pressure_is_sent_to_effects_and_the_local_resistance_strip(self):
         owner = SimpleNamespace(bridge=SimpleNamespace(
             pressure=mock.Mock(), local_pressure=mock.Mock()))
         kvm_bridge_win.WindowsApplication._relay_sender_pressure(owner, "top", 0.4, False, "start")
-        owner.bridge.pressure.emit.assert_called_once_with("top", 0.4, False, "start")
+        owner.bridge.pressure.emit.assert_called_once_with("top", 0.4, False, "start", mock.ANY)
         owner.bridge.local_pressure.emit.assert_called_once_with("top", 0.4, False, "start")
 
     def test_an_edge_push_reaches_edge_glow_when_the_style_is_glow(self):

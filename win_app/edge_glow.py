@@ -306,14 +306,14 @@ class EdgeGlow(QWidget):
         self._state.pace = effect_pace if effect_pace is not None else effects.pace(length)
         self._size_fraction = size_fraction
 
-    def set_pressure(self, edge: str, pressure: float, crossed: bool, part=None) -> None:
+    def set_pressure(self, edge: str, pressure: float, crossed: bool, part=None, cursor=None) -> None:
         """`part` is the third of the edge being pushed for Part of the edge, which lights only
         that third, or the corner being pushed into, which lights that corner; None lights the
-        whole edge."""
+        whole edge. `cursor` is where the push was, when the pointer may have moved on since."""
         now = time.monotonic()
         if edge != self._edge or part != self._part or self.isHidden():
             self._edge, self._part = edge, part
-            self._place()
+            self._place(cursor)
         self._state.push(pressure, crossed)
         self._updated_at = now
         if self.isHidden():
@@ -325,14 +325,14 @@ class EdgeGlow(QWidget):
         keep_on_top(self)
         self.update()
 
-    def _place(self) -> None:
+    def _place(self, cursor=None) -> None:
         screens = QApplication.screens()
         if not screens:
             return
         rects = [crossing.Rect(s.geometry().x(), s.geometry().y(), s.geometry().width(), s.geometry().height()) for s in screens]
         # The display the pointer is pushing on, as the effects' region takes it: on staggered
         # displays the outermost one may not be it, and a third of the wrong display would light.
-        cursor = QCursor.pos()
+        cursor = QCursor.pos() if cursor is None else cursor
         owner = next((r for r in rects if r.x <= cursor.x() < r.x + r.width and r.y <= cursor.y() < r.y + r.height),
                      None) or crossing.owning_monitor(rects, self._edge)
         self._band = effects.edge_depth(owner.width, owner.height, self._size, self._size_fraction)
