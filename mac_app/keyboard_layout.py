@@ -20,6 +20,7 @@ readers only ever look up.
 import ctypes
 import ctypes.util
 import logging
+import unicodedata
 from typing import Dict, Optional
 
 from key_codes import PRINTABLE_KEY_FALLBACKS
@@ -105,8 +106,8 @@ class _Carbon:
         core.CFRelease.argtypes = [ctypes.c_void_p]
         self.layout_data_key = ctypes.c_void_p.in_dll(carbon, "kTISPropertyUnicodeKeyLayoutData").value
 
-    def translate(self, layout, keycode, kbd_type, options, modifiers=0):
-        dead = ctypes.c_uint32(0)
+    def translate(self, layout, keycode, kbd_type, options, modifiers=0, dead_state=0):
+        dead = ctypes.c_uint32(dead_state)
         length = ctypes.c_ulong(0)
         buffer = (ctypes.c_uint16 * 8)()
         status = self.carbon.UCKeyTranslate(
@@ -156,12 +157,24 @@ class _Carbon:
             for code in (*LAYOUT_KEY_CODES, 0x31):
                 text, dead = self.translate(layout, code, kbd_type, 0, modifiers)
                 if dead:
-                    text, _ = self.translate(layout, code, kbd_type, _K_UC_KEY_TRANSLATE_NO_DEAD_KEYS, modifiers)
-                    if text and len(text) == 1:
-                        translations[code, modifiers] = DeadKey(text)
+                    spacing, _ = self.translate(layout, code, kbd_type, _K_UC_KEY_TRANSLATE_NO_DEAD_KEYS, modifiers)
+                    if spacing and len(spacing) == 1:
+                        translations[code, modifiers] = DeadKey(spacing, self._combining_mark(layout, kbd_type, dead))
                 elif text and len(text) == 1 and text.isprintable():
                     translations[code, modifiers] = text
         return translations
+
+    def _combining_mark(self, layout, kbd_type, dead_state) -> str:
+        """The combining mark a dead key adds, read by composing it with each key until one yields a
+        precomposed letter, then decomposing. Taken this way, not from the spacing accent, because
+        U.S. International's acute and diaeresis terminate to an ASCII quote whose name has no accent."""
+        for code in LAYOUT_KEY_CODES:
+            composed, _ = self.translate(layout, code, kbd_type, 0, 0, dead_state)
+            if composed and len(composed) == 1:
+                decomposed = unicodedata.normalize("NFD", composed)
+                if len(decomposed) == 2 and unicodedata.combining(decomposed[1]):
+                    return decomposed[1]
+        return ""
 
     def current_translations(self):
         source = self.carbon.TISCopyCurrentKeyboardLayoutInputSource()

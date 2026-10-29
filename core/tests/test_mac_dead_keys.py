@@ -149,6 +149,61 @@ class MacDeadKeyTests(unittest.TestCase):
         self.assertIn("com.apple.keylayout.Spanish-ISO", found)
         self.assertIn("com.apple.keylayout.German", found)
 
+    def test_dead_key_with_a_combining_mark_composes_from_it(self):
+        # US International's acute is an ASCII apostrophe with no "COMBINING APOSTROPHE"; the mark
+        # read from the layout composes á where inferring from the spacing char would give "'a".
+        self.layout.install({39: None}, {(39, 0): capture_types.DeadKey("'", "́"),
+                                         (0, 0): "a", (7, 0): "x", (49, 0): " "})
+        self.accent(39)
+        self.assertEqual(self.feed(0, text="a"), [{"type": "text", "data": {"text": "á"}}])
+        self.feed(0, False, text="x")
+        # A base the mark cannot combine with keeps the spacing accent and the letter, visibly.
+        self.accent(39)
+        self.assertEqual(self.feed(7, text="x"), [{"type": "text", "data": {"text": "'x"}}])
+        self.feed(7, False, text="x")
+        self.accent(39)
+        self.assertEqual(self.feed(49), [{"type": "text", "data": {"text": "'"}}])
+        self.feed(49, False)
+
+    @unittest.skipUnless(sys.platform == "darwin", "reads installed macOS layouts without selecting them")
+    def test_us_international_dead_key_table_composes_despite_ascii_spacing(self):
+        carbon = self.layout._Carbon()
+        lib, core = carbon.carbon, carbon.core
+        lib.TISCreateInputSourceList.restype = ctypes.c_void_p
+        lib.TISCreateInputSourceList.argtypes = [ctypes.c_void_p, ctypes.c_bool]
+        core.CFArrayGetCount.restype = ctypes.c_long
+        core.CFArrayGetCount.argtypes = [ctypes.c_void_p]
+        core.CFArrayGetValueAtIndex.restype = ctypes.c_void_p
+        core.CFArrayGetValueAtIndex.argtypes = [ctypes.c_void_p, ctypes.c_long]
+        core.CFStringGetCString.argtypes = [ctypes.c_void_p, ctypes.c_char_p, ctypes.c_long, ctypes.c_uint32]
+        id_key = ctypes.c_void_p.in_dll(lib, "kTISPropertyInputSourceID").value
+        sources = lib.TISCreateInputSourceList(None, True)
+        found = False
+        try:
+            for index in range(core.CFArrayGetCount(sources)):
+                source = core.CFArrayGetValueAtIndex(sources, index)
+                name_ref = lib.TISGetInputSourceProperty(source, id_key)
+                name = ctypes.create_string_buffer(256)
+                if not name_ref or not core.CFStringGetCString(name_ref, name, len(name), 0x08000100):
+                    continue
+                if name.value.decode() != "com.apple.keylayout.USInternational-PC":
+                    continue
+                translations = carbon.layout_translations(source)
+                self.layout.install(carbon.layout_chars(source), translations)
+                # The ASCII-apostrophe acute, the one a US-International user presses, must compose á.
+                acute = next(code for (code, mods), value in translations.items()
+                             if mods == 0 and isinstance(value, capture_types.DeadKey) and value.character == "'")
+                base = next(code for (code, mods), value in translations.items() if mods == 0 and value == "a")
+                self.translator.dead_keys.reset()
+                self.accent(acute)
+                self.assertEqual(self.feed(base, text="a"), [{"type": "text", "data": {"text": "á"}}])
+                self.feed(base, False)
+                found = True
+        finally:
+            core.CFRelease(sources)
+        if not found:
+            self.skipTest("US International is not installed")
+
 
 if __name__ == "__main__":
     unittest.main()
