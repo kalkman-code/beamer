@@ -99,7 +99,7 @@ setup(
                 "ATSApplicationFontsPath": "Fonts",
                 "NSHumanReadableCopyright": "Copyright 2026 Toby Kalkman",
                 "NSLocalNetworkUsageDescription": "Beamer needs to reach your other computers on your local network to share keyboard and mouse input.",
-                "CFBundleLocalizations": ["en", "it"],
+                "CFBundleLocalizations": ["en", "es", "it"],
                 "CFBundleDevelopmentRegion": "en_GB",
             },
         }
