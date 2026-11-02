@@ -1590,6 +1590,8 @@ class ControlWindow(AppKit.NSObject):
         self.landing_box.value = crossing_raw["shortcut_arrival"]
         self.switch_style_select.value = crossing_raw["shortcut_arrival_style"]
         self.dragging_box.value = crossing_raw["block_while_dragging"]
+        self.local_crossing_box.value = crossing_raw.get("local_crossing", False)
+        self._reflect_local_displays()
         self.glow_style_select.value = crossing_raw["glow_style"]
         self.frame_rate_select.value = crossing_raw.get("frame_rate", "display")
         set_divisor(effects.frame_divisor(self.frame_rate_select.value))
@@ -3493,7 +3495,21 @@ class ControlWindow(AppKit.NSObject):
         self.dragging_box = widgets.Switch(tr("Don't cross while dragging with this Mac's pointer"), on_change=self._changed)
         module.add(self.dragging_box.view)
         module.add(widgets.note(tr("Applies when this physical pointer pushes through this screen's ways; visiting pointers are not protected by this switch.")).view)
+        self.local_crossing_box = widgets.Switch(tr("Cross between this Mac's own displays"), on_change=self._changed)
+        module.add(self.local_crossing_box.view)
+        self.local_crossing_note = widgets.note()
+        module.add(self.local_crossing_note.view)
+        self._reflect_local_displays()
         return module
+
+    @objc.python_method
+    def _reflect_local_displays(self):
+        """The local crossing switch is offered only while this Mac has two displays or more."""
+        count = len(AppKit.NSScreen.screens())
+        self.local_crossing_box.set_enabled(count >= 2)
+        self.local_crossing_note.set(
+            tr("Pushing from one display to the next meets the crossing resistance and plays the chosen effect.")
+            if count >= 2 else tr("Needs two displays or more; this Mac has {count}.").format(count=count))
 
     @objc.python_method
     def _editing_other(self):
@@ -4662,6 +4678,7 @@ class ControlWindow(AppKit.NSObject):
                 "effect_size_fraction": self.size_select.numeric_value(),
                 "frame_rate": self.frame_rate_select.value or "display",
                 "block_while_dragging": self.dragging_box.value,
+                "local_crossing": self.local_crossing_box.value,
                 "shortcut_goes_to": self.shortcut_goes_to.value or "last",
                 "hold_full_screen": self.hold_box.value,
                 "arrangement_set_at": self.controller.cfg.crossing.get("arrangement_set_at", 0),

@@ -41,6 +41,9 @@ DEFAULT_CROSSING = {
     "glow_style": "glow",
     "glow_colour": "colourful",
     "block_while_dragging": True,
+    # A push between two of this Mac's own displays meets the crossing resistance and plays its
+    # effects, as a way out to a machine does. This Mac's own choice, never shared.
+    "local_crossing": False,
     # A full-screen app in front holds this Mac's edges. This Mac's own choice, never shared.
     "hold_full_screen": False,
     # "Part of the edge": the thirds of `edge` that cross, as return_edge.PARTS names them.
@@ -61,6 +64,9 @@ DEFAULT_CROSSING = {
     # it lives here so it is saved and loaded with the rest of the crossing.
     "arrangement_set_at": 0,
 }
+
+# The `peer` of a way that leads to another of this Mac's own displays rather than to a machine.
+LOCAL = "local"
 
 DECAY_S = 0.4
 DECAY_PX_PER_SECOND = 300.0
@@ -121,6 +127,15 @@ class Ways:
     target_side: str = None
     contact_span: tuple = None
     target_span: tuple = None
+
+
+def local_ways(displays):
+    """A way across each seam between two of this Mac's displays, leading on to the next display
+    rather than to a machine. `displays` as `feed` takes them."""
+    rects = [return_edge.Rect(d[0], d[1], d[2] - d[0], d[3] - d[1]) for d in displays or ()]
+    return [Ways(LOCAL, frozenset({"edge"}), seam.edge, frozenset(return_edge.PARTS), "top_right", seam.display,
+                 seam.target_display, seam.target_side, seam.contact_span, seam.target_span)
+            for seam in return_edge.local_seams(rects)]
 
 
 class CrossingEngine:

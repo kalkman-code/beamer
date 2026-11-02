@@ -887,7 +887,7 @@ class SettingsStore:
                      else effects.valid_effect_size_fraction(value))
             if not valid:
                 raise SettingsError(f"crossing.{name} must be a number between {low} and {high}")
-        for name in ("haptics", "glow", "block_while_dragging", "shortcut_arrival", "hold_full_screen"):
+        for name in ("haptics", "glow", "block_while_dragging", "local_crossing", "shortcut_arrival", "hold_full_screen"):
             if not isinstance(crossing[name], bool):
                 raise SettingsError(f"crossing.{name} must be true or false")
         for name in ("pointer_speed", "scroll_speed"):

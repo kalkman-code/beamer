@@ -775,6 +775,13 @@ class KVMController:
         return engine
 
     def _fresh_crossing_engine(self):
+        """This Mac's ways out, and the seams between its own displays when crossing between them is on."""
+        engine = self._ways_out_engine()
+        self._local_displays = self._current_displays() if self.cfg.crossing.get("local_crossing") else None
+        engine.ways.extend(crossing.local_ways(self._local_displays))
+        return engine
+
+    def _ways_out_engine(self):
         """A controller made from a Config alone has the flat crossing settings for its one machine."""
         if self._memory is not None:
             if not self.cfg.send_to_windows:
@@ -1030,7 +1037,10 @@ class KVMController:
         """Whether a zone to `peer` has a wall now: its link is up, this Mac sends to it, and it is not
         held back after a refusal, as Windows' zones are, since a push that cannot take it must not pin
         the pointer and glow as if it would. One that does not accept input keeps its wall, so the push
-        says why it cannot cross. The one machine of a Config-built controller is its primary link's."""
+        says why it cannot cross. The one machine of a Config-built controller is its primary link's.
+        A seam between this Mac's own displays always has its wall."""
+        if peer == crossing.LOCAL:
+            return True
         if peer is None:
             link = self._primary_link
             peer = link.peer_id if link is not None else None
@@ -1047,6 +1057,23 @@ class KVMController:
             return bool(self.cfg.send_to_windows)
         return any(entry.get("id") == peer and entry.get("in_use", True) is True and entry.get("send") is True
                    for entry in self.book.peers())
+
+    def _cross_locally(self, step):
+        """A push through a seam between two of this Mac's own displays: the pointer goes on to the
+        next display and no machine is involved. No arrival plays: it would sit a point from the
+        seam, beside the push's own breakthrough, and read as one effect drawn twice."""
+        try:
+            point = crossing.CrossingEngine.arrival_point(
+                step.edge, step.offset, self._current_desktop_bounds(), displays=self._current_displays(),
+                display=step.display, side=step.side)
+        except Exception:
+            self.logger.exception("failed to move the pointer on to the next display")
+            return
+        self._warp_cursor_to(point)
+        # The next event's movement starts at the landing, not at the seam just left.
+        self.crossing._last_x, self.crossing._last_y = point
+        self.crossing.start_grace(self.clock())
+        self._notify_crossing("cross", step)
 
     def _zone_peer(self, step):
         """The machine a push through a zone goes to; a Config-built controller's one machine has no id in its zones."""
@@ -1994,6 +2021,10 @@ class KVMController:
         if self._crossing_failed and self.clock() - self._crossing_failed_at < CROSSING_RETRY_SECONDS:
             return event
         self._crossing_failed = False
+        wanted = self._current_displays() if self.cfg.crossing.get("local_crossing") else None
+        if wanted != getattr(self, "_local_displays", None):
+            # Crossing between this Mac's displays was switched, or a display came or went.
+            self.crossing = self._crossing_engine()
         if not self.crossing.armed:
             return event
         if self.crossing_paused or self.full_screen_app is not None:
@@ -2037,6 +2068,9 @@ class KVMController:
             self.crossing.reset()
             self.logger.exception("crossing failed; edge switching is off for %.0fs", CROSSING_RETRY_SECONDS)
             return event
+        if step.crossed and step.peer == crossing.LOCAL:
+            self._cross_locally(step)
+            return None
         if step.crossed:
             if self.receiving:
                 # Another machine is driving this Mac and this Mac's own pointer pushed through:
