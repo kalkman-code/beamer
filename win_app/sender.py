@@ -823,7 +823,9 @@ class LinkSender:
         It runs while a peer is driving this PC too. Every move a peer makes here carries
         INJECTED_MARK and never arrives, so what does is this PC's own mouse, and its push out
         means the pointer is going on with this mouse behind it."""
-        if ((self._home_hold is not None and self._home_hold.blocks(self._clock()))
+        # Wayland barriers also capture injected motion; the receiver owns crossing during a visit.
+        if ((self.push_out is not None and self.driven())
+                or (self._home_hold is not None and self._home_hold.blocks(self._clock()))
                 or not self._models or self.edges_held or self._owner is None):
             return
         if self._buttons_held and self._setting("block_while_dragging", True) and self._still_dragging():
@@ -875,7 +877,7 @@ class LinkSender:
         """The models of this PC's ways out, where a desktop that captures input at barriers puts
         them; none while the edges are held."""
         with self._lock:
-            if self.edges_held or self._owner is None:
+            if self.edges_held or self._owner is None or (self.push_out is not None and self.driven()):
                 return []
             return [model for _peer, model in self._models]
 

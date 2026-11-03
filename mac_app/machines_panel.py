@@ -652,6 +652,12 @@ class MachinesPanel:
                     row.addSubview_(text.view)
                     widgets.pin(text.view, row, (7, 10, 7, 10))
                     self.nearby_choices.addArrangedSubview_(row)
+                    text.view.setNeedsDisplay_(True)
+                    row.setNeedsLayout_(True)
+                    row.setNeedsDisplay_(True)
+            self.nearby_choices.setNeedsLayout_(True)
+            self.nearby_view.setNeedsLayout_(True)
+            self.nearby_view.layoutSubtreeIfNeeded()
 
         sas = status.get("sas") if state in {"confirm", "waiting"} else None
         valid_sas = isinstance(sas, str) and len(sas) == pairing.CODE_DIGITS and sas.isascii() and sas.isdigit()

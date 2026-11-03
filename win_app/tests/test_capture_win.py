@@ -440,6 +440,69 @@ class TriggerTests(unittest.TestCase):
         self.assertEqual(trigger.feed("alt_r", True, 1.0), REDIRECT)
 
 
+class LockKeyHookTests(unittest.TestCase):
+    HookData = InjectedHookTests.HookData
+
+    def key(self, hooks, vk, down, native, injected=False):
+        data = self.HookData(vk, 0x3A if vk == 0x14 else 0x45,
+                             capture_win.LLKHF_INJECTED if injected else 0, 0,
+                             INJECTED_MARK if injected else 0)
+
+        def accept(_handle, _code, _message, _data):
+            if down and vk not in native["down"]:
+                native[vk] = not native[vk]
+            if down:
+                native["down"].add(vk)
+            else:
+                native["down"].discard(vk)
+            return 99
+
+        with patch.object(capture_win, "KBDLLHOOKSTRUCT", self.HookData, create=True), \
+                patch.object(capture_win, "user32", Mock(CallNextHookEx=accept)):
+            return hooks._keyboard_proc(capture_win.HC_ACTION,
+                capture_win.WM_KEYDOWN if down else capture_win.WM_KEYUP, ctypes.byref(data))
+
+    def test_remote_lock_presses_change_only_the_recipient_and_its_translation_state(self):
+        source_native = {0x14: False, 0x90: True, "down": set()}
+        target_native = {0x14: True, 0x90: False, "down": set()}
+        target_key = Mock(return_value=False)
+        target = capture_win.Hooks(target_key, Mock(), Mock())
+        target._state.caps_lock = True
+
+        def forward(_name, down, vk, _us):
+            self.key(target, vk, down, target_native, injected=True)
+            return True
+
+        source = capture_win.Hooks(forward, Mock(), Mock())
+        for vk in (0x14, 0x90):
+            for down in (True, True, False):
+                self.assertEqual(self.key(source, vk, down, source_native), 1)
+        self.assertFalse(source_native[0x14])
+        self.assertTrue(source_native[0x90])
+        self.assertFalse(target_native[0x14])
+        self.assertTrue(target_native[0x90])
+        self.assertFalse(source._state.caps_lock)
+        self.assertFalse(target._state.caps_lock)
+        target_key.assert_not_called()
+
+    def test_local_caps_lock_changes_once_per_press_and_survives_a_swallowed_press(self):
+        native = {0x14: False, "down": set()}
+        on_key = Mock(return_value=False)
+        hooks = capture_win.Hooks(on_key, Mock(), Mock())
+        for down in (True, True, True, False):
+            self.assertEqual(self.key(hooks, 0x14, down, native), 99)
+            self.assertEqual(hooks._state.caps_lock, native[0x14])
+        on_key.return_value = True
+        for down in (True, True, False):
+            self.key(hooks, 0x14, down, native)
+            self.assertEqual(hooks._state.caps_lock, native[0x14])
+        on_key.return_value = False
+        for down in (True, False):
+            self.key(hooks, 0x14, down, native)
+        self.assertFalse(hooks._state.caps_lock)
+        self.assertFalse(native[0x14])
+
+
 class HandMotionTests(unittest.TestCase):
     """What the WM_INPUT reader keeps. Raw Input reports a SendInput move
     exactly as it reports the mouse, so the injector's stamp is the only

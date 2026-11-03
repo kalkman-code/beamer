@@ -412,7 +412,8 @@ def plan_key_inputs(
         vk = result & 0xFF
         shift_state = (result >> 8) & 0xFF
         shift_only = shift_state == 0x01
-        if shift_state == 0 or (shift_only and mods_down & SHIFT_KEYS):
+        # Chords need the real key; Caps Lock's character case must not imply a held Shift.
+        if mods_down & CHORD_KEYS or shift_state == 0 or (shift_only and mods_down & SHIFT_KEYS):
             scan = scan_lookup(vk)
             char_vk_down[ch] = vk
             return [(vk, scan, keyup_flag)]

@@ -23,7 +23,7 @@ FAKE_VK_SCAN = {
     "C": 0x0143,  # shift + VK_C (upper-case via shift)
     "k": 0x004B,  # plain, no shift needed
     "K": 0x014B,  # shift + VK_K (upper-case via shift)
-    "@": 0x0602,  # requires ctrl+alt (AltGr) bits -> unsupported combo
+    "@": 0x0632,  # requires ctrl+alt (AltGr) bits
 }
 
 # Fake MapVirtualKeyW: vk -> hardware scan code.
@@ -31,6 +31,7 @@ FAKE_SCAN_CODES = {
     0x43: 0x2E,  # 'C' key
     0x45: 0x12,  # 'E' key
     0x4B: 0x25,  # 'K' key
+    0x32: 0x03,  # '2' key
     0x0D: 0x1C,  # enter
     0x26: 0x48,  # up arrow
     0xA3: 0x1D,  # ctrl_r
@@ -139,15 +140,13 @@ class PlanKeyInputsChordTests(unittest.TestCase):
         self.assertEqual(up_plan, [(0, ord("a"), KEYEVENTF_UNICODE | KEYEVENTF_KEYUP)])
         self.assertEqual(char_vk_down, {})
 
-    def test_altgr_char_falls_back_to_unicode(self):
+    def test_chord_uses_the_real_key_even_when_translation_needs_altgr(self):
         mods_down = {"ctrl"}
         char_vk_down = {}
 
-        with self.assertLogs("input_injector", level="WARNING"):
-            down_plan = plan_key_inputs("@", True, mods_down, char_vk_down, fake_vk_lookup, fake_scan_lookup)
-
-        self.assertEqual(down_plan, [(0, ord("@"), KEYEVENTF_UNICODE)])
-        self.assertEqual(char_vk_down, {})
+        down_plan = plan_key_inputs("@", True, mods_down, char_vk_down, fake_vk_lookup, fake_scan_lookup)
+        self.assertEqual(down_plan, [(0x32, 0x03, 0)])
+        self.assertEqual(char_vk_down, {"@": 0x32})
 
     def test_unresolvable_char_falls_back_to_unicode(self):
         mods_down = {"alt"}
@@ -160,10 +159,6 @@ class PlanKeyInputsChordTests(unittest.TestCase):
         self.assertEqual(char_vk_down, {})
 
     def test_shift_only_vk_scan_result_adds_no_synthetic_shift(self):
-        # Ctrl+Shift+C: the chord modifier alone doesn't satisfy a
-        # shift-only VkKeyScanW result -- shift must actually be held too
-        # (it is here), and when it is, no extra synthetic shift keydown is
-        # injected on top of the real VK+scan keystroke.
         mods_down = {"ctrl", "shift"}
         char_vk_down = {}
 
@@ -171,17 +166,69 @@ class PlanKeyInputsChordTests(unittest.TestCase):
         self.assertEqual(down_plan, [(0x43, 0x2E, 0)])
         self.assertEqual(char_vk_down, {"C": 0x43})
 
-    def test_shift_only_result_without_shift_held_falls_back_even_with_a_chord(self):
-        # A chord modifier being held is not enough on its own: Ctrl+C
-        # where "C" only resolves via a shift bit that isn't actually down
-        # (e.g. caps-lock) must not be sent as the plain 'c' VK -- that
-        # would silently turn Ctrl+Shift+C into Ctrl+C on Windows.
-        mods_down = {"ctrl"}
-        char_vk_down = {}
+    def test_caps_capital_keeps_the_real_chord_key_and_the_forwarded_shift(self):
+        for modifier in sorted(input_injector.CHORD_KEYS):
+            for shifted in (False, True):
+                for character in ("C", "Ф", "Ω"):
+                    with self.subTest(modifier=modifier, shifted=shifted, character=character):
+                        mods = {modifier} | ({"shift_r"} if shifted else set())
+                        held = {}
+                        lookup = lambda ch: 0x0143
+                        expected_mods = set(mods)
+                        self.assertEqual(plan_key_inputs(character, True, mods, held, lookup, fake_scan_lookup),
+                                         [(0x43, 0x2E, 0)])
+                        self.assertEqual(mods, expected_mods)
+                        self.assertEqual(plan_key_inputs(character, True, mods, held, lambda ch: -1, fake_scan_lookup),
+                                         [(0x43, 0x2E, 0)])
+                        mods.clear()
+                        self.assertEqual(plan_key_inputs(character, False, mods, held, lambda ch: -1, fake_scan_lookup),
+                                         [(0x43, 0x2E, KEYEVENTF_KEYUP)])
+                        self.assertEqual(held, {})
 
-        down_plan = plan_key_inputs("C", True, mods_down, char_vk_down, fake_vk_lookup, fake_scan_lookup)
-        self.assertEqual(down_plan, [(0, ord("C"), KEYEVENTF_UNICODE)])
-        self.assertEqual(char_vk_down, {})
+    def test_plain_non_latin_caps_capital_stays_unicode(self):
+        for character in ("Ф", "Ω"):
+            with self.subTest(character=character):
+                held = {}
+                self.assertEqual(plan_key_inputs(character, True, set(), held, lambda ch: 0x0143, fake_scan_lookup),
+                                 [(0, ord(character), KEYEVENTF_UNICODE)])
+                self.assertEqual(plan_key_inputs(character, False, set(), held, lambda ch: -1, fake_scan_lookup),
+                                 [(0, ord(character), KEYEVENTF_UNICODE | KEYEVENTF_KEYUP)])
+                self.assertEqual(held, {})
+
+    def test_chord_from_another_script_uses_its_physical_place(self):
+        for modifier in sorted(input_injector.CHORD_KEYS):
+            with self.subTest(modifier=modifier):
+                held = {}
+                args = (held, lambda ch: -1, fake_scan_lookup, "c", lambda us: (0x43, "c"))
+                self.assertEqual(plan_key_inputs("Ф", True, {modifier}, *args), [(0x43, 0x2E, 0)])
+                self.assertEqual(plan_key_inputs("Ф", False, set(), *args), [(0x43, 0x2E, KEYEVENTF_KEYUP)])
+                self.assertEqual(held, {})
+
+    def test_windows_caps_capture_reaches_ctrl_a_and_win_r_as_real_keys(self):
+        import capture_win
+        from sender import PHYSICAL
+        from core import keytable
+
+        for caps in (False, True):
+            for modifier_vk, vk, scan in ((0xA2, 0x41, 0x1E), (0x5B, 0x52, 0x13)):
+                with self.subTest(caps=caps, modifier=modifier_vk):
+                    state = capture_win.KeyboardState()
+                    state.caps_lock = caps
+
+                    def translate(key, code, keyboard):
+                        return chr(key) if keyboard[capture_win.VK_CAPITAL] else chr(key).lower()
+
+                    captured = capture_win.VK_TO_NAME[modifier_vk]
+                    modifier = keytable.wire_name(PHYSICAL.get(captured, captured),
+                                                 "windows", "windows", "semantic")
+                    name = capture_win.key_name(vk, scan, state, translate)
+                    self.assertEqual(name, chr(vk) if caps else chr(vk).lower())
+                    held = {}
+                    lookup = lambda ch: vk | (0x100 if ch.isupper() else 0)
+                    self.assertEqual(plan_key_inputs(name, True, {modifier}, held, lookup, lambda key: scan),
+                                     [(vk, scan, 0)])
+                    self.assertEqual(plan_key_inputs(name, False, set(), held, lookup, lambda key: scan),
+                                     [(vk, scan, KEYEVENTF_KEYUP)])
 
 
 class PlanKeyInputsBareCharacterTests(unittest.TestCase):

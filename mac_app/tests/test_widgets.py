@@ -17,6 +17,26 @@ import widgets
 
 
 class WidthTests(unittest.TestCase):
+    def test_action_survives_when_only_the_native_button_is_retained(self):
+        import objc
+
+        calls = []
+        with objc.autorelease_pool():
+            button = widgets.action_button("Send input", lambda: calls.append("sent"))
+            view = button.view
+            target = objc.WeakRef(button.target)
+            del button
+        gc.collect()
+        with objc.autorelease_pool():
+            self.assertIsNotNone(target())
+            self.assertTrue(view.sendAction_to_(view.action(), view.target()))
+        self.assertEqual(calls, ["sent"])
+        with objc.autorelease_pool():
+            del view
+        gc.collect()
+        with objc.autorelease_pool():
+            self.assertIsNone(target())
+
     def test_idle_design_lock_does_not_redraw_unchanged_choices(self):
         import objc
 

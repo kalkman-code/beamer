@@ -48,6 +48,19 @@ class FakeKeymap:
 
 
 class StepsTest(unittest.TestCase):
+    def test_caps_capitals_keep_wayland_chord_keycodes(self):
+        for locks in (0, 2):
+            for modifier in ("ctrl", "alt", "cmd"):
+                with self.subTest(locks=locks, modifier=modifier):
+                    state = inject_portal.KeyState()
+                    state.mods_down.add(modifier)
+                    layout = inject_portal.WaylandLayout(FakeKeymap())
+                    down = inject_portal.plan_key("A", True, None, state, layout, 0, locks)
+                    state.mods_down.clear()
+                    up = inject_portal.plan_key("A", False, None, state, layout, 0, locks)
+                    self.assertEqual(inject_portal.wayland_steps(down), [(30, True)])
+                    self.assertEqual(inject_portal.wayland_steps(up), [(30, False)])
+
     def test_input_method_names_press_and_release_evdev_122_and_123(self):
         for name, code in (("hangul", 122), ("hanja", 123)):
             with self.subTest(name=name):
@@ -531,6 +544,32 @@ class RemoteTest(unittest.TestCase):
         finally:
             inject_portal.MAX_PENDING = saved
         self.assertEqual([item[2:] for item in self.ei.sends("key")], [(29, True), (29, False)])
+
+    def test_a_full_queue_keeps_the_mouse_motion_that_leaves_the_edge(self):
+        saved = inject_portal.MAX_PENDING
+        self.remote._thread = threading.current_thread()
+        inject_portal.MAX_PENDING = 1
+        try:
+            inject_portal.inject_mouse_move(3, 0)
+            inject_portal.inject_mouse_move(5, 0)
+
+            self.assertEqual(self.remote._commands.qsize(), 1)
+            work, answer, _marker = self.remote._commands.get_nowait()
+            self.assertIsNone(answer)
+
+            class Pointer:
+                def __init__(self):
+                    self.moves = []
+
+                def move_by(self, dx, dy):
+                    self.moves.append((dx, dy))
+
+            pointer = Pointer()
+            work(pointer)
+            self.assertEqual(pointer.moves, [(8, 0)])
+        finally:
+            self.remote._thread = None
+            inject_portal.MAX_PENDING = saved
 
     def test_a_missing_library_is_said_once_and_never_retried(self):
         def missing():

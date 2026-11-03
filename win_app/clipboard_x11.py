@@ -32,6 +32,7 @@ TIMEOUT_SECONDS = 2.0
 # on every switch.
 _change_counter = 0
 _synced_counter = None
+_write_stamp = None
 _own_token = 0
 _connected_to = None
 
@@ -111,13 +112,11 @@ def _is_own_write(clipboard) -> bool:
 
 
 def _on_data_changed() -> None:
-    global _change_counter, _synced_counter
-    was_synced = _synced_counter == _change_counter
+    global _change_counter
+    # A deferred own notification must not invalidate the stamp already cached by a caller.
+    if _synced_counter == _change_counter and _is_own_write(QGuiApplication.clipboard()):
+        return
     _change_counter += 1
-    # dataChanged may be delivered during setMimeData or later from the event loop: _write covers
-    # the first, this covers the second, carrying the marker forward only if nothing else changed.
-    if was_synced and _is_own_write(QGuiApplication.clipboard()):
-        _synced_counter = _change_counter
 
 
 def _connect() -> None:
@@ -166,8 +165,21 @@ def _changed() -> Tuple[Optional[str], Optional[bytes]]:
     return text, png
 
 
+def _stamp():
+    _connect()
+    return _change_counter
+
+
+def change_stamp():
+    return _on_gui(_stamp, default=None)
+
+
+def write_stamp():
+    return _write_stamp
+
+
 def _write(text: Optional[str], png: Optional[bytes]) -> bool:
-    global _own_token, _synced_counter
+    global _own_token, _synced_counter, _write_stamp, _change_counter
     _connect()
     mime = QMimeData()
     if text is not None:
@@ -177,8 +189,12 @@ def _write(text: Optional[str], png: Optional[bytes]) -> bool:
         mime.setData(PNG_MIME, png)
     _own_token += 1
     mime.setData(OWN_FORMAT, str(_own_token).encode())
+    before = _change_counter
     QGuiApplication.clipboard().setMimeData(mime)
+    if _change_counter == before:
+        _change_counter += 1
     _synced_counter = _change_counter
+    _write_stamp = _change_counter
     return True
 
 

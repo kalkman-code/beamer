@@ -450,6 +450,7 @@ class Hooks:
         self._reject_unannounced = False
         self._sequences: Dict[object, int] = {}  # libei device: the sequence it emulates under
         self._disabled_at: Optional[float] = None
+        self._removed_at: Optional[float] = None
         self._expect_disabled = False  # Beamer's own SetPointerBarriers on an enabled session, whose Disabled is to come
         self._devices = set()  # ids of the captured devices the desktop has added and not removed
         self._leaving = set()  # of those, the ones a disable Beamer knows of is about to remove
@@ -673,6 +674,7 @@ class Hooks:
             if point is not None:
                 desktop_portal.note_position(*point)
             if member == "Disabled":
+                self._removed_at = None
                 self._session.enabled = False
                 self._disabled_at = self._clock()
                 if self._expect_disabled:
@@ -688,6 +690,7 @@ class Hooks:
                 self._home()
         elif member == "ZonesChanged":
             # Mutter and KWin disable the session on a monitor change; mutter says only this.
+            self._removed_at = None
             self._session.enabled = False
             self._leaving = set(self._devices)
             self._set_zones(self._session.zones())
@@ -861,6 +864,13 @@ class Hooks:
             except Exception:
                 LOGGER.exception("The shortcut push failure callback failed")
         session = self._session
+        if self._removed_at is not None and self._clock() - self._removed_at >= DISABLED_SECONDS:
+            self._removed_at = None
+            if not self._devices and session is not None and session.enabled:
+                LOGGER.info("The desktop removed all capture devices; enabling the session again")
+                self._signal("Deactivated", {})
+                session.enabled = False
+                self._disabled_at = self._clock()
         if self._activation is None:
             # Input away with nothing captured (a switch that passed input_held() just before a
             # let-go): no key can reach the peer, so it comes home.
@@ -945,6 +955,7 @@ class Hooks:
         kind = event[0]
         if kind == "device_added":
             device = event[1]
+            self._removed_at = None
             self._devices.add(id(device))
             self._leaving.discard(id(device))
             if hasattr(device, "keymap") and 4 in getattr(device, "caps", ()):  # libei.CAP_KEYBOARD
@@ -956,13 +967,10 @@ class Hooks:
             self._devices.discard(id(event[1]))
             if id(event[1]) in self._leaving:
                 self._leaving.discard(id(event[1]))
-            elif self._session is not None and self._session.enabled:
-                # Mutter's cancel shortcut leaves the session disabled and says nothing but this:
-                # a release only stops the devices, a disable removes them. Its barriers stand, so
-                # Enable alone brings the edges back.
-                LOGGER.info("The desktop removed the capture's input devices; enabling the session again")
-                self._session.enabled = False
-                self._disabled_at = self._clock()
+            elif not self._devices and self._session is not None and self._session.enabled:
+                # Input methods replace devices too; only sustained loss of every device implies cancel.
+                if self._removed_at is None:
+                    self._removed_at = self._clock()
             return
         if kind == "device_paused":
             device = event[1]

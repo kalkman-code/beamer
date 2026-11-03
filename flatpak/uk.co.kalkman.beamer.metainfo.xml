@@ -43,6 +43,9 @@
   </screenshots>
   <content_rating type="oars-1.1"/>
   <releases>
+    <release version="1.5.19" date="2026-11-03">
+      <description><p>Fixes shortcuts such as Ctrl+A when Caps Lock differs between machines, keeps input working when a Wayland input device is replaced, detects new X11 clipboard copies, and installs its input library where Flatpak loads it. When a Mac on U.S. International controls another machine, dead keys now compose accents, such as ' then e for é. On a busy Wayland receiver, Beamer now keeps pointer movement it used to drop, so the pointer is less likely to stick at the screen edge.</p></description>
+    </release>
     <release version="1.5.18" date="2026-10-29">
       <description><p>When another machine controls a Windows PC that has no mouse plugged in, Windows draws no pointer there, so Beamer now draws its own while you control that PC. The PC being controlled needs 1.5.18 for this.</p></description>
     </release>

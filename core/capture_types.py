@@ -4,8 +4,9 @@ import unicodedata
 
 
 class DeadKey:
-    def __init__(self, character: str) -> None:
+    def __init__(self, character: str, compositions=None) -> None:
         self.character = character
+        self.compositions = compositions
 
 
 class TextInput:
@@ -53,14 +54,18 @@ class MacDeadKeys:
             self.pending = None
             return None
         if isinstance(translation, DeadKey):
-            accent = translation.character
-            text = self.pending or ""
-            self.pending = None if self.pending == accent else accent
+            text = self.pending.character if self.pending else ""
+            self.pending = None if (self.pending and self.pending.character == translation.character) else translation
             self.swallowed[code] = ""
             return text
         if self.pending and isinstance(translation, str) and translation.isprintable():
-            accent, self.pending = self.pending, None
-            result = accent if translation == " " else compose_dead_key(accent, translation)
+            dead, self.pending = self.pending, None
+            if translation == " ":
+                result = dead.character
+            elif dead.compositions is not None:
+                result = dead.compositions.get(translation, dead.character + translation)
+            else:
+                result = compose_dead_key(dead.character, translation)
             self.swallowed[code] = translation
             return result.text if isinstance(result, TextInput) else result
         self.pending = None

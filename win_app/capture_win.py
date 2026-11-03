@@ -538,6 +538,7 @@ class Hooks:
         self._thread_id: Optional[int] = None
         self._ready = threading.Event()
         self._state = KeyboardState()
+        self._injected_caps_down = False
         self._dead_keys_swallowed: Set[int] = set()
         self._text_keyups_swallowed: Set[int] = set()
         self._key_names: Dict[Tuple[int, bool, Optional[int]], Tuple[str, Optional[str]]] = {}
@@ -624,6 +625,7 @@ class Hooks:
             if not self._desktop_hook:
                 raise RuntimeError("Could not monitor Windows input desktop changes")
             self._state.caps_lock = read_caps_lock()
+            self._injected_caps_down = False
             self._ready.set()
             message = MSG()
             while user32.GetMessageW(ctypes.byref(message), None, 0, 0) > 0:
@@ -690,6 +692,11 @@ class Hooks:
         try:
             data = ctypes.cast(lparam, ctypes.POINTER(KBDLLHOOKSTRUCT)).contents
             if data.flags & LLKHF_INJECTED and data.dwExtraInfo == INJECTED_MARK:
+                if data.vkCode == VK_CAPITAL:
+                    down = wparam in KEY_DOWN_MESSAGES
+                    if down and not self._injected_caps_down:
+                        self._state.caps_lock = not self._state.caps_lock
+                    self._injected_caps_down = down
                 return user32.CallNextHookEx(None, code, wparam, lparam)
             down = wparam in KEY_DOWN_MESSAGES
             if not down and wparam not in KEY_UP_MESSAGES:
@@ -699,8 +706,6 @@ class Hooks:
                 return user32.CallNextHookEx(None, code, wparam, lparam)
             if data.vkCode in (0xA0, 0xA1, 0x10):  # noqa: shift, either side
                 self._state.shift_down = down
-            elif data.vkCode == VK_CAPITAL and down:
-                self._state.caps_lock = not self._state.caps_lock
             elif data.vkCode == 0xA5:
                 self._state.altgr_down = down
             elif data.vkCode in (0x11, 0xA2, 0xA3) and data.scanCode != 0x21D:
@@ -774,6 +779,9 @@ class Hooks:
                 self._key_names[physical] = (name, us)
             if self._on_key(name, down, data.vkCode, us):
                 return 1
+            if data.vkCode == VK_CAPITAL and down:
+                # Only an accepted first press changes this PC; swallowed presses belong to its peer.
+                self._state.caps_lock = not self._state.caps_lock
         except Exception:
             # Never let an exception here swallow a key: fail open, log once
             # per event, and let Windows have it.

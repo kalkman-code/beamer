@@ -816,6 +816,8 @@ def action_button(title, callback, **options):
     target = callback_target(callback)
     button = Button(title, target, "fire:", **options)
     button.target = target
+    # Many callers retain only the native view; NSControl's target is weak.
+    objc.setAssociatedObject(button.view, "widgets.action_target", target)
     return button
 
 

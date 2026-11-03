@@ -165,6 +165,18 @@ def _libei_present() -> None:
 _ei_sender.preflight = _libei_present
 
 
+class _QueuedMove:
+    def __init__(self, dx: int, dy: int) -> None:
+        self.dx, self.dy = dx, dy
+
+    def add(self, dx: int, dy: int) -> None:
+        self.dx += dx
+        self.dy += dy
+
+    def __call__(self, session) -> None:
+        session.move_by(self.dx, self.dy)
+
+
 class Remote:
     """The RemoteDesktop session's thread. `submit(fn)` runs fn(self) there once the desktop's
     devices are up; `ask(fn)` runs it there at once and returns its answer.
@@ -180,6 +192,7 @@ class Remote:
         self._keymap = keymap or _keymap_from_text
         self._tokens = tokens or portal.TokenStore("remote-desktop")
         self._commands: "queue.Queue" = queue.Queue()
+        self._enqueue_lock = threading.Lock()
         self._wake_read, self._wake_write = os.pipe()
         os.set_blocking(self._wake_read, False)
         os.set_blocking(self._wake_write, False)
@@ -274,16 +287,42 @@ class Remote:
         if not self._admits():
             return
         self.start()
-        if self._commands.qsize() >= MAX_PENDING and not release:
-            if not self._said_full:
-                self._said_full = True
-                LOGGER.warning("Remote control is not keeping up; input from the peer is dropped until it does")
-            return
-        self._said_full = False
         thread = self._thread
         if thread is None or not thread.is_alive():
             return  # between sessions: input that late would play stale
-        self._commands.put((work, None, None))
+        with self._enqueue_lock:
+            if self._commands.qsize() >= MAX_PENDING and not release:
+                if not self._said_full:
+                    self._said_full = True
+                    LOGGER.warning("Remote control is not keeping up; input from the peer is dropped until it does")
+                return
+            self._said_full = False
+            self._commands.put((work, None, None))
+        self._wake()
+
+    def submit_move(self, dx: int, dy: int) -> None:
+        if not self._admits():
+            return
+        self.start()
+        thread = self._thread
+        if thread is None or not thread.is_alive():
+            return
+        move = _QueuedMove(dx, dy)
+        with self._enqueue_lock:
+            if self._commands.qsize() >= MAX_PENDING:
+                with self._commands.mutex:
+                    queued = self._commands.queue
+                    marker = queued[-1][2] if queued else None
+                    if isinstance(marker, _QueuedMove):
+                        marker.add(dx, dy)
+                        self._said_full = False
+                        return
+                if not self._said_full:
+                    self._said_full = True
+                    LOGGER.warning("Remote control is not keeping up; input from the peer is dropped until it does")
+                return
+            self._said_full = False
+            self._commands.put((move, None, move))
         self._wake()
 
     def ask(self, work: Callable[["Remote"], object], default=None, timeout: float = CALL_SECONDS,
@@ -796,7 +835,7 @@ def inject_text(text: str) -> None:
 
 
 def inject_mouse_move(dx: int, dy: int) -> None:
-    remote().submit(lambda session: session.move_by(dx, dy))
+    remote().submit_move(dx, dy)
 
 
 def move_to(x: int, y: int) -> None:

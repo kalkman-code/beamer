@@ -149,6 +149,94 @@ class MacDeadKeyTests(unittest.TestCase):
         self.assertIn("com.apple.keylayout.Spanish-ISO", found)
         self.assertIn("com.apple.keylayout.German", found)
 
+    def test_dead_key_table_composes_layout_entries_and_falls_back_without_a_table(self):
+        self.layout.install({39: None, 50: None}, {
+            (39, 0): capture_types.DeadKey("'", {"a": "á", "c": "ç", "s": "'s"}),
+            (39, 2): capture_types.DeadKey('"', {"a": "ä", "t": '"t'}),
+            (50, 0): capture_types.DeadKey("´"),
+            (0, 0): "a", (8, 0): "c", (1, 0): "s", (17, 0): "t", (7, 0): "x", (49, 0): " ",
+        })
+        for dead, flags, base, text, want in (
+            (39, 0, 0, "a", "á"),
+            (39, 0, 8, "c", "ç"),
+            (39, 0, 1, "s", "'s"),
+            (39, 0, 7, "x", "'x"),
+            (39, 1 << 17, 0, "a", "ä"),
+            (39, 1 << 17, 17, "t", '"t'),
+            (50, 0, 0, "a", "á"),
+            (50, 0, 7, "x", "´x"),
+        ):
+            with self.subTest(dead=dead, flags=flags, base=text):
+                self.accent(dead, flags)
+                self.assertEqual(self.feed(base, text=text), [{"type": "text", "data": {"text": want}}])
+                self.feed(base, False, text=text)
+        self.accent(39)
+        self.assertEqual(self.feed(49), [{"type": "text", "data": {"text": "'"}}])
+        self.feed(49, False)
+
+    def test_layout_translations_builds_dead_key_table_after_ordinary_keys_and_skips_chained_keys(self):
+        carbon = self.layout._Carbon.__new__(self.layout._Carbon)
+        carbon.layout_data_key = 1
+        carbon.carbon = SimpleNamespace(TISGetInputSourceProperty=lambda _source, _key: 1, LMGetKbdType=lambda: 0)
+        carbon.core = SimpleNamespace(CFDataGetBytePtr=lambda data: data)
+        dead_code, a_code, c_code, s_code, chained_code = self.layout.LAYOUT_KEY_CODES[:5]
+        ordinary = {a_code: ("a", 0), c_code: ("c", 0), s_code: ("s", 0), chained_code: ("x", 0)}
+        composed = {a_code: ("á", 0), c_code: ("ç", 0), s_code: ("'s", 0), chained_code: ("", 17)}
+
+        def translate(_layout, code, _kbd_type, options, modifiers=0, dead_state=0):
+            if modifiers != 0:
+                return "", 0
+            if dead_state:
+                return composed.get(code, ("", 0))
+            if code == dead_code:
+                return ("'", 0) if options == self.layout._K_UC_KEY_TRANSLATE_NO_DEAD_KEYS else ("", 1)
+            return ordinary.get(code, ("", 0))
+
+        carbon.translate = translate
+        translations = carbon.layout_translations(1)
+        dead = translations[dead_code, 0]
+        self.assertEqual(dead.character, "'")
+        self.assertEqual(dead.compositions, {"a": "á", "c": "ç", "s": "'s"})
+
+    @unittest.skipUnless(sys.platform == "darwin", "reads installed macOS layouts without selecting them")
+    def test_us_international_dead_key_table_composes_despite_ascii_spacing(self):
+        carbon = self.layout._Carbon()
+        lib, core = carbon.carbon, carbon.core
+        lib.TISCreateInputSourceList.restype = ctypes.c_void_p
+        lib.TISCreateInputSourceList.argtypes = [ctypes.c_void_p, ctypes.c_bool]
+        core.CFArrayGetCount.restype = ctypes.c_long
+        core.CFArrayGetCount.argtypes = [ctypes.c_void_p]
+        core.CFArrayGetValueAtIndex.restype = ctypes.c_void_p
+        core.CFArrayGetValueAtIndex.argtypes = [ctypes.c_void_p, ctypes.c_long]
+        core.CFStringGetCString.argtypes = [ctypes.c_void_p, ctypes.c_char_p, ctypes.c_long, ctypes.c_uint32]
+        id_key = ctypes.c_void_p.in_dll(lib, "kTISPropertyInputSourceID").value
+        sources = lib.TISCreateInputSourceList(None, True)
+        found = False
+        try:
+            for index in range(core.CFArrayGetCount(sources)):
+                source = core.CFArrayGetValueAtIndex(sources, index)
+                name_ref = lib.TISGetInputSourceProperty(source, id_key)
+                name = ctypes.create_string_buffer(256)
+                if not name_ref or not core.CFStringGetCString(name_ref, name, len(name), 0x08000100):
+                    continue
+                if name.value.decode() != "com.apple.keylayout.USInternational-PC":
+                    continue
+                translations = carbon.layout_translations(source)
+                self.layout.install(carbon.layout_chars(source), translations)
+                acute = next(code for (code, mods), value in translations.items()
+                             if mods == 0 and isinstance(value, capture_types.DeadKey) and value.character == "'")
+                for flags, ch, want in ((0, "a", "á"), (0, "c", "ç"), (0, "s", "'s"), (1 << 17, "t", '"t')):
+                    base = next(code for (code, mods), value in translations.items() if mods == 0 and value == ch)
+                    self.translator.dead_keys.reset()
+                    self.accent(acute, flags)
+                    self.assertEqual(self.feed(base, text=ch), [{"type": "text", "data": {"text": want}}])
+                    self.feed(base, False)
+                found = True
+        finally:
+            core.CFRelease(sources)
+        if not found:
+            self.skipTest("US International is not installed")
+
 
 if __name__ == "__main__":
     unittest.main()

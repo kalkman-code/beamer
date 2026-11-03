@@ -105,8 +105,8 @@ class _Carbon:
         core.CFRelease.argtypes = [ctypes.c_void_p]
         self.layout_data_key = ctypes.c_void_p.in_dll(carbon, "kTISPropertyUnicodeKeyLayoutData").value
 
-    def translate(self, layout, keycode, kbd_type, options, modifiers=0):
-        dead = ctypes.c_uint32(0)
+    def translate(self, layout, keycode, kbd_type, options, modifiers=0, dead_state=0):
+        dead = ctypes.c_uint32(dead_state)
         length = ctypes.c_ulong(0)
         buffer = (ctypes.c_uint16 * 8)()
         status = self.carbon.UCKeyTranslate(
@@ -152,15 +152,24 @@ class _Carbon:
         layout = self.core.CFDataGetBytePtr(data)
         kbd_type = self.carbon.LMGetKbdType()
         translations = {}
+        dead_keys = []
         for modifiers in (0, 1, 2, 3, 8, 9, 10, 11):
             for code in (*LAYOUT_KEY_CODES, 0x31):
                 text, dead = self.translate(layout, code, kbd_type, 0, modifiers)
                 if dead:
-                    text, _ = self.translate(layout, code, kbd_type, _K_UC_KEY_TRANSLATE_NO_DEAD_KEYS, modifiers)
-                    if text and len(text) == 1:
-                        translations[code, modifiers] = DeadKey(text)
+                    spacing, _ = self.translate(layout, code, kbd_type, _K_UC_KEY_TRANSLATE_NO_DEAD_KEYS, modifiers)
+                    if spacing and len(spacing) == 1:
+                        dead_keys.append((code, modifiers, spacing, dead))
                 elif text and len(text) == 1 and text.isprintable():
                     translations[code, modifiers] = text
+        ordinary = list(translations.items())
+        for code, modifiers, spacing, dead in dead_keys:
+            compositions = {}
+            for (base_code, base_modifiers), base in ordinary:
+                composed, _ = self.translate(layout, base_code, kbd_type, 0, base_modifiers, dead)
+                if composed:
+                    compositions.setdefault(base, composed)
+            translations[code, modifiers] = DeadKey(spacing, compositions)
         return translations
 
     def current_translations(self):

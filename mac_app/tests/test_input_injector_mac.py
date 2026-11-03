@@ -57,6 +57,21 @@ class KeyPlanTests(unittest.TestCase):
         mods = {"cmd"}
         self.assertEqual(injector.plan_key_event("c", True, mods), (0x08, None))
 
+    def test_caps_capitals_keep_chord_keys_and_plain_text_in_each_script(self):
+        for lower in ("c", "ф", "ω"):
+            with mock.patch.object(injector.keyboard_layout, "code_for", side_effect=lambda ch: 0x08 if ch == lower else None):
+                upper = lower.upper()
+                self.assertEqual(self.plan(upper), (0, upper))
+                for modifier in sorted(injector.CHORD_MODIFIERS):
+                    for shifted in (False, True):
+                        with self.subTest(character=upper, modifier=modifier, shifted=shifted):
+                            mods = {modifier} | ({"shift"} if shifted else set())
+                            held = {}
+                            self.assertEqual(injector.plan_key_event(upper, True, mods, held), (0x08, None))
+                            mods.clear()
+                            self.assertEqual(injector.plan_key_event(upper, False, mods, held), (0x08, None))
+                            self.assertEqual(held, {})
+
     def test_a_character_off_the_table_is_typed_as_text(self):
         self.assertEqual(self.plan("é"), (0, "é"))
 

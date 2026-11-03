@@ -137,6 +137,21 @@ class CharacterTest(unittest.TestCase):
         self.assertEqual(plan("a", locks=CAPS), [(NO_REPEAT, A), (PRESS, SHIFT_L), (PRESS, A), (RELEASE, SHIFT_L)])
         self.assertEqual(plan("!", locks=CAPS), [(NO_REPEAT, ONE), (PRESS, SHIFT_L), (PRESS, ONE), (RELEASE, SHIFT_L)])
 
+    def test_caps_capitals_keep_chord_keys_in_latin_and_non_latin_layouts(self):
+        for character, group in (("A", 0), ("Ф", 1)):
+            for locks in (0, CAPS):
+                for modifier in sorted(inject_x11.CHORD_KEYS):
+                    for shifted in (False, True):
+                        with self.subTest(character=character, locks=locks, modifier=modifier, shifted=shifted):
+                            state = KeyState()
+                            plan(modifier, state=state)
+                            if shifted:
+                                plan("shift", state=state)
+                            self.assertEqual(plan(character, state=state, group=group, locks=locks), [(PRESS, A)])
+                            state.mods_down.clear()
+                            self.assertEqual(plan(character, down=False, state=state, group=group, locks=locks), [(RELEASE, A)])
+                            self.assertEqual(state.chars_down, {})
+
     def test_under_a_chord_shift_is_the_peer_s(self):
         state = KeyState()
         plan("ctrl", state=state)

@@ -41,7 +41,7 @@ NOT_SHOWN = {
     "Thread", "ArgumentParser", "add_argument", "setStyleSheet", "setObjectName", "setProperty",
     "OpenKey", "QueryValueEx", "SetValueEx", "DeleteValue", "ExecQuery", "Dispatch", "fromData", "save",
     "filterWithName_", "AXUIElementCopyAttributeValue", "AXUIElementSetAttributeValue", "NSClassFromString",
-    "has_extension", "get_extension_major", "request", "call", "get_dbus_method", "dlopen", "LoadLibrary",
+    "has_extension", "get_extension_major", "request", "call", "get_dbus_method", "_signal", "dlopen", "LoadLibrary",
     "run", "Popen", "check_output", "check_call", "compile", "match", "search", "sub", "fullmatch",
     "get", "pop", "setdefault", "environ", "Path", "open", "write", "print",
     "_warn_once", "_fail", "drop", "_connection_failed", "set_redirecting",

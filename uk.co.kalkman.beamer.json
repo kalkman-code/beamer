@@ -43,7 +43,7 @@
     {
       "name": "libei",
       "buildsystem": "meson",
-      "config-opts": ["-Dtests=disabled", "-Dliboeffis=disabled", "-Dlibeis=disabled", "-Ddocumentation=[]"],
+      "config-opts": ["--libdir=lib", "-Dtests=disabled", "-Dliboeffis=disabled", "-Dlibeis=disabled", "-Ddocumentation=[]"],
       "sources": [{
         "type": "archive",
         "url": "https://gitlab.freedesktop.org/libinput/libei/-/archive/1.6.0/libei-1.6.0.tar.bz2",
