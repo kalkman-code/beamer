@@ -706,6 +706,41 @@ class HooksTest(unittest.TestCase):
         time.sleep(0.15)
         self.assertEqual(h.motions, [])
 
+    def test_a_nan_move_while_away_is_dropped_and_later_moves_still_arrive(self):
+        # 05-11-2026, Fedora to macOS: one NaN stuck in the carry failed every move after it.
+        h = self.make()
+        h.start()
+        h.cross()
+        with self.assertLogs(capture_portal.LOGGER, level="WARNING"):
+            h.ei.feed(("motion", h.pointer, 1.0, float("nan")), ("frame", h.pointer, 0),
+                      ("scroll", h.pointer, float("nan"), 0.0), ("frame", h.pointer, 0),
+                      ("motion", h.pointer, 3.0, 2.0), ("frame", h.pointer, 0))
+            wait_for(lambda: len(h.motions) >= 3, what="the move after the NaN")
+        self.assertEqual(h.motions[2:], [(3, 2)])
+        self.assertEqual(h.mice, [])
+
+    def test_a_nan_move_ahead_of_the_activation_does_not_stop_the_capture(self):
+        h = self.make()
+        h.start()
+        h.ei.feed(("start", h.pointer, 5), ("motion", h.pointer, 10.0, float("nan")), ("motion", h.pointer, 10.0, 0.0))
+        time.sleep(0.15)
+        h.bus.emit(portal.OBJECT_PATH, capture_portal.INTERFACE, "Activated",
+                   (SESSION, vardict({"activation_id": 5, "cursor_position": (1920.0, 9.0), "barrier_id": 1})))
+        wait_for(lambda: h.motions, what="the early push")
+        self.assertEqual(h.motions, [(10, 0)])
+        self.assertEqual(h.failures, [])
+
+    def test_a_nan_cursor_position_falls_back_to_the_known_position(self):
+        h = self.make()
+        h.start()
+        desktop_portal.note_position(1919, 300)
+        h.ei.feed(("start", h.pointer, 3))
+        h.bus.emit(portal.OBJECT_PATH, capture_portal.INTERFACE, "Activated",
+                   (SESSION, vardict({"activation_id": 3, "cursor_position": (float("nan"), float("nan")), "barrier_id": 1})))
+        wait_for(lambda: h.hooks.holding, what="the capture to begin")
+        self.assertEqual(h.failures, [])
+        self.assertEqual(h.hooks._press.point, (1919, 300))
+
     def test_a_barrier_it_does_not_know_is_let_go_at_once(self):
         h = self.make()
         h.start()
