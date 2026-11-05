@@ -33,6 +33,7 @@ from core.locale import americanise
 # language is, so a person who cannot read the current one can still find theirs.
 LANGUAGES = {
     "en": "English",
+    "es": "Español",
     "it": "Italiano",
 }
 # Not a language: every string bracketed and a third longer, so a test can find text that never
