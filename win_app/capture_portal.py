@@ -123,6 +123,24 @@ SESSION_CLOSED = ENDED.format(detail="the session was closed")
 MISSING_CAPABILITIES = "InputCapture did not grant both keyboard and pointer capabilities, so this machine cannot send input."
 
 
+def _finite(*values) -> bool:
+    try:
+        return all(math.isfinite(value) for value in values)
+    except TypeError:
+        return False
+
+
+def _finite_point(point):
+    """`point` if it is a usable (x, y), else None: mutter has been seen to report NaN."""
+    if point is None:
+        return None
+    try:
+        x, y = point
+    except (TypeError, ValueError):
+        return None
+    return (x, y) if _finite(x, y) else None
+
+
 class CaptureUnavailable(RuntimeError):
     """Capture cannot happen here; `sentence` says so in the app's words."""
 
@@ -463,6 +481,7 @@ class Hooks:
         self._carry = [0.0, 0.0]
         self._scroll_carry = [0.0, 0.0]
         self._frame: List[tuple] = []
+        self._dropped_logged = False  # a non-number move is logged once per session
 
     def grab_while(self, predicate: Callable[[], bool]) -> None:
         """Hold input for as long as `predicate` is true, once the desktop has captured it. Asked on
@@ -664,7 +683,7 @@ class Hooks:
         if member == "Activated":
             self._activated(options)
         elif member in ("Deactivated", "Disabled"):
-            point = options.get("cursor_position")
+            point = _finite_point(options.get("cursor_position"))
             was_away = self._away
             self._activation = None
             self._press = None
@@ -698,7 +717,7 @@ class Hooks:
     def _activated(self, options: dict) -> None:
         self._reject_unannounced = False
         activation = options.get("activation_id", NO_ID)
-        point = options.get("cursor_position") or desktop_portal.cursor_position()
+        point = _finite_point(options.get("cursor_position")) or desktop_portal.cursor_position()
         barrier = options.get("barrier_id")
         # 0 is a push that met two barriers at once (a corner's two walls); the pointer says which.
         wall = self._walls.get(barrier) if barrier else self._wall_at(point)
@@ -735,7 +754,13 @@ class Hooks:
         early, self._early = self._early, []
         for event, sequence in early:
             if self._current(sequence):
-                self._ei_event(event)
+                # As in the main loop: one bad event must not end the capture.
+                try:
+                    self._ei_event(event)
+                except CaptureUnavailable:
+                    raise
+                except Exception:
+                    LOGGER.exception("An input event could not be read; carrying on")
 
     def _selected_at(self, wall, point) -> bool:
         vertical = wall in ("left", "right")
@@ -995,6 +1020,13 @@ class Hooks:
                 self._early = []
             return
         if kind not in ("motion", "button", "key", "scroll", "scroll_discrete", "frame"):
+            return
+        if kind in ("motion", "scroll", "scroll_discrete") and not _finite(*event[2:4]):
+            # Mutter can send NaN while input changes hands (05-11-2026, Fedora to macOS). Kept,
+            # it would stay in the motion carry for good and fail every move after it.
+            if not self._dropped_logged:
+                self._dropped_logged = True
+                LOGGER.warning("The desktop sent a %s that is not a number (%r, %r); dropping it", kind, *event[2:4])
             return
         sequence = self._sequences.get(event[1]) if len(event) > 1 else None
         if sequence in self._rejected:
