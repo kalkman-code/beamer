@@ -152,10 +152,12 @@ class ProfilesSyncQtTests(unittest.TestCase):
         self.app._send_to.assert_not_called()
 
     def test_shake_settings_reach_sender_without_resetting_an_unchanged_detector(self):
-        self.app.sender = SimpleNamespace(set_shake=mock.Mock())
-        self.app.bridge = SimpleNamespace(shook_home=SimpleNamespace(emit=mock.Mock()))
+        self.app.sender = SimpleNamespace(set_shake=mock.Mock(), set_escape_home=mock.Mock())
+        self.app.bridge = SimpleNamespace(shook_home=SimpleNamespace(emit=mock.Mock()),
+                                          escaped_home=SimpleNamespace(emit=mock.Mock()))
         self.app._shake_enabled = None
         self.app._shake_sensitivity = None
+        self.app._escape_enabled = None
         kvm.WindowsApplication._configure_shake(self.app, self.settings)
         kvm.WindowsApplication._configure_shake(self.app, self.settings)
         self.assertEqual(self.app.sender.set_shake.call_count, 1)
@@ -165,6 +167,10 @@ class ProfilesSyncQtTests(unittest.TestCase):
         self.assertEqual(self.app.sender.set_shake.call_count, 2)
         self.assertFalse(self.app.sender.set_shake.call_args.args[0])
         self.assertEqual(self.app.sender.set_shake.call_args.kwargs["on_shake"], self.app.bridge.shook_home.emit)
+        # Triple Escape is this machine's own setting, on unless turned off, and set once.
+        self.app.sender.set_escape_home.assert_called_once_with(True, on_escape=self.app.bridge.escaped_home.emit)
+        kvm.WindowsApplication._configure_shake(self.app, {**changed, "escape_home": False})
+        self.assertEqual(self.app.sender.set_escape_home.call_args.args, (False,))
 
 
 class ProfilesLoadNotesTests(unittest.TestCase):

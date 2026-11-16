@@ -4546,6 +4546,10 @@ msgstr "Torna a questo PC"
 msgid "Earlier ways"
 msgstr "Vie precedenti"
 
+#: win_app/kvm_bridge_win.py
+msgid "Press Esc three times to come home"
+msgstr ""
+
 #: win_app/kvm_bridge_win.py win_app/pages_win.py
 #, python-brace-format
 msgid "hold {key}"
@@ -4724,6 +4728,10 @@ msgstr "Per avviarsi all'accesso, Beamer deve essere eseguito con l'account attu
 #: win_app/kvm_bridge_win.py
 msgid "Each chip is a side of this screen; click one to add or remove it. The side a machine touches crosses on its lit thirds; any other free side wraps round to it, arriving on its far side. A corner is a diagonal push, shown as a square on the map."
 msgstr "Ogni etichetta è un lato di questo schermo; fai clic per aggiungerlo o toglierlo. Il lato toccato da un computer fa passare sui suoi terzi illuminati; ogni altro lato libero rimanda a esso, arrivando sul lato opposto. Un angolo è una spinta in diagonale, mostrata come un quadrato sulla mappa."
+
+#: win_app/kvm_bridge_win.py
+msgid "Tap Esc three times quickly while you drive another machine. The first two taps still reach that machine; the third brings input home."
+msgstr ""
 
 # New in 1.5.5: awaiting Lorenzo's check
 #: win_app/kvm_bridge_win.py
@@ -4908,6 +4916,11 @@ msgstr "Solo l'app installata può avviarsi all'accesso."
 #: win_app/kvm_bridge_win.py
 msgid "These ways could not be changed."
 msgstr "Impossibile modificare queste vie."
+
+#: win_app/kvm_bridge_win.py
+#, python-brace-format
+msgid "Came home from {name} on three presses of Esc. Turn this off in Crossing → Way home."
+msgstr ""
 
 # New in 1.5.5: awaiting Lorenzo's check
 #: win_app/kvm_bridge_win.py

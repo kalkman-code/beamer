@@ -54,6 +54,8 @@ class ShakeSenderTests(unittest.TestCase):
         self.sender._buttons_held = set()
         self.sender._shake_home_pending = False
         self.sender._shake_detector = None
+        self.sender._escape_taps = None
+        self.sender._escape_callback = None
         self.sender._keys_down = {}
         self.sender._peers = {}
         self.sender._intent_windows_up = set()
