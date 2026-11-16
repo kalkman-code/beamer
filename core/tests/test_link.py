@@ -634,7 +634,8 @@ class LinkLivenessTests(unittest.TestCase):
         link.start()
         self.assertTrue(wait_for(lambda: side.ups))
         began = time.monotonic()
-        self.assertTrue(wait_for(lambda: "stopped responding" in (side.last_text() or ""), 5.0), side.states)
+        self.assertTrue(wait_for(lambda: any(not up and "stopped responding" in text
+                                             for up, text in side.states), 5.0), side.states)
         self.assertGreaterEqual(time.monotonic() - began, 1.5)
         self.assertFalse(link.live())
 
@@ -1279,8 +1280,8 @@ class LinkFramingTests(unittest.TestCase):
 
         with mock.patch.object(protocol, "FRAME_COMPLETE_SECONDS", 0.8):
             side, link = self.serve(after)
-            self.assertTrue(wait_for(lambda: side.states and not side.states[-1][0], 3.0), side.states)
-        self.assertIn("too long", side.last_text())
+            self.assertTrue(wait_for(lambda: any(not up and "too long" in text
+                                                 for up, text in side.states), 3.0), side.states)
         self.assertEqual(side.messages, [])
 
     def test_a_frame_completed_after_its_deadline_is_not_dispatched(self):

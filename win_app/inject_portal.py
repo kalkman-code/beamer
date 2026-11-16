@@ -538,7 +538,11 @@ class Remote:
             options = body[1] if len(body) > 1 else {}
             self.ours = bool(options.get("session_is_owner"))
             if not self.ours:
-                self.offered = list(options.get("mime_types", []))
+                offered = options.get("mime_types", [])
+                # Ubuntu 24.04's portal sends (as), whereas newer portals send as.
+                if isinstance(offered, tuple) and len(offered) == 1 and isinstance(offered[0], list):
+                    offered = offered[0]
+                self.offered = list(offered)
                 self.changes += 1
                 self.stamp += 1
         elif member == "SelectionTransfer":

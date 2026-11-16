@@ -23,7 +23,12 @@ Compression=lzma2/max
 SolidCompression=yes
 ; File installation and every Beamer operation stay with the original user. Only the fixed
 ; maintenance script requests administrator permission.
+#ifdef SecureDesktop
+PrivilegesRequired=admin
+ArchitecturesInstallIn64BitMode=x64compatible
+#else
 PrivilegesRequired=lowest
+#endif
 UninstallDisplayIcon={app}\Beamer.exe
 ; An older elevated receiver must still be quit before its executable can be replaced.
 AppMutex=Beamer.Receiver
@@ -43,12 +48,20 @@ SignedUninstaller=yes
 Name: "english"; MessagesFile: "compiler:Default.isl"
 
 [Tasks]
+#ifdef SecureDesktop
+Name: "securedesktop"; Description: "Install experimental secure desktop support (administrator peer approval required)"; GroupDescription: "Windows sign-in and UAC:"; Flags: unchecked
+#endif
 ; Autostart is asked for, never assumed, so it starts unticked.
 Name: "autostart"; Description: "Start Beamer at sign-in"; GroupDescription: "Startup options:"; Flags: unchecked
 
 [Files]
 Source: "Invoke-InstallMaintenance.ps1"; Flags: dontcopy
 Source: "dist\Beamer.exe"; DestDir: "{app}"; Flags: ignoreversion
+#ifdef SecureDesktop
+Source: "Manage-SecureDesktop.ps1"; DestName: "SecureDesktopSetup.ps1"; Flags: dontcopy
+Source: "dist\BeamerSecure\*"; DestDir: "{commonpf64}\Beamer Secure Desktop"; Flags: ignoreversion recursesubdirs createallsubdirs; Tasks: securedesktop
+Source: "Manage-SecureDesktop.ps1"; DestDir: "{commonpf64}\Beamer Secure Desktop"; Flags: ignoreversion; Tasks: securedesktop
+#endif
 Source: "Install-Maintenance.ps1"; DestDir: "{app}"; Flags: ignoreversion
 Source: "Invoke-InstallMaintenance.ps1"; DestDir: "{app}"; Flags: ignoreversion
 
@@ -70,6 +83,63 @@ Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueName: 
 Filename: "{sys}\WindowsPowerShell\v1.0\powershell.exe"; Parameters: "-NoProfile -NonInteractive -ExecutionPolicy Bypass -File ""{app}\Invoke-InstallMaintenance.ps1"" -ExePath ""{app}\Beamer.exe"" -Remove"; Flags: runhidden waituntilterminated; RunOnceId: "BeamerCleanup"
 
 [Code]
+#ifdef SecureDesktop
+var SecureSetupScript: String;
+
+function GetFileAttributesW(const FileName: String): LongWord;
+  external 'GetFileAttributesW@kernel32.dll stdcall';
+
+function SecurePathIsPlain(Path: String): Boolean;
+var Attributes: LongWord;
+begin
+  Result := True;
+  while Length(Path) > 3 do begin
+    Attributes := GetFileAttributesW(Path);
+    if (Attributes <> $FFFFFFFF) and ((Attributes and $400) <> 0) then begin
+      Result := False;
+      Exit;
+    end;
+    Path := ExtractFileDir(Path);
+  end;
+end;
+
+function RunSecureAction(Action: String): Boolean;
+var ExitCode: Integer; Script: String;
+begin
+  Script := SecureSetupScript;
+  if Script = '' then
+    Script := ExpandConstant('{commonpf64}\Beamer Secure Desktop\Manage-SecureDesktop.ps1');
+  Result := Exec(ExpandConstant('{sys}\WindowsPowerShell\v1.0\powershell.exe'),
+    '-NoProfile -NonInteractive -ExecutionPolicy Bypass -File "' + Script + '" -Action ' + Action,
+    '', SW_HIDE, ewWaitUntilTerminated, ExitCode) and (ExitCode = 0);
+end;
+
+function PrepareToInstall(var NeedsRestart: Boolean): String;
+begin
+  Result := '';
+  if not SecurePathIsPlain(ExpandConstant('{commonpf64}\Beamer Secure Desktop')) or
+     not SecurePathIsPlain(ExpandConstant('{commonappdata}\BeamerSecureDesktop')) then begin
+    Result := 'Secure desktop refuses a redirected installation or state directory.';
+    Exit;
+  end;
+  if WizardIsTaskSelected('securedesktop') or FileExists(ExpandConstant('{commonpf64}\Beamer Secure Desktop\Manage-SecureDesktop.ps1')) then begin
+    ExtractTemporaryFile('SecureDesktopSetup.ps1');
+    SecureSetupScript := ExpandConstant('{tmp}\SecureDesktopSetup.ps1');
+    if not RunSecureAction('Prepare') then
+      Result := 'Secure desktop could not be prepared safely. No service files have been replaced.';
+  end;
+end;
+
+procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
+begin
+  if (CurUninstallStep = usUninstall) and FileExists(ExpandConstant('{commonpf64}\Beamer Secure Desktop\Manage-SecureDesktop.ps1')) then begin
+    if not SecurePathIsPlain(ExpandConstant('{commonpf64}\Beamer Secure Desktop')) or
+       not RunSecureAction('Remove') then
+      RaiseException('Secure desktop could not be removed. Its installed files have been retained.');
+  end;
+end;
+#endif
+
 function OperationFailure(const Action: String; const Started: Boolean; const ResultCode: Integer): String;
 begin
   if (not Started) and (ResultCode = 1223) then
@@ -105,6 +175,11 @@ var
   Started: Boolean;
   Failure: String;
 begin
+#ifdef SecureDesktop
+  if (CurStep = ssPostInstall) and WizardIsTaskSelected('securedesktop') then
+    if not RunSecureAction('Install') then
+      RaiseException('Secure desktop installation failed; leave the service disabled.');
+#endif
   if CurStep = ssPostInstall then
   begin
     Started := Exec(PowerShellPath, '-NoProfile -NonInteractive -ExecutionPolicy Bypass -File "' +

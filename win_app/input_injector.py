@@ -13,7 +13,6 @@ from typing import Callable, Dict, List, Optional, Set, Tuple
 
 from core.keytable import EVDEV_US
 from input_blocker import foreground_blocker
-from firewall_win import is_elevated
 
 
 LOGGER = logging.getLogger(__name__)
@@ -23,6 +22,12 @@ _problem_at = float("-inf")
 _problem_logged = None
 _problem_notified = set()
 _problem_lock = threading.Lock()
+
+
+def is_elevated() -> bool:
+    # Linux borrows the pure key tables without loading Windows firewall code.
+    from firewall_win import is_elevated as elevated
+    return elevated()
 
 
 def report_input_problem(blocker=None, *, operation="input", error=None) -> None:

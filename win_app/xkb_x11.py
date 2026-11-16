@@ -25,10 +25,14 @@ def _load(names=None):
         for key, name in names.items():
             if key in _libs:
                 continue
-            path = ctypes.util.find_library(name)
-            if not path:
-                raise RuntimeError(f"lib{name} is not installed; Beamer reads the keyboard layout through it")
-            _libs[key] = ctypes.CDLL(path)
+            path = ctypes.util.find_library(name) or {
+                "xcb": "libxcb.so.1", "xkbcommon": "libxkbcommon.so.0",
+                "xkbcommon-x11": "libxkbcommon-x11.so.0",
+            }[name]
+            try:
+                _libs[key] = ctypes.CDLL(path)
+            except OSError as exc:
+                raise RuntimeError(f"Could not load lib{name} ({path}): {exc}; Beamer reads the keyboard layout through it") from exc
         u32, p = ctypes.c_uint32, ctypes.c_void_p
         if "xcb" in names:
             _bind_x11(_libs["xcb"], _libs["xkb_x11"])

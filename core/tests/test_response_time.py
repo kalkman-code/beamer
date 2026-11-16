@@ -18,7 +18,7 @@ class ResponseTimeTests(unittest.TestCase):
         link.next_response_probe = 0.0
         queued = protocol.clipboard_msg("queued traffic")
         link.outbox.append(queued)
-        receiver.LinkResponder._writer(SimpleNamespace(), link)
+        receiver.LinkResponder._writer(SimpleNamespace(_check_available=lambda: True), link)
         self.assertEqual(sent[0]["type"], protocol.MSG_PING)
         self.assertIn("probe", sent[0]["data"])
         self.assertEqual(list(link.outbox), [queued])

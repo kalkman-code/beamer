@@ -198,7 +198,7 @@ _xkb = []
 def _keysym_to_utf32():
     if not _xkb:
         function = None
-        name = ctypes.util.find_library("xkbcommon")
+        name = ctypes.util.find_library("xkbcommon") or "libxkbcommon.so.0"
         if name:
             try:
                 function = ctypes.CDLL(name).xkb_keysym_to_utf32

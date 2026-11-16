@@ -386,6 +386,23 @@ class RemoteTest(unittest.TestCase):
         self.assertEqual(clipboard_portal.changed_contents(), (None, None))
         self.assertEqual(clipboard_portal.get_contents(), ("from another app", None))
 
+    def test_gnome_46_clipboard_tuple_mime_offer_returns_copied_text(self):
+        self.up()
+        before = clipboard_portal.change_stamp()
+        self.bus.emit(portal.OBJECT_PATH, inject_portal.CLIPBOARD, "SelectionOwnerChanged",
+                      (SESSION, vardict({"mime_types": ([("text/plain;charset=utf-8")],), "session_is_owner": False})))
+        wait_for(lambda: clipboard_portal.change_stamp() == before + 1, what="the GNOME 46 copy")
+
+        def selection(_body):
+            read, write = os.pipe()
+            os.write(write, b"copied on GNOME 46")
+            os.close(write)
+            return (read,)
+
+        self.bus.returns["SelectionRead"] = selection
+        self.assertEqual(clipboard_portal.changed_contents(), ("copied on GNOME 46", None))
+        self.assertEqual(self.bus.made("SelectionRead")[0][1], "text/plain;charset=utf-8")
+
     def test_an_app_that_never_hands_the_clipboard_over_costs_one_read(self):
         self.up()
         self.bus.emit(portal.OBJECT_PATH, inject_portal.CLIPBOARD, "SelectionOwnerChanged",

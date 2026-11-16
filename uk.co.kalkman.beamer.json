@@ -33,7 +33,7 @@
       "name": "libei-scanner-python",
       "buildsystem": "simple",
       "cleanup": ["*"],
-      "build-commands": ["pip3 install --verbose --no-index --no-deps --no-build-isolation --prefix=/app MarkupSafe==3.0.3 Jinja2==3.1.6"],
+      "build-commands": ["pip3 install --verbose --ignore-installed --no-index --no-deps --no-build-isolation --prefix=/app MarkupSafe==3.0.3 Jinja2==3.1.6"],
       "sources": [
         {"type": "file", "url": "https://files.pythonhosted.org/packages/7e/99/7690b6d4034fffd95959cbe0c02de8deb3098cc577c67bb6a24fe5d7caa7/markupsafe-3.0.3.tar.gz", "sha256": "722695808f4b6457b320fdc131280796bdceb04ab50fe1795cd540799ebe1698"},
         {"type": "file", "url": "https://files.pythonhosted.org/packages/62/a1/3d680cbfd5f4b8f15abc1d571870c5fc3e594bb582bc3b64ea099db13e56/jinja2-3.1.6-py3-none-any.whl", "sha256": "85ece4451f492d0c13c5dd7c13a64681a86afae63a5f347908daf103ce6d2f67"}

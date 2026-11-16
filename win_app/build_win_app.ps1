@@ -1,6 +1,6 @@
 # Builds dist\Beamer.exe. With -Release it also builds Beamer-Setup-<version>.exe with Inno Setup
 # into ..\..\docs\beamer-releases\<version>\, from a clean commit.
-param([switch]$Release)
+param([switch]$Release, [switch]$ExperimentalSecureDesktop)
 
 $ErrorActionPreference = 'Stop'
 
@@ -83,6 +83,11 @@ if (-not (Test-Path $Output)) { throw 'PyInstaller did not create Beamer.exe' }
 Sign-BeamerArtifact $Output
 Write-Output "Built $Output"
 
+if ($ExperimentalSecureDesktop) {
+    Invoke-Native { & .\.venv\Scripts\python.exe -m PyInstaller --clean --noconfirm --distpath dist --workpath build-secure secure_build.spec }
+    if ($LASTEXITCODE -ne 0) { throw 'Secure desktop PyInstaller build failed' }
+}
+
 if ($Release) {
     $Version = (Get-Content (Join-Path $ProjectDir 'VERSION') -Raw).Trim()
     $ReleaseDir = [IO.Path]::GetFullPath((Join-Path $ProjectDir "..\docs\beamer-releases\$Version"))
@@ -93,6 +98,7 @@ if ($Release) {
         $IsccArgs += '/DSignInstaller'
         $IsccArgs += '/Sbeamer=$q' + $SignTool + '$q sign /sha1 EA6F2A81A84E49D31FF7965A50D7DE771601DA0A /tr http://time.certum.pl /td sha256 /fd sha256 $f'
     }
+    if ($ExperimentalSecureDesktop) { $IsccArgs += '/DSecureDesktop=1' }
     $IsccArgs += 'Beamer-Setup.iss'
     & $Iscc @IsccArgs
     if ($LASTEXITCODE -ne 0) { throw 'Inno Setup failed' }

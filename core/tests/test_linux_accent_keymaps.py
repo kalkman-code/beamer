@@ -13,7 +13,7 @@ import inject_x11
 import xkb_x11
 
 
-@unittest.skipUnless(sys.platform.startswith("linux") and ctypes.util.find_library("xkbcommon"),
+@unittest.skipUnless(sys.platform.startswith("linux"),
                      "requires Linux's installed XKB layouts and compose data")
 class InstalledLayoutTests(unittest.TestCase):
     def keymap(self, symbols):

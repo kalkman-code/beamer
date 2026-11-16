@@ -31,6 +31,7 @@ from core.link_timing import LinkTiming
 LOGGER = logging.getLogger("Beamer")
 
 CONNECT_SECONDS = 1.0
+SECURE_DESKTOP_PORT = 24822
 HANDSHAKE_SECONDS = 5.0
 RECONNECT_SECONDS = 2.0
 FORGOTTEN_AFTER_SECONDS = 60.0
@@ -143,6 +144,7 @@ class OutboundLink:
         self.peer_platform = ""
         self.peer_name = ""
         self.via_tunnel = False
+        self._secure_endpoint = False
         self._queued_bytes = 0
         self._ping_queued = False
         self._writing = False
@@ -303,7 +305,7 @@ class OutboundLink:
                 host = tried or target[0]
                 wait = self._reconnect
                 try:
-                    self._connect(entry, host, port, direct=tried is not None)
+                    self._connect_endpoints(entry, host, port, direct=tried is not None)
                     closed_since = None
                 except LinkEnded as ended:
                     # A try at a beacon's address that fails shows nothing: a forged beacon must
@@ -374,16 +376,47 @@ class OutboundLink:
 
     # The handshake (WIRE.md section 2, the initiator)
 
-    def _connect(self, entry, host, port, direct):
+    def _connect_endpoints(self, entry, host, port, direct):
+        ended = None
+        try:
+            self._connect(entry, host, port, direct)
+            kind = self.kind
+        except LinkEnded as exc:
+            ended, kind = exc, exc.kind
+        if direct or self._stop.is_set() or kind not in {"refused", "unreachable", "timeout", "closed", "stopped"}:
+            if ended is not None:
+                raise ended
+            return
+        # A beacon cannot move the secure endpoint. It uses only the saved address of a
+        # paired Windows desktop, and every new attempt starts with that desktop's normal port.
+        current = self.entry()
+        eligible = (port != SECURE_DESKTOP_PORT
+                    and current is not None and self._target(current) == (host, port)
+                    and current.get("platform") == "windows"
+                    and protocol.read_id(current.get("id")) is not None)
+        if not eligible:
+            if ended is not None:
+                raise ended
+            return
+        try:
+            self._connect(current, host, SECURE_DESKTOP_PORT, direct=False, secure=True)
+        except LinkEnded as secure_ended:
+            if ended is not None and secure_ended.kind in {"refused", "unreachable", "timeout", "closed", "stopped"}:
+                raise ended
+            raise
+
+    def _connect(self, entry, host, port, direct, *, secure=False):
         name = self._name(entry)
         sock = None
         self.via_tunnel = False
+        self._secure_endpoint = secure
         self._dialled_to, self._dialled_port = host, port
         try:
             try:
                 sock = self._factory((host, port), timeout=CONNECT_SECONDS)
             except OSError as exc:
-                if exc.errno != errno.EHOSTUNREACH or self._tunnel is None or direct:
+                if (exc.errno != errno.EHOSTUNREACH or self._tunnel is None or direct
+                        or secure):
                     raise connection_ended(exc, name) from None
                 try:
                     sock = self._tunnel()
@@ -519,6 +552,7 @@ class OutboundLink:
             self.peer_name = fields["name"]
             self._reset_link_state()
             self._last_rx = self._last_tx = self._last_progress = self._logged_at = now
+            self.dialled = (self._dialled_to, self._dialled_port)
             self._live = True
         name = self._name(entry)
         self._timing.connected(sock)
@@ -526,7 +560,6 @@ class OutboundLink:
         writer.start()
         message = (tr("Connected to {name} via the secure macOS 27 fallback").format(name=name) if self.via_tunnel
                    else tr("Connected to {name}").format(name=name))
-        self.dialled = (self._dialled_to, self._dialled_port)
         self._report(True, message, "connected")
         self._call(1, fields)
         reason, kind = tr("{name} closed the connection").format(name=name), "closed"
@@ -769,6 +802,8 @@ class OutboundLink:
         if not self._live:
             return False
         kind = message.get("type")
+        if self._secure_endpoint and kind not in {protocol.MSG_FOCUS, protocol.MSG_PING}:
+            return True
         if kind in (protocol.MSG_FOCUS, protocol.MSG_SWITCH) and "displays" not in self._caps:
             data = dict(message.get("data") or {})
             data.pop("display", None)
@@ -794,6 +829,8 @@ class OutboundLink:
         kind = message.get("type")
         if kind not in protocol.INPUT_TYPES or not self._live:
             return False
+        if self._secure_endpoint and kind in {protocol.MSG_TEXT, protocol.MSG_GESTURE}:
+            return True
         if kind in _CAP_FOR and _CAP_FOR[kind] not in self._caps:
             return True
         if kind in (protocol.MSG_KEYDOWN, protocol.MSG_KEYUP) and (message.get("data") or {}).get("key") in MEDIA_KEYS and "media_keys" not in self._caps:

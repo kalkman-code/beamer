@@ -12,6 +12,7 @@ venv/
 # Spotlight and turns up in Launchpad beside the real /Applications install.
 win_app/Output/
 win_app/build/
+win_app/build-secure/
 win_app/dist/
 mac_app/build/
 mac_app/dist/

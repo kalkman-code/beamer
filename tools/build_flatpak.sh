@@ -25,6 +25,13 @@ output="$root/dist/flatpak/$arch"
 mkdir -p "$output"
 flatpak-builder --user --arch="$arch" --install-deps-from=flathub --assumeyes \
     --disable-rofiles-fuse --force-clean --repo="$output/repo" "$output/build" "$root/uk.co.kalkman.beamer.json"
+# PySide uses Qt private symbols that can change in a runtime patch update.
+# Test the deployed Platform, not only the SDK that built the app, before bundling.
+for session in wayland x11; do
+    flatpak build --runtime --env=PYTHONPATH=/app/share/beamer/win_app:/app/share/beamer \
+        --env=PYTHONNOUSERSITE=1 --env=XDG_SESSION_TYPE="$session" "$output/build" \
+        python3 /app/share/beamer/tools/flatpak_import_probe.py
+done
 bundle="$output/Beamer-$version-$arch.flatpak"
 flatpak build-bundle --arch="$arch" --runtime-repo=https://flathub.org/repo/flathub.flatpakrepo \
     "$output/repo" "$bundle" uk.co.kalkman.beamer master

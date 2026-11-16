@@ -58,6 +58,10 @@ NOT_SHOWN = {
     # XML paths and scheduled-task run levels are Windows data, not translated prose.
     "find", "findall", "findtext", "SubElement", "task_xml",
     "_FlagAsMethod",  # COM method identifiers must retain their registered spelling.
+    # The headless secure-desktop service: Win32 export names, a security descriptor and its worker
+    # command line, and status text only its own log reads.
+    "signature", "_signature", "ConvertStringSecurityDescriptorToSecurityDescriptorW",
+    "create_unicode_buffer", "_set_status",
 }
 
 

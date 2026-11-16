@@ -4,10 +4,17 @@ import xml.etree.ElementTree as ET
 from pathlib import Path
 from unittest.mock import patch
 
+import admin_mode
 import autostart_win
 
 NS = {"t": "http://schemas.microsoft.com/windows/2004/02/mit/task"}
 EXE = r"C:\Users\alex\AppData\Local\Beamer\Beamer.exe"
+
+
+def setUpModule():
+    preference = patch.object(admin_mode, "enabled", return_value=False)
+    preference.start()
+    unittest.addModuleCleanup(preference.stop)
 
 
 class FakeSchtasks:

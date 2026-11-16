@@ -43,6 +43,9 @@
   </screenshots>
   <content_rating type="oars-1.1"/>
   <releases>
+    <release version="@VERSION@" timestamp="@TIMESTAMP@">
+      <description><p>Fixes clipboard sharing from GNOME 46 desktops, including Zorin OS 18. Improves Flatpak startup checks and Linux keyboard library loading.</p><p>On Windows, optional experimental secure desktop support lets an approved paired Mac control the sign-in screen.</p></description>
+    </release>
     <release version="1.5.19" date="2026-11-03">
       <description><p>Fixes shortcuts such as Ctrl+A when Caps Lock differs between machines, keeps input working when a Wayland input device is replaced, detects new X11 clipboard copies, and installs its input library where Flatpak loads it. When a Mac on U.S. International controls another machine, dead keys now compose accents, such as ' then e for é. On a busy Wayland receiver, Beamer now keeps pointer movement it used to drop, so the pointer is less likely to stick at the screen edge.</p></description>
     </release>

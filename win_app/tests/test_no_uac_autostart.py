@@ -2,7 +2,14 @@ import unittest
 import xml.etree.ElementTree as ET
 from unittest.mock import patch
 
+import admin_mode
 import autostart_win
+
+
+def setUpModule():
+    preference = patch.object(admin_mode, "enabled", return_value=False)
+    preference.start()
+    unittest.addModuleCleanup(preference.stop)
 
 
 class OrdinaryAutostartTests(unittest.TestCase):

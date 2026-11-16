@@ -14,6 +14,7 @@ USER = r"PC\owner"
 
 class AdminModeTests(unittest.TestCase):
     def setUp(self):
+        self.enterContext(patch.object(admin_mode, "enabled", return_value=False))
         token_launcher = patch("win32api.OpenProcess", side_effect=AssertionError("Token-based launch is forbidden"))
         token_launcher.start()
         self.addCleanup(token_launcher.stop)
@@ -320,6 +321,7 @@ class AdminModeTests(unittest.TestCase):
 
 class TransitionTests(unittest.TestCase):
     def setUp(self):
+        self.enterContext(patch.object(admin_mode, "enabled", return_value=False))
         self.task = autostart_win.task_xml(EXE, USER)
         self.saved = []
         self.pref = False
@@ -425,6 +427,7 @@ class TransitionTests(unittest.TestCase):
 
     def test_medium_startup_update_requests_consent_without_relaunching(self):
         for start_at_sign_in in (False, True):
+            self.task = autostart_win.task_xml(EXE, USER, run_level="LeastPrivilege")
             with self.subTest(enabled=start_at_sign_in), \
                     patch.object(admin_mode, "enabled", return_value=True), \
                     patch.object(admin_mode, "_is_elevated", return_value=False), \

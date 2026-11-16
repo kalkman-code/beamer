@@ -111,6 +111,9 @@ import tokens
 from core import updates
 import widgets
 
+if sys.platform == "win32":
+    import secure_desktop_win
+
 QPushButton = widgets.ActionButton
 
 LOGGER = logging.getLogger(__name__)
@@ -650,6 +653,8 @@ class WindowsApplication(QWidget):
             hardware=hardware_win.hardware_address_towards,
             desktop=platform_parts.desktop,
             injector=platform_parts.injector,
+            available=secure_desktop_win.normal_desktop_available if sys.platform == "win32" else None,
+            secure_handover=secure_desktop_win.hands_over_to_service if sys.platform == "win32" else None,
         )
         # The links outwards: this PC's keyboard and mouse on its peers.
         self.sender = LinkSender(
@@ -2209,11 +2214,13 @@ class WindowsApplication(QWidget):
             LOGGER.exception("Could not identify the signed-in account")
             can_start = False
             account_known = False
-        import admin_mode
-        try:
-            admin_on = admin_mode.enabled()
-        except OSError:
-            admin_on = False
+        admin_on = False
+        if not sys.platform.startswith("linux"):
+            import admin_mode
+            try:
+                admin_on = admin_mode.enabled()
+            except OSError:
+                pass
         enabled = False
         try:
             enabled = exe is not None and autostart_win.is_enabled()

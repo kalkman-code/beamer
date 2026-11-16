@@ -1,10 +1,13 @@
 """Unlock a locked Windows console so injected input has somewhere to land.
 
-Beamer cannot type on the lock screen and never will: that is the Winlogon
+The ordinary user-session receiver cannot type on the lock screen: that is the Winlogon
 secure desktop, whose security descriptor admits only SYSTEM, and SendInput
 only reaches the desktop its calling thread is attached to. Running elevated
 clears UIPI, not desktop access -- which is why an admin Beamer still cannot
 touch a locked machine.
+
+The optional secure-desktop service uses a separate SYSTEM worker and explicit
+administrator-approved pairing grants. It never calls this provider.
 
 So this module does not inject into the lock screen. It asks an external
 unlock credential provider to take the machine *off* the lock screen, after

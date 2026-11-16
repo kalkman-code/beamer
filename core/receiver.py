@@ -507,6 +507,10 @@ class LinkResponder:
       a take here won the race and the app's input goes home.
     - `zones()`: this machine's zones as settings.json keeps them; `notch_span`: the Mac's notch
       span for SpanEdge, or None.
+    - `available()`: optional desktop authority check; only True permits links. Any other result
+      or an exception closes existing links and releases their held input.
+      `max_frame_bytes` bounds encrypted input frames before their bodies are read, including
+      the hello (also bounded by the protocol's own smaller hello limit).
 
     Callbacks, each on a link's thread, never with the responder's lock held, each by peer id:
     `owner_callback(peer or None)` when ownership begins or ends, always in the order it did; `arrival_callback(edge, x, y)`
@@ -520,6 +524,11 @@ class LinkResponder:
     The app calls `peers_changed()` after every change to the peers (a removal closes that peer's
     links; `allow_drive` sends `accepts` and, turned off, ends that peer's ownership), `rearm()`
     after a change to the zones, and `send_home()` to send the owner home from here."""
+
+    # Defaults for responders built without __init__ (several tests do); __init__ sets both.
+    _available = None
+    _secure_handover = None
+    _max_frame_bytes = protocol.MAX_FRAME_BYTES
 
     def __init__(
         self,
@@ -545,6 +554,9 @@ class LinkResponder:
         link_callback=None,
         announce=None,
         listener=None,
+        available=None,
+        secure_handover=None,
+        max_frame_bytes=protocol.MAX_FRAME_BYTES,
     ) -> None:
         self._book = book
         self._identity = identity
@@ -554,6 +566,11 @@ class LinkResponder:
         self._clipboard = clipboard
         self._unlock = unlock
         self._hardware = hardware
+        self._available = available
+        self._secure_handover = secure_handover
+        if type(max_frame_bytes) is not int or not protocol.MIN_FRAME_BYTES <= max_frame_bytes <= protocol.MAX_FRAME_BYTES:
+            raise ValueError("invalid frame limit")
+        self._max_frame_bytes = max_frame_bytes
         self._away = away or (lambda: False)
         self._zones = zones or (lambda: [])
         self._notch_span = notch_span
@@ -778,9 +795,30 @@ class LinkResponder:
 
     # The handshake (section 2)
 
+    def _check_available(self) -> bool:
+        """End every old-desktop link when input authority becomes unavailable or unknown."""
+        if self._available is None:
+            return True
+        try:
+            if self._available() is True:
+                return True
+        except Exception:
+            pass
+        with self._lock:
+            after = self._end_locked(self._owner)
+            for link in self._links.values():
+                link.close()
+            connections = list(self._connections)
+        for connection in connections:
+            _close_socket(connection)
+        self._run(after)
+        return False
+
     def _handshake(self, connection: socket.socket, host: str, accepted: float) -> Optional[_Link]:
         """Steps 2 to 9 of the responder's handshake. The link, once its `welcome` has gone, or
         None once the connection has been answered or needs closing with nothing sent."""
+        if not self._check_available():
+            return None
         try:
             try:
                 preamble = protocol.recv_link_preamble(connection, accepted + PREAMBLE_SECONDS)
@@ -800,10 +838,16 @@ class LinkResponder:
             connection.settimeout(max(0.001, deadline - time.monotonic()))
             connection.sendall(session.preamble())
             try:
-                hello = protocol.read_hello(protocol.recv_first_msg(connection, session, deadline))
+                if self._max_frame_bytes >= protocol.HELLO_MAX_BYTES:
+                    first = protocol.recv_first_msg(connection, session, deadline)
+                else:
+                    first = session.open(protocol.recv_frame(connection, self._max_frame_bytes, deadline))
+                hello = protocol.read_hello(first)
             except (protocol.NotAnObject, protocol.InvalidHello):
                 LOGGER.warning("%s sent a first frame that is not a valid hello", host)
                 self._answer(connection, host, session.seal(protocol.invalid_hello_v6()))
+                return None
+            if not self._check_available():
                 return None
             identity = self._identity()
             own_id = bytes(identity["id"])
@@ -835,6 +879,8 @@ class LinkResponder:
             welcome = protocol.welcome_v6(
                 own_id, identity["name"], identity["platform"], identity["app"], identity["caps"], allow_drive, self._hardware_towards(host, identity)
             )
+            if not self._check_available():
+                return None
             protocol.send_msg(connection, session, welcome)
         except (socket.timeout, protocol.ConnectionClosed, protocol.ProtocolError, OSError) as exc:
             LOGGER.info("Handshake with %s ended: %s", host, exc)
@@ -899,6 +945,9 @@ class LinkResponder:
     # A link
 
     def _serve(self, link: _Link) -> None:
+        if not self._check_available():
+            link.close()
+            return
         link.sock.settimeout(LINK_READ_TIMEOUT_SECONDS)
         try:
             link.sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
@@ -969,7 +1018,7 @@ class LinkResponder:
     def _read_ahead(self, link: _Link) -> None:
         try:
             while not link.closed.is_set():
-                frame = protocol.recv_frame(link.sock)
+                frame = protocol.recv_frame(link.sock, self._max_frame_bytes)
                 decode_at = time.monotonic()
                 plain = link.session.open_raw(frame)
                 if len(plain) > protocol.SMALL_MESSAGE_BYTES and self._owner is not link:
@@ -980,7 +1029,8 @@ class LinkResponder:
                 if not link.receive(message, len(plain)):
                     return
         except socket.timeout:
-            LOGGER.warning("%s went quiet, or took too long over one message; its link is over", link.name)
+            if not link.closed.is_set():
+                LOGGER.warning("%s went quiet, or took too long over one message; its link is over", link.name)
         except (protocol.ConnectionClosed, protocol.ProtocolError, OSError) as exc:
             if not link.closed.is_set():
                 LOGGER.info("The link from %s ended: %s", link.name, exc)
@@ -992,6 +1042,9 @@ class LinkResponder:
     def _writer(self, link: _Link) -> None:
         """Everything this link sends, in order, and its `ack`s when they are due (section 9)."""
         while True:
+            if not self._check_available():
+                link.close()
+                return
             is_ack = False
             with link.cond:
                 while True:
@@ -1023,6 +1076,9 @@ class LinkResponder:
                         due = min(due, link.next_response_probe)
                     link.cond.wait(due - now)
                     link.timing.add("writer_wait_lag", time.monotonic() - due)
+            if not self._check_available():
+                link.close()
+                return
             try:
                 write_at = time.monotonic()
                 # Only this thread sends once the link is up, so sealing and sending need not be
@@ -1042,6 +1098,8 @@ class LinkResponder:
                 self._home_if_locked(link)
 
     def _dispatch(self, link: _Link, message) -> None:
+        if not self._check_available():
+            return
         kind = message.get("type") if isinstance(message, dict) else None
         try:
             if kind in protocol.INPUT_TYPES:
@@ -1086,6 +1144,8 @@ class LinkResponder:
     # Input (sections 3, 4 and 10)
 
     def _on_input(self, link: _Link, message) -> None:
+        if not self._check_available():
+            return
         read = protocol.read_input(message)
         if read is None:
             return
@@ -1535,6 +1595,8 @@ class LinkResponder:
     # Ownership (section 4)
 
     def _on_focus(self, link: _Link, message) -> None:
+        if not self._check_available():
+            return
         focus = protocol.read_focus(message, link.own_id)
         if focus is None:
             return
@@ -1877,6 +1939,8 @@ class LinkResponder:
         """Places the pointer where a take by a zone says, or says where it is for one by the
         shortcut, then clears Windows' lock screen out of the way; nothing, once that visit is
         over."""
+        if not self._check_available():
+            return
         try:
             with self._lock:
                 current = self._visit == visit and self._owner is link
@@ -1977,9 +2041,22 @@ class LinkResponder:
         if self._locked_since is None:
             self._locked_since = now
             return
+        if self._hands_over_to_secure_path(link):
+            return
         if not self._sent_home_for_lock:
             LOGGER.info("This machine is locked while %s drives it; sending its input home", link.name)
             self._sent_home_for_lock = self._send_home(link)
+
+    def _hands_over_to_secure_path(self, link: _Link) -> bool:
+        """With the secure desktop service running and this peer approved, a locked PC keeps its owner:
+        the lock cover is dismissed from the Mac and the sign-in screen is then expected to move the
+        link to the service. Any doubt counts as not approved, so the owner goes home as in 1.5.19."""
+        if self._secure_handover is None:
+            return False
+        try:
+            return self._secure_handover(link.peer_id) is True
+        except Exception:
+            return False
 
     # Plumbing
 
