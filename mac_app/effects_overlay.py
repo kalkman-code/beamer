@@ -394,6 +394,31 @@ class EffectsOverlay:
         the locator, while crossings are animated at all and the switch for it is on."""
         return not self.disabled and bool(feel["glow"]) and bool(feel.get("shortcut_arrival", True))
 
+    def wanted_local(self, feel):
+        """Whether a slide between this Mac's own displays plays: any style, Glow and Beam as the
+        Design pages' previews draw them, while crossings are animated and the switch for it is on."""
+        return not self.disabled and bool(feel["glow"]) and bool(feel.get("local_displays", False))
+
+    def local_crossing(self, exit_point, exit_edge, entry_point, entry_edge):
+        """The pointer slid from one of this Mac's displays onto another, in Quartz global points:
+        the departure plays where it left and the arrival where it landed, both at once."""
+        self._guard(self._local_crossing, exit_point, exit_edge, entry_point, entry_edge)
+
+    def _local_crossing(self, exit_point, exit_edge, entry_point, entry_edge):
+        now = time.monotonic()
+        self._begin(local=True)
+        bounds = display_at(exit_point, self.box)
+        region = region_of("edge", exit_edge, crossing.CrossingEngine._strip(exit_edge, bounds), self.box)
+        display, at = self._display((exit_point[0] - self.box[0], exit_point[1] - self.box[1]))
+        self.player.push(now, "edge", region, at, 1.0, display=display)
+        self.player.cross(now)
+        display, at = self._display((entry_point[0] - self.box[0], entry_point[1] - self.box[1]))
+        self.player.arrive(now, "edge", at, entry_edge, display)
+        if self.fx.arrive_seconds <= 0:
+            # Glow and Beam have no arrival: the ring shows where the pointer landed, as a switch does.
+            self.player.arrival["fx"] = effects.LOCATOR
+        self._run()
+
     def departure(self, kind, step):
         """One of the Mac engine's pressure, tick or cross events, as EdgeGlow gets them."""
         self._guard(self._departure, kind, step)
@@ -477,16 +502,20 @@ class EffectsOverlay:
         self.player.switched(time.monotonic(), at, edge, fx, display)
         self._run()
 
-    def _begin(self):
+    def _begin(self, local=False):
         """Settles what plays when nothing is playing yet: the effect, its colours, reduced motion,
         the appearance and the notch are read as an effect starts, never per frame."""
         if self.player.busy and self.fx is not None:
             return
         feel = self.controller.cfg.crossing
         # Glow and Beam are drawn elsewhere and have no arrival: all this overlay plays for them is
-        # a switch, by the locator.
+        # a switch, by the locator. Between this Mac's own displays nothing else draws them, so
+        # they play as the Design pages' previews draw them.
         style = feel["glow_style"]
-        self.fx = effects.effect(style) if style_is_effect(style) else effects.LOCATOR
+        if local:
+            self.fx = effects.preview_effect(style) or effects.LOCATOR
+        else:
+            self.fx = effects.effect(style) if style_is_effect(style) else effects.LOCATOR
         if self.fx is None:
             raise ValueError(f"no crossing effect called {feel['glow_style']!r}")
         self.palette = palette(feel["glow_colour"])

@@ -1714,6 +1714,10 @@ msgstr "Decide questo schermo, anche quando lo controlla un altro computer. Se a
 msgid "This screen's setting applies to every pointer on it."
 msgstr "L'impostazione di questo schermo vale per ogni puntatore che vi si trova."
 
+#: mac_app/kvm_bridge_app.py
+msgid "Play the crossing between this Mac's own displays"
+msgstr "Riproduci il passaggio tra gli schermi di questo Mac"
+
 #: mac_app/kvm_bridge_app.py win_app/kvm_bridge_win.py
 msgid "Hide the pointer on the machine not in use"
 msgstr "Nascondi il puntatore sul computer non in uso"
@@ -2326,6 +2330,10 @@ msgstr "Velocità del puntatore per il mouse o il trackpad di un altro computer 
 #: mac_app/kvm_bridge_app.py win_app/kvm_bridge_win.py
 msgid "Link"
 msgstr "Collegamento"
+
+#: mac_app/kvm_bridge_app.py
+msgid "On, the chosen crossing style plays where the pointer leaves one of this Mac's displays and where it lands on the next, with no other machine involved."
+msgstr "Se attivo, lo stile di passaggio scelto viene riprodotto dove il puntatore lascia uno schermo di questo Mac e dove arriva sul successivo, senza altri computer coinvolti."
 
 #: mac_app/kvm_bridge_app.py
 msgid "This Mac's pointer always hides while it drives another machine. On, it also hides after another machine stops driving it, until its own mouse or trackpad moves."

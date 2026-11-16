@@ -40,6 +40,7 @@ import gestures
 import hardware_mac
 import ignored_titles
 import keyboard_layout
+import local_displays
 import notch_beam
 import previews
 import diagram
@@ -1570,6 +1571,7 @@ class ControlWindow(AppKit.NSObject):
         self.notch_after_select.value = crossing_raw["notch_after_ms"]
         self.tick_steps_select.value = crossing_raw["haptic_steps"]
         self.hold_box.value = crossing_raw["hold_full_screen"]
+        self.local_displays_box.value = crossing_raw["local_displays"]
         self._load_shared(raw)
         self._refresh_design_follow()
 
@@ -2189,6 +2191,13 @@ class ControlWindow(AppKit.NSObject):
         # controller's config is the one the pending save builds on.
         with self.controller._cfg_lock:
             self.controller.cfg.crossing["hold_full_screen"] = value
+        self._changed()
+
+    @objc.python_method
+    def _local_displays_changed(self, value):
+        # The watcher reads this at every movement, so like the hold it applies at once.
+        with self.controller._cfg_lock:
+            self.controller.cfg.crossing["local_displays"] = value
         self._changed()
 
     @objc.python_method
@@ -3339,6 +3348,14 @@ class ControlWindow(AppKit.NSObject):
         ))
         module.add(self.hold_note.view)
         self.hold_box.view.setToolTip_(tr("This screen's setting applies to every pointer on it."))
+        self.local_displays_box = widgets.Switch(
+            tr("Play the crossing between this Mac's own displays"), on_change=self._local_displays_changed
+        )
+        module.add(self.local_displays_box.view)
+        module.add(widgets.note(tr(
+            "On, the chosen crossing style plays where the pointer leaves one of this Mac's displays and "
+            "where it lands on the next, with no other machine involved."
+        )).view)
         self.pointer_box = widgets.Switch(tr("Hide the pointer on the machine not in use"), on_change=self._set_hide_idle_pointer)
         self.pointer_box.value = self.controller.cfg.hide_idle_pointer
         module.add(self.pointer_box.view)
@@ -4664,6 +4681,7 @@ class ControlWindow(AppKit.NSObject):
                 "block_while_dragging": self.dragging_box.value,
                 "shortcut_goes_to": self.shortcut_goes_to.value or "last",
                 "hold_full_screen": self.hold_box.value,
+                "local_displays": self.local_displays_box.value,
                 "arrangement_set_at": self.controller.cfg.crossing.get("arrangement_set_at", 0),
             }
             cfg = self.controller.cfg
@@ -5105,6 +5123,12 @@ class TrayApp(rumps.App):
         self.notch_island = NotchIsland(controller, logger)
         self.notch_beam = NotchBeam(controller, logger)
         self.effects_overlay = effects_overlay.EffectsOverlay(controller, logger)
+        self.local_displays = local_displays.LocalDisplayWatcher(
+            self._local_crossing,
+            lambda: self.effects_overlay.wanted_local(self.controller.cfg.crossing),
+            logger,
+        )
+        self.local_displays.start()
         self.identify_overlay = identify_overlay.IdentifyOverlay(logger)
         self.controller.on_identify_screens = lambda labels: AppHelper.callAfter(self.identify_overlay.show, labels)
         self.haptics = Haptics(logger)
@@ -5638,6 +5662,10 @@ class TrayApp(rumps.App):
         """The PC's input has just come to this Mac: placed at `edge` by a crossing, or left where
         it was by a switch, when `edge` is None."""
         AppHelper.callAfter(self._driven_arrival_main, edge, x, y)
+
+    def _local_crossing(self, exit_point, exit_edge, entry_point, entry_edge):
+        """The pointer slid between two of this Mac's displays; the watcher calls on the main thread."""
+        self.effects_overlay.local_crossing(exit_point, exit_edge, entry_point, entry_edge)
 
     def _driven_arrival_main(self, edge, x, y):
         try:

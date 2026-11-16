@@ -1705,6 +1705,10 @@ msgstr ""
 msgid "This screen's setting applies to every pointer on it."
 msgstr ""
 
+#: mac_app/kvm_bridge_app.py
+msgid "Play the crossing between this Mac's own displays"
+msgstr ""
+
 #: mac_app/kvm_bridge_app.py win_app/kvm_bridge_win.py
 msgid "Hide the pointer on the machine not in use"
 msgstr ""
@@ -2282,6 +2286,10 @@ msgstr ""
 
 #: mac_app/kvm_bridge_app.py win_app/kvm_bridge_win.py
 msgid "Link"
+msgstr ""
+
+#: mac_app/kvm_bridge_app.py
+msgid "On, the chosen crossing style plays where the pointer leaves one of this Mac's displays and where it lands on the next, with no other machine involved."
 msgstr ""
 
 #: mac_app/kvm_bridge_app.py

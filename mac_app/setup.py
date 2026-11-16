@@ -36,6 +36,7 @@ setup(
         "key_codes",
         "keyboard_layout",
         "link_state",
+        "local_displays",
         "login_item",
         "machines",
         "machines_panel",
