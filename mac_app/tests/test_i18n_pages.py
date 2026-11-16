@@ -10,7 +10,7 @@ import re
 import socket
 import unittest
 
-from core.i18n import install
+from core.i18n import install, LANGUAGES
 
 
 def walk(AppKit, view):
@@ -91,7 +91,7 @@ class PseudoLanguageTests(_Localised):
         if re.fullmatch(r"— (?:ms|px|pt|s)", text):
             return
         # Language names stay in their own language; key symbols and the product name are not prose.
-        if text in {"Beamer", "English", "Italiano", "⌃", "⌥", "⇧", "⌘"}:
+        if text in {"Beamer", "⌃", "⌥", "⇧", "⌘"} | set(LANGUAGES.values()):
             return
         self.assertTrue(text.startswith("⟦") and text.endswith("⟧"), repr(text))
 

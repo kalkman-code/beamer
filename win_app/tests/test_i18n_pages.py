@@ -31,7 +31,7 @@ from win_app.tests.test_settings_layout_acceptance import SyntheticWindow
 # the test shows its own name as this machine's.
 ALLOWED_TEXT = {
     "Beamer",
-    "English", "Italiano",
+    *i18n.LANGUAGES.values(),
     "Synthetic workstation",
     socket.gethostname(), socket.gethostname().split(".", 1)[0],
     "Right Ctrl",
