@@ -22,11 +22,11 @@ case "${1:-}" in
     *) echo "usage: $0 [--release]" >&2; exit 2 ;;
 esac
 
-STAGING_DIR="$(mktemp -d /private/tmp/Beamer.build.XXXXXX)"
+STAGING_DIR="$(mktemp -d "${TMPDIR:-/private/tmp}/Beamer.build.XXXXXX")"
 cleanup() {
-    rm -rf "$STAGING_DIR"
+    rm -rf "${STAGING_DIR:?}"
     # A release is copied out, so the staged app goes: Spotlight would offer it beside the installed one.
-    if [ "$RELEASE" -eq 1 ]; then rm -rf "$SCRIPT_DIR/build" "$SCRIPT_DIR/dist"; fi
+    if [ "$RELEASE" -eq 1 ]; then rm -rf "${SCRIPT_DIR:?}/build" "${SCRIPT_DIR:?}/dist"; fi
 }
 trap cleanup EXIT
 
@@ -53,7 +53,7 @@ if [ "$RELEASE" -eq 1 ]; then
     KEY_ID="$(cat "$KEY_DIR/key_id")"
     [ -f "$KEY_DIR/private_keys/AuthKey_$KEY_ID.p8" ] && [ -s "$KEY_DIR/issuer_id" ] \
         || { echo "the pinned App Store Connect key is missing from $KEY_DIR" >&2; exit 1; }
-    RELEASE_DIR="$(cd "$PROJECT_DIR/.." && pwd)/docs/beamer-releases/$VERSION"
+    RELEASE_DIR="${BEAMER_RELEASE_DIR:-$(cd "$PROJECT_DIR/.." && pwd)/docs/beamer-releases/$VERSION}"
     echo "Release build of Beamer $VERSION ($BEAMER_BUILD) from $(git -C "$PROJECT_DIR" rev-parse --short HEAD)"
 else
     # The release identity too: macOS keys the privacy grants to it, so a local install over a
@@ -62,9 +62,15 @@ else
     echo "Local build of Beamer $VERSION ($BEAMER_BUILD); not for release distribution"
 fi
 
+PIN_CHECK="$PROJECT_DIR/tools/mac_runtime.py"
+BEAMER_PYTHON="${BEAMER_PYTHON:-/Library/Frameworks/Python.framework/Versions/3.12/bin/python3}"
+[ -x "$BEAMER_PYTHON" ] || { echo 'Install the pinned Python.org 3.12.10 universal2 framework, or set BEAMER_PYTHON to it' >&2; exit 1; }
+"$BEAMER_PYTHON" -B "$PIN_CHECK" --builder
 if [ ! -x ".venv/bin/python3" ]; then
-    python3 -m venv .venv
+    "$BEAMER_PYTHON" -B -m venv .venv
 fi
+# A reused venv must have the same provenance as a fresh one.
+.venv/bin/python3 -B "$PIN_CHECK" --builder
 .venv/bin/python3 -m pip install -q -r requirements-mac.txt
 
 rm -rf "$SCRIPT_DIR/build" "$SCRIPT_DIR/dist"
@@ -96,6 +102,25 @@ for ours in $(find "$APP/Contents" -name '_cffi_backend*.so'); do
         cp "$STAGING_DIR/cffi-fused.so" "$ours"
     fi
 done
+
+# py2app can retain a relocated builder's loader-relative paths after moving its launcher.
+# Canonicalise only the pinned runtime links; the content/closure check below rejects drift.
+for binary in "$APP/Contents/MacOS/python" \
+    "$APP/Contents/Frameworks/Python.framework/Versions/3.12/Python" \
+    "$APP"/Contents/Resources/lib/python3.12/lib-dynload/_ssl*.so \
+    "$APP"/Contents/Resources/lib/python3.12/lib-dynload/_hashlib*.so \
+    "$APP/Contents/Frameworks/libssl.3.dylib" "$APP/Contents/Frameworks/libcrypto.3.dylib"; do
+    while IFS= read -r dependency; do
+        case "${dependency##*/}" in
+            Python) target='@executable_path/../Frameworks/Python.framework/Versions/3.12/Python' ;;
+            libssl.3.dylib|libcrypto.3.dylib) target="@executable_path/../Frameworks/${dependency##*/}" ;;
+            *) continue ;;
+        esac
+        install_name_tool -change "$dependency" "$target" "$binary"
+    done < <(otool -L "$binary" | awk '/^\t/ {print $1}' | LC_ALL=C sort -u)
+done
+
+.venv/bin/python3 -B "$PIN_CHECK" --bundle "$APP"
 
 xattr -cr "$APP"
 
@@ -208,10 +233,13 @@ fi
 codesign --verify --deep --strict --verbose=2 "$APP"
 codesign -dvv "$APP" 2>&1 | grep -E '^(Identifier|Signature|Authority|Timestamp|CodeDirectory)' || true
 
-# The bundle's own python runs under the same hardened runtime as the app, so code that needs an
-# entitlement fails here rather than at a user's first launch. The probe lives with the project's
-# own tools, which the public source does not carry; a build from that source says so and goes on.
+# Imports and a real encrypted controller link, including native window/menu refresh, must pass
+# on both slices before notarisation. An absent probe or absent Rosetta is a build failure.
 PROBE="$PROJECT_DIR/tools/runtime_probe.py"
+LINK_PROBE="$PROJECT_DIR/tools/mac_link_probe.py"
+[ -f "$PROBE" ] && [ -f "$LINK_PROBE" ] || { echo 'Required Mac release probes missing' >&2; exit 1; }
+/usr/bin/arch -x86_64 /usr/bin/true || { echo 'Rosetta is required to qualify Intel Mac builds' >&2; exit 1; }
+.venv/bin/python3 -B "$PIN_CHECK" --bundle "$APP"
 
 # dyld aborts a python whose Python.framework library validation refuses before Python starts,
 # which leaves a crash report and its dialog on the desktop of whoever is at this Mac (two on
@@ -228,43 +256,53 @@ probe_loads() {
     [ -n "$team_python" ] && [ "$team_python" != "not set" ] && [ "$team_python" = "$team_framework" ]
 }
 
-# run_probe <app> [launcher...]: the probe imports the app's modules and never makes an
-# NSApplication, so nothing registers with the window server.
+# The link probe creates offscreen views. Activation and all input capture are disabled.
 run_probe() {
-    local app="$1"
-    shift
+    local app="$1" probe="$2" architecture="$3" probe_home probe_status=0
     if ! probe_loads "$app"; then
         echo "The runtime probe was not run: library validation would refuse the Python.framework in $app" >&2
         return 1
     fi
-    env -i HOME="$HOME" PATH=/usr/bin:/bin PYTHONHOME="$app/Contents/Resources" \
-        "$@" "$app/Contents/MacOS/python" "$PROBE"
+    probe_home="$(mktemp -d "$STAGING_DIR/home.XXXXXX")"
+    snapshot_reports > "$STAGING_DIR/reports-before.txt"
+    env -i HOME="$probe_home" PATH=/usr/bin:/bin TMPDIR="$STAGING_DIR" PYTHONDONTWRITEBYTECODE=1 \
+        PYTHONHOME="$app/Contents/Resources" RESOURCEPATH="$app/Contents/Resources" \
+        /usr/bin/arch "-$architecture" "$app/Contents/MacOS/python" "$probe" --expected-arch "$architecture" || probe_status=$?
+    # ReportCrash can create its file shortly after a failed child exits.
+    if [ "$probe_status" -ne 0 ]; then /bin/sleep 3; fi
+    snapshot_reports > "$STAGING_DIR/reports-after.txt"
+    if ! cmp -s "$STAGING_DIR/reports-before.txt" "$STAGING_DIR/reports-after.txt"; then
+        echo 'DiagnosticReports changed during the native probe; stop and investigate' >&2
+        diff "$STAGING_DIR/reports-before.txt" "$STAGING_DIR/reports-after.txt" >&2 || true
+        return 1
+    fi
+    return "$probe_status"
 }
 
-if [ ! -f "$PROBE" ]; then
-    echo "No runtime probe in this source tree: the hardened-runtime probe was not run" >&2
-else
-    run_probe "$APP"
-    # The same probe as an Intel Mac would run it, where Rosetta is here to run it. macOS records a
-    # bundle run under Rosetta as an Intel app, and on macOS 27 that put "App Update Required ...
-    # will not open in macOS 28" on this Mac's own Beamer, so the x86_64 run is a throwaway copy
-    # under its own identifier, signed as the app was.
-    if /usr/bin/arch -x86_64 /usr/bin/true 2>/dev/null; then
-        PROBE_APP="$STAGING_DIR/Beamer Rosetta Probe.app"
-        PROBE_ID=uk.co.kalkman.beamer.rosetta-probe
-        ditto "$APP" "$PROBE_APP"
-        /usr/libexec/PlistBuddy -c "Set :CFBundleIdentifier $PROBE_ID" "$PROBE_APP/Contents/Info.plist"
-        TIMESTAMP="--timestamp=none" sign_app "$SIGNED_WITH" "$PROBE_APP" "$PROBE_ID"
-        PROBE_FAILED=0
-        run_probe "$PROBE_APP" /usr/bin/arch -x86_64 || PROBE_FAILED=1
-        /System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister \
-            -u "$PROBE_APP" 2>/dev/null || true
-        rm -rf "$PROBE_APP"
-        [ "$PROBE_FAILED" -eq 0 ] || exit 1
-    else
-        echo "Rosetta is not installed here: the x86_64 half of the bundle was not run" >&2
+snapshot_reports() {
+    if [ -d "$HOME/Library/Logs/DiagnosticReports" ]; then
+        /bin/ls -1 "$HOME/Library/Logs/DiagnosticReports" | LC_ALL=C sort
     fi
+}
+
+run_probe "$APP" "$PROBE" arm64
+run_probe "$APP" "$LINK_PROBE" arm64
+# Use a different bundle identifier so Rosetta never marks the user's Beamer as Intel-only.
+PROBE_APP="$STAGING_DIR/Beamer Rosetta Probe.app"
+PROBE_ID=uk.co.kalkman.beamer.rosetta-probe
+ditto "$APP" "$PROBE_APP"
+/usr/libexec/PlistBuddy -c "Set :CFBundleIdentifier $PROBE_ID" "$PROBE_APP/Contents/Info.plist"
+TIMESTAMP="--timestamp=none" sign_app "$SIGNED_WITH" "$PROBE_APP" "$PROBE_ID"
+PROBE_FAILED=0
+run_probe "$PROBE_APP" "$PROBE" x86_64 || PROBE_FAILED=1
+if [ "$PROBE_FAILED" -eq 0 ]; then
+    run_probe "$PROBE_APP" "$LINK_PROBE" x86_64 || PROBE_FAILED=1
 fi
+/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister \
+    -u "$PROBE_APP" 2>/dev/null || true
+rm -rf "${PROBE_APP:?}"
+[ "$PROBE_FAILED" -eq 0 ] || exit 1
+echo 'Mac release link gate: PASS (arm64 and x86_64, 600 seconds each)'
 
 notarise() {
     local result="$STAGING_DIR/notary.json" id status
@@ -286,6 +324,8 @@ if [ "$RELEASE" -eq 1 ]; then
     ditto -c -k --keepParent "$APP" "$STAGING_DIR/Beamer.zip"
     notarise "$STAGING_DIR/Beamer.zip"
     xcrun stapler staple "$APP"
+    mkdir -p "$RELEASE_DIR"
+    ditto -c -k --keepParent "$APP" "$RELEASE_DIR/Beamer-$VERSION-mac.zip"
 fi
 
 # The window a downloader sees: Beamer, an arrow and Applications on a background that says what to

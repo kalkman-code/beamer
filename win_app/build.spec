@@ -68,6 +68,9 @@ executable = EXE(
     bootloader_ignore_signals=False,
     strip=False,
     upx=False,
+    # The bootloader expands this per user before Python starts. Keep lazy-loaded DLLs
+    # outside %TEMP%, where a sign-in cleanup can delete them during extraction.
+    runtime_tmpdir=r"%LOCALAPPDATA%\Beamer\Runtime",
     console=False,
     disable_windowed_traceback=False,
     argv_emulation=False,

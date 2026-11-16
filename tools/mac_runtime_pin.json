@@ -1,0 +1,122 @@
+{
+  "source": "https://www.python.org/ftp/python/3.12.10/python-3.12.10-macos11.pkg",
+  "package_sha256": "8373e58da4ea146b3eb1c1f9834f19a319440b6b679b06050b1f9ee3237aa8e4",
+  "binaries": {
+    "Python": {
+      "arm64": {
+        "uuid": "2CF94AF1-ABC3-3015-B8D0-4078BB56B015",
+        "text_sha256": "f89f1bb6782e57f0064b2db86751a31e97783cb8230cbe8ee9f1a3350e195e26",
+        "libraries": [
+          "CoreFoundation",
+          "Python",
+          "libSystem.B.dylib"
+        ]
+      },
+      "x86_64": {
+        "uuid": "D261F03F-FE7B-34A2-A647-3139A81BCCD8",
+        "text_sha256": "da9262113a01baceda9023acd4ff5d3fc867b9666051866e341ef4edfd88c57c",
+        "libraries": [
+          "CoreFoundation",
+          "Python",
+          "libSystem.B.dylib"
+        ]
+      }
+    },
+    "PythonLauncher": {
+      "arm64": {
+        "uuid": "547E7E79-9AEA-3ADD-A080-AD8E9BA98162",
+        "text_sha256": "b831effe7de0188f751f11a4a62629dc05871904b5b55a9425b8a31f91bcc321",
+        "libraries": [
+          "CoreFoundation",
+          "Python",
+          "libSystem.B.dylib"
+        ]
+      },
+      "x86_64": {
+        "uuid": "0E550576-33C6-37D4-980D-5855D9695C90",
+        "text_sha256": "aafd66af2c321a1032ffdbaea51ef446e7df7cd4b20fe53e4fdf6af362acadb2",
+        "libraries": [
+          "CoreFoundation",
+          "Python",
+          "libSystem.B.dylib"
+        ]
+      }
+    },
+    "_ssl": {
+      "arm64": {
+        "uuid": "EC11F13A-2454-3F4F-8F34-C103F759E39C",
+        "text_sha256": "cc1a1876b4768bb756fdab80b0ee02bbd61335b8a691ab54d54b30facb36c350",
+        "libraries": [
+          "libSystem.B.dylib",
+          "libcrypto.3.dylib",
+          "libssl.3.dylib"
+        ]
+      },
+      "x86_64": {
+        "uuid": "EF2FE398-CDCB-3157-A85E-C7A7B9FE0363",
+        "text_sha256": "268f9ae5a0a36be33df17288f1127a9b638ba4b949e59e0c7ebc305e297a91d9",
+        "libraries": [
+          "libSystem.B.dylib",
+          "libcrypto.3.dylib",
+          "libssl.3.dylib"
+        ]
+      }
+    },
+    "_hashlib": {
+      "arm64": {
+        "uuid": "AD061D66-6A1C-361A-82C0-DE52FA9F4D62",
+        "text_sha256": "e4a639cfc1c47ad19dc15df97af33995d04890a65b3a85f9f4feffffab679450",
+        "libraries": [
+          "libSystem.B.dylib",
+          "libcrypto.3.dylib"
+        ]
+      },
+      "x86_64": {
+        "uuid": "C7653EA7-12DA-3F35-BE32-DF92306F1BDB",
+        "text_sha256": "9a75bef5504044fe0174a68a9157f5a1c81b317ce21bd73d71c4b8db25bf0236",
+        "libraries": [
+          "libSystem.B.dylib",
+          "libcrypto.3.dylib"
+        ]
+      }
+    },
+    "libssl.3.dylib": {
+      "arm64": {
+        "uuid": "383B0B1E-192E-3CBD-AB4C-BABA2AC081A2",
+        "text_sha256": "a2444f31576e1eee7adedcb8dce0751358a0e05433d94a568c76184484451657",
+        "libraries": [
+          "libSystem.B.dylib",
+          "libcrypto.3.dylib",
+          "libssl.3.dylib"
+        ]
+      },
+      "x86_64": {
+        "uuid": "9AD50596-2D14-3015-A48D-D2F62027628D",
+        "text_sha256": "eae94a1523d8110680700a6b00b2c023a57857fcae02cd3373a1a742f0ac6e99",
+        "libraries": [
+          "libSystem.B.dylib",
+          "libcrypto.3.dylib",
+          "libssl.3.dylib"
+        ]
+      }
+    },
+    "libcrypto.3.dylib": {
+      "arm64": {
+        "uuid": "183295A9-84E1-3460-9258-5B40C382DC03",
+        "text_sha256": "6d7f2d13eb8a5816203165ab20c276adbe78fa6623dff7e50d0c6a8e476070e0",
+        "libraries": [
+          "libSystem.B.dylib",
+          "libcrypto.3.dylib"
+        ]
+      },
+      "x86_64": {
+        "uuid": "BEF7329F-E5E8-3409-A15F-F9CA36DAFAAB",
+        "text_sha256": "71db2cc484201bdcbaa8aa5fe686ddfbb6e7c79670cf6bf55bcd3f8314dc1f3f",
+        "libraries": [
+          "libSystem.B.dylib",
+          "libcrypto.3.dylib"
+        ]
+      }
+    }
+  }
+}

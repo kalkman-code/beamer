@@ -5,6 +5,9 @@ from pathlib import Path
 from setuptools import setup
 
 
+# py2app 0.28.10 probes even excluded Tk; block its optional import to keep builds headless.
+sys.modules["_tkinter"] = None
+
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 
@@ -70,6 +73,8 @@ setup(
     options={
         "py2app": {
             "argv_emulation": False,
+            # AppKit owns every Mac view; py2app's unused Tk recipe creates a Tk interpreter.
+            "excludes": ["tkinter", "_tkinter"],
             # PyNaCl (nacl) ships a compiled _sodium extension reached through cffi; naming both
             # packages keeps their data files and submodules in the bundle.
             "packages": ["rumps", "cffi", "nacl"],

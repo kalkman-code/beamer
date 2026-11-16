@@ -35,6 +35,8 @@ class WindowsLaunchManifestTests(unittest.TestCase):
             })
         self.assertFalse(options.get("uac_admin", False))
         self.assertFalse(options.get("uac_uiaccess", False))
+        # A sign-in cleanup of %TEMP% must not delete the one-file DLLs before Qt loads.
+        self.assertEqual(options.get("runtime_tmpdir"), r"%LOCALAPPDATA%\Beamer\Runtime")
         self.assertIs(options["version"], versioninfo.VSVersionInfo.return_value)
         version = (source.parent / "VERSION").read_text(encoding="utf-8").strip()
         versioninfo.StringStruct.assert_has_calls([

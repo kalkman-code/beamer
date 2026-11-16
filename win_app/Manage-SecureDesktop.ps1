@@ -83,6 +83,43 @@ function Invoke-Sc([string[]]$Arguments) {
     if ($LASTEXITCODE -ne 0) { throw 'Secure desktop service configuration failed' }
 }
 
+function Get-ApprovedPeerAddresses([string]$Path, [string[]]$Ids) {
+    $settings = Get-Content -LiteralPath $Path -Raw | ConvertFrom-Json
+    $addresses = foreach ($id in $Ids) {
+        $peers = @($settings.peers | Where-Object { $_.id -ceq $id })
+        if ($peers.Count -ne 1 -or -not ($peers[0].host -is [string]) -or -not $peers[0].host.Trim()) {
+            throw 'Each approved paired PC needs a current network address'
+        }
+        $hostAddress = $peers[0].host.Trim()
+        $ip = $null
+        if ([Net.IPAddress]::TryParse($hostAddress, [ref]$ip)) {
+            $resolved = @($ip)
+        } elseif ([Uri]::CheckHostName($hostAddress) -eq [UriHostNameType]::Dns) {
+            $resolved = @([Net.Dns]::GetHostAddresses($hostAddress))
+        } else {
+            throw 'An approved PC address cannot be a subnet or firewall keyword'
+        }
+        if (-not $resolved.Count) { throw 'The approved PC address did not resolve' }
+        foreach ($address in $resolved) {
+            if ($address.IsIPv4MappedToIPv6) { $address = $address.MapToIPv4() }
+            $bytes = $address.GetAddressBytes()
+            if ([Net.IPAddress]::IsLoopback($address) -or $address.Equals([Net.IPAddress]::Any) -or
+                $address.Equals([Net.IPAddress]::IPv6Any) -or $address.IsIPv6Multicast -or
+                ($bytes.Length -eq 4 -and ($bytes[0] -eq 0 -or $bytes[0] -ge 224))) {
+                throw 'Approve a paired PC with a unicast network address'
+            }
+            $address.ToString()
+        }
+    }
+    if (-not $addresses) { throw 'Select at least one paired PC address' }
+    @($addresses | Sort-Object -Unique)
+}
+
+function Enable-ApprovedPeerFirewall([string[]]$Addresses) {
+    # Apply the restriction before starting the service, including upgrades of Private-only rules.
+    Set-NetFirewallRule -DisplayName $RuleName -Profile Any -RemoteAddress $Addresses -Enabled True | Out-Null
+}
+
 if ($Action -eq 'Status') {
     $service = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
     [pscustomobject]@{Installed = [bool]$service; State = if ($service) { [string]$service.Status } else { 'Absent' };
@@ -127,7 +164,7 @@ switch ($Action) {
         Invoke-Sc @('sdset', $ServiceName, 'D:P(A;;CCLCSWRPWPDTLOCRRC;;;SY)(A;;CCDCLCSWRPWPDTLOCRSDRCWDWO;;;BA)(A;;CCLC;;;AU)')
         Get-NetFirewallRule -DisplayName $RuleName -ErrorAction SilentlyContinue | Remove-NetFirewallRule
         New-NetFirewallRule -DisplayName $RuleName -Direction Inbound -Protocol TCP -LocalPort 24822 `
-            -Action Allow -Profile Private -RemoteAddress LocalSubnet -Program $Executable -Enabled False | Out-Null
+            -Action Allow -Profile Any -RemoteAddress 127.0.0.1 -Program $Executable -Enabled False | Out-Null
         Write-Output 'Secure desktop installed disabled; no peer has gained access'
     }
     'Grant' {
@@ -136,10 +173,12 @@ switch ($Action) {
         Assert-ProtectedTree $InstallDir
         Assert-ProtectedTree $StateDir -Confidential
         Stop-OwnedService
+        Disable-NetFirewallRule -DisplayName $RuleName
         try {
+            $addresses = @(Get-ApprovedPeerAddresses $SettingsPath $PeerIds)
             & $Executable --enrol --settings $SettingsPath --peer-id @PeerIds
             if ($LASTEXITCODE -ne 0) { throw 'Secure desktop enrolment refused' }
-            Enable-NetFirewallRule -DisplayName $RuleName
+            Enable-ApprovedPeerFirewall $addresses
             Set-Service -Name $ServiceName -StartupType Automatic
             Start-Service -Name $ServiceName
             (Get-Service -Name $ServiceName).WaitForStatus('Running', [TimeSpan]::FromSeconds(15))

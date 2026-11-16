@@ -173,9 +173,9 @@ when Same on all machines is on.
 
 ## Known limits
 
-- **The Windows secure desktop cannot be driven.** UAC prompts, Ctrl+Alt+Del and the lock screen
-  refuse input from any app by design, and Ctrl+Alt+Del cannot be sent at all. Use the PC's own
-  keyboard there.
+- **Windows secure desktop support is optional.** Select the secure desktop service in the
+  Windows installer, then approve each paired PC before it can send input to Windows permission
+  prompts or the lock screen. Without this service and approval, use the PC's own keyboard there.
 - **Files do not cross**, only text and images, up to 256KB of text and an 8MB image.
 - **AltGr is out of reach from the Mac.**
 - **Linux on Wayland has fewer controls.** Its limits are listed under [Linux](#linux).
@@ -378,7 +378,8 @@ shortcut. Quit Beamer from the tray before installing a newer version over it; o
 runs at a time.
 
 Beamer launches with normal user permissions and no administrator prompt. It controls normal
-windows; administrator windows and Windows permission prompts need local input. Overview's
+windows; the optional secure desktop service handles Windows permission prompts and the lock
+screen for approved paired PCs. Without that service, these need local input. Overview's
 start-at-sign-in switch uses the same normal permissions. Upgrading lowers an existing elevated
 startup task while preserving whether startup was enabled.
 
@@ -389,11 +390,11 @@ mark a trusted network Private in Windows Settings. Custom input ports need a ma
 configured by an administrator. If a SYSTEM or administrator window blocks input later, click a
 normal window locally to continue.
 
-**The lock screen.** No elevation lets an app type there: it is the Winlogon secure desktop, which
-admits only SYSTEM. On a PC with the author's separate unlock credential provider installed (not
-part of this repository), switching to a locked PC signals that provider, which unlocks it in about
-four seconds; input sent meanwhile is dropped. Beamer only signals the provider and never holds a
-password. Without it, the Mac reports `Windows is locked — unlock it at the PC`.
+**The lock screen.** The optional secure desktop service runs as SYSTEM and can accept input
+from paired PCs approved by an administrator. The installer leaves this option unticked, and the
+service stays disabled until a PC is approved. Its firewall rule covers Public and Private
+networks, restricted to the approved PCs' addresses. Beamer does not store your Windows password;
+type it when Windows asks. Without the service and approval, unlock the PC locally.
 
 </details>
 
