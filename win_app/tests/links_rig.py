@@ -101,6 +101,9 @@ class FakeLinks:
         self.sent.append((peer, message))
         return True
 
+    def discard_clipboard(self):
+        pass
+
     def send_input(self, peer, message):
         if peer not in self.up_set or self.fail_input:
             return False

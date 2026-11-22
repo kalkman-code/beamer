@@ -30,7 +30,7 @@ An input event that returns nothing is swallowed or held: the app suppresses it.
 is refused, times out or is let go.
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Optional
 
 TAKE_WAIT = 1.0         # seconds a take waits for its `accept`
@@ -48,16 +48,19 @@ _UPS = ("keyup", "mouseup")
 class Send:
     peer: str
     message: dict
+    clipboard_epoch: Optional[int] = field(default=None, compare=False, repr=False)
 
 
 @dataclass(frozen=True)
 class SendClipboard:
     peer: str
+    clipboard_epoch: int = field(default=0, compare=False, repr=False)
 
 
 @dataclass(frozen=True)
 class SetClipboard:
     message: dict
+    clipboard_epoch: int = field(default=0, compare=False, repr=False)
 
 
 @dataclass(frozen=True)
@@ -125,7 +128,7 @@ def _release(message):
 
 
 class Owner:
-    def __init__(self, own_id, clock, resistance_px=120):
+    def __init__(self, own_id, clock, resistance_px=120, *, share_clipboard=True):
         self.own_id = own_id
         self.resistance_px = resistance_px  # None for a phone, which has no hand at an edge
         self.route = 0
@@ -145,6 +148,8 @@ class Owner:
         self._here = set()                  # presses let through here, whose release is let through too
         self._let_go = {}                   # peer: when it was let go, for its one clipboard
         self._clipboard_at = set()          # peers known to hold this machine's clipboard as it is
+        self.share_clipboard = share_clipboard
+        self._clipboard_epoch = 0
 
     @property
     def away(self):
@@ -356,6 +361,20 @@ class Owner:
 
     # Clipboard
 
+    def set_clipboard_sharing(self, enabled):
+        """Invalidate pending transfers and let-go replies when the local setting changes."""
+        if enabled == self.share_clipboard:
+            return False
+        self.share_clipboard = enabled
+        self._clipboard_epoch += 1
+        self._let_go.clear()
+        self.clipboard_changed()
+        return True
+
+    def allows_clipboard(self, epoch=None):
+        """An asynchronous action can run only under the setting that produced it."""
+        return self.share_clipboard and (epoch is None or epoch == self._clipboard_epoch)
+
     def clipboard_changed(self):
         self._clipboard_at = set()
 
@@ -374,10 +393,10 @@ class Owner:
             return []
         self._let_go.pop(peer)
         self._clipboard_at = {peer}
-        actions = [SetClipboard(message)]
+        actions = [SetClipboard(message, self._clipboard_epoch)]
         if self.on is not None:
             self._clipboard_at.add(self.on)
-            actions.append(Send(self.on, message))
+            actions.append(Send(self.on, message, self._clipboard_epoch))
         return actions
 
     def expects_clipboard(self, peer, began):
@@ -385,13 +404,13 @@ class Owner:
         by `clipboard_arrived`'s own rule, however long it then took to arrive. A link asks this,
         without the app's lock, before it reads a frame too large for any other message."""
         let_go = self._let_go.get(peer)
-        return let_go is not None and 0 <= began - let_go <= CLIPBOARD_AFTER
+        return self.share_clipboard and let_go is not None and 0 <= began - let_go <= CLIPBOARD_AFTER
 
     def _clipboard_to(self, peer):
-        if peer in self._clipboard_at:
+        if not self.share_clipboard or peer in self._clipboard_at:
             return []
         self._clipboard_at.add(peer)
-        return [SendClipboard(peer)]
+        return [SendClipboard(peer, self._clipboard_epoch)]
 
     # The pieces
 
@@ -421,7 +440,8 @@ class Owner:
         """The owner's releases of everything it pressed there, then the let-go `focus`."""
         pressed = self._pressed.pop(peer, {})
         self._swallow.update(pressed)
-        self._let_go[peer] = self._clock()
+        if self.share_clipboard:
+            self._let_go[peer] = self._clock()
         return [Send(peer, release) for release in pressed.values()] + [
             Send(peer, {"type": "focus", "data": {"route": self.route, "target": target}})]
 

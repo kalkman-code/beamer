@@ -9,6 +9,7 @@ import sys
 import threading
 import time
 import unittest
+from dataclasses import replace
 from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
@@ -567,6 +568,24 @@ class ComingHomeTests(Base):
 
 
 class ClipboardTests(Base):
+    def test_clipboard_can_be_disabled_live_without_interrupting_keyboard_or_mouse(self):
+        self.up()
+        self.controller.apply_settings(replace(self.controller.cfg, share_clipboard=False))
+        self.assertTrue(self.controller.set_redirecting(True))
+        self.controller._process_outbound(protocol.key_msg(protocol.MSG_KEYDOWN, "a"))
+        self.controller._process_outbound(protocol.mousemove_msg(3, 4))
+        self.assertEqual([message["type"] for message in self.link.sent],
+                         [protocol.MSG_KEYDOWN, protocol.MSG_MOUSEMOVE])
+        self.assertFalse(any(message["type"] == protocol.MSG_CLIPBOARD for message in self.link.posted))
+
+        self.assertTrue(self.controller.set_redirecting(False))
+        self.link.arrives(self.controller, protocol.clipboard_msg("remote copy"), began=self.clock.value)
+        self.assertEqual(self.clipboard.set_calls, [])
+
+        self.controller.apply_settings(replace(self.controller.cfg, share_clipboard=True))
+        self.assertTrue(self.controller.set_redirecting(True))
+        self.assertIn(protocol.clipboard_msg("hello"), self.link.posted)
+
     def test_unsendable_clipboards_are_read_once_until_the_next_local_copy(self):
         for text, image, caps in ((None, None, CAPS), ("", None, CAPS),
                                   ("x" * (protocol.CLIPBOARD_MAX_BYTES + 1), None, CAPS),

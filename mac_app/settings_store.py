@@ -133,6 +133,7 @@ def editable_default_config():
         appearance="system",
         ignored_inputs=[],
         mouse_only=False,
+        share_clipboard=True,
     )
 
 
@@ -173,6 +174,7 @@ def config_to_raw(cfg):
         "appearance": cfg.appearance,
         "ignored_inputs": list(cfg.ignored_inputs),
         "mouse_only": cfg.mouse_only,
+        "share_clipboard": cfg.share_clipboard,
     }
 
 
@@ -898,6 +900,8 @@ class SettingsStore:
             raise SettingsError("reverse_scroll must be true or false")
         if not isinstance(cfg.mouse_only, bool):
             raise SettingsError("mouse_only must be true or false")
+        if not isinstance(cfg.share_clipboard, bool):
+            raise SettingsError("share_clipboard must be true or false")
         try:
             ignored.validate(cfg.ignored_inputs)
         except ValueError as exc:

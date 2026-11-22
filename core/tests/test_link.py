@@ -577,6 +577,34 @@ class LinkLiveTests(unittest.TestCase):
         time.sleep(0.2)
         self.assertEqual(self.machine.clipboard.set_calls, [])
 
+    def test_clipboard_can_be_toggled_while_the_same_link_carries_input(self):
+        self.take()
+        self.machine.responder.set_clipboard_sharing(False)
+        self.assertTrue(self.link.post(protocol.clipboard_msg("ignored")))
+        self.assertTrue(self.link.send_input(protocol.key_msg(protocol.MSG_KEYDOWN, "a")))
+        self.assertTrue(self.link.send_input(protocol.mousemove_msg(3, 4)))
+        self.assertTrue(wait_for(lambda: self.link._last_ack_seq == 2))
+        self.assertEqual(self.machine.injected(), [("key", "a", True), ("move", 3, 4)])
+        self.assertEqual(self.machine.clipboard.set_calls, [])
+
+        self.machine.responder.set_clipboard_sharing(True)
+        self.assertTrue(self.link.post(protocol.clipboard_msg("accepted")))
+        self.assertTrue(wait_for(lambda: self.machine.clipboard.set_calls == [("accepted", None)]))
+        self.assertEqual(len(self.side.ups), 1)
+
+    def test_discarding_clipboard_keeps_queued_input_and_control_messages(self):
+        self.take()
+        self.link._stall.set()
+        self.assertTrue(self.link.post(protocol.clipboard_msg("pending copy")))
+        self.assertTrue(self.link.send_input(protocol.key_msg(protocol.MSG_KEYDOWN, "a")))
+        focus = protocol.focus_v6(2, HERE, resistance_px=120, reach=[])
+        self.assertTrue(self.link.post(focus))
+        self.assertGreater(self.link._queued_bytes, 0)
+        self.link.discard_clipboard()
+        self.assertEqual([message["type"] for message in self.link._outbox],
+                         [protocol.MSG_KEYDOWN, protocol.MSG_FOCUS])
+        self.assertEqual(self.link._queued_bytes, 0)
+
     def test_settings_are_not_sent_to_a_peer_without_the_capability(self):
         self.link._caps = frozenset()
         self.assertTrue(self.link.post(protocol.settings_msg({"a": 1})))

@@ -430,6 +430,11 @@ class _Link:
             self.cond.notify_all()
             return True
 
+    def discard_clipboard(self) -> None:
+        with self.cond:
+            self.outbox = collections.deque(message for message in self.outbox
+                                            if message.get("type") != protocol.MSG_CLIPBOARD)
+
     def receive(self, message, size: int) -> bool:
         move = (protocol.read_input(message)
                 if isinstance(message, dict) and message.get("type") == protocol.MSG_MOUSEMOVE else None)
@@ -529,6 +534,8 @@ class LinkResponder:
     _available = None
     _secure_handover = None
     _max_frame_bytes = protocol.MAX_FRAME_BYTES
+    _share_clipboard = True
+    _clipboard_epoch = 0
 
     def __init__(
         self,
@@ -539,6 +546,7 @@ class LinkResponder:
         injector=None,
         desktop=None,
         clipboard=None,
+        share_clipboard=True,
         unlock=None,
         hardware: Optional[Callable[[str], Optional[str]]] = None,
         away: Optional[Callable[[], bool]] = None,
@@ -564,6 +572,7 @@ class LinkResponder:
         self._injector = injector
         self._desktop = desktop
         self._clipboard = clipboard
+        self._share_clipboard = share_clipboard
         self._unlock = unlock
         self._hardware = hardware
         self._available = available
@@ -1019,13 +1028,19 @@ class LinkResponder:
         try:
             while not link.closed.is_set():
                 frame = protocol.recv_frame(link.sock, self._max_frame_bytes)
+                clipboard_epoch = self._clipboard_epoch
                 decode_at = time.monotonic()
                 plain = link.session.open_raw(frame)
+                if len(plain) > protocol.SMALL_MESSAGE_BYTES and not self._allows_clipboard(clipboard_epoch):
+                    continue
                 if len(plain) > protocol.SMALL_MESSAGE_BYTES and self._owner is not link:
                     LOGGER.info("Dropped a %d byte frame from %s, which does not own this machine", len(plain), link.name)
                     continue
                 message = protocol.parse_message(plain)
                 link.timing.add("decode", time.monotonic() - decode_at)
+                if message.get("type") == protocol.MSG_CLIPBOARD:
+                    # A toggle can happen while this frame waits for dispatch.
+                    message.clipboard_epoch = clipboard_epoch
                 if not link.receive(message, len(plain)):
                     return
         except socket.timeout:
@@ -1686,7 +1701,7 @@ class LinkResponder:
         after = []
         if began:
             self._visit += 1
-            self._clipboard_mark = self._clipboard_stamp()
+            self._clipboard_mark = self._clipboard_stamp() if self._share_clipboard else None
             self._sent_home_for_lock = False
             self._locked_since = None
             self._owner_events.append(link.peer_id)
@@ -1705,7 +1720,7 @@ class LinkResponder:
         `refuse`. Returns what is left to do without the lock."""
         if link is None or self._owner is not link:
             return []
-        stamp = self._clipboard_stamp() if let_go else None
+        stamp = self._clipboard_stamp() if let_go and self._share_clipboard else None
         self._owner = None
         self._owner_input_at = None
         self._reach = frozenset()
@@ -1717,8 +1732,9 @@ class LinkResponder:
         self._owner_events.append(None)
         after = []
         if let_go:
-            visit = self._visit
-            after.append(lambda: self._clipboard_later(lambda: self._clipboard_back(link, visit, stamp)))
+            if self._share_clipboard:
+                visit, epoch = self._visit, self._clipboard_epoch
+                after.append(lambda: self._clipboard_later(lambda: self._clipboard_back(link, visit, stamp, epoch)))
         elif why is not None and not link.closed.is_set():
             link.post(protocol.refuse_msg(link.route, why))
         return after
@@ -1802,7 +1818,26 @@ class LinkResponder:
 
     # The clipboard (section 5)
 
+    def set_clipboard_sharing(self, enabled: bool) -> None:
+        with self._lock:
+            if enabled == self._share_clipboard:
+                return
+            self._share_clipboard = enabled
+            self._clipboard_epoch += 1
+            # A copy made while sharing was off does not become this visit's return clipboard.
+            self._clipboard_mark = self._clipboard_stamp() if enabled and self._owner is not None else None
+            if not enabled:
+                for link in self._links.values():
+                    link.discard_clipboard()
+
+    def _allows_clipboard(self, epoch) -> bool:
+        return self._share_clipboard and (epoch is None or epoch == self._clipboard_epoch)
+
     def _on_clipboard(self, link: _Link, message) -> None:
+        with self._lock:
+            if not self._allows_clipboard(getattr(message, "clipboard_epoch", None)) or self._owner is not link:
+                return
+            visit, epoch = self._visit, self._clipboard_epoch
         read = protocol.read_clipboard(message)
         if read is None:
             return
@@ -1810,11 +1845,7 @@ class LinkResponder:
         image = read["image"] if "clipboard_image" in link.own_caps else None
         if text is None and image is None:
             return
-        with self._lock:
-            if self._owner is not link:
-                return
-            visit = self._visit
-        self._clipboard_later(lambda: self._set_clipboard(link, visit, text, image), (id(link), visit))
+        self._clipboard_later(lambda: self._set_clipboard(link, visit, text, image, epoch), (id(link), visit, epoch))
 
     def _clipboard_later(self, job, write=None) -> None:
         with self._clipboard_jobs_lock:
@@ -1843,9 +1874,11 @@ class LinkResponder:
             except Exception:
                 LOGGER.exception("A clipboard job failed")
 
-    def _set_clipboard(self, link: _Link, visit: int, text, image) -> None:
+    def _set_clipboard(self, link: _Link, visit: int, text, image, epoch=None) -> None:
         """A write begins only while its sender still owns this machine in the visit it was sent in;
         one already in flight when the ownership ends is not taken back, as it cannot be."""
+        if not self._allows_clipboard(epoch):
+            return
         initial_stamp = self._clipboard_stamp()
         clipboard = self._clipboard_module()
         deadline = time.monotonic() + CLIPBOARD_RETRY_WINDOW_SECONDS
@@ -1856,6 +1889,8 @@ class LinkResponder:
                 if self._owner is not link or self._visit != visit or link.closed.is_set():
                     return
             if attempt and (initial_stamp is None or self._clipboard_stamp() != initial_stamp):
+                return
+            if not self._allows_clipboard(epoch):
                 return
             try:
                 written = clipboard.set_contents(text, image)
@@ -1868,7 +1903,7 @@ class LinkResponder:
                 write_stamp = getattr(clipboard, "write_stamp", None)
                 stamp = write_stamp() if write_stamp is not None else self._clipboard_stamp()
                 with self._lock:
-                    if self._visit == visit:
+                    if self._visit == visit and self._share_clipboard:
                         self._clipboard_mark = stamp
                 return
             if attempt < CLIPBOARD_RETRY_ATTEMPTS - 1:
@@ -1885,7 +1920,7 @@ class LinkResponder:
             LOGGER.exception("Could not read the clipboard's change stamp")
             return None
 
-    def _clipboard_back(self, link: _Link, visit: int, stamp) -> None:
+    def _clipboard_back(self, link: _Link, visit: int, stamp, epoch=None) -> None:
         """A let-go owner gets this machine's clipboard only when something other than its own
         `clipboard` messages changed it during the visit, so an idle machine gives nothing away;
         and never once another ownership has begun or the clipboard changed while it was read, so
@@ -1894,7 +1929,7 @@ class LinkResponder:
         yet): what changed during it cannot be told. The mark is read here, after any write the
         owner had queued has updated it."""
         with self._lock:
-            if self._visit != visit:
+            if not self._allows_clipboard(epoch) or self._visit != visit:
                 return
             mark = self._clipboard_mark
         if stamp is None or mark is None or stamp == mark:
@@ -1905,7 +1940,8 @@ class LinkResponder:
                 LOGGER.warning("Could not read the clipboard for %s", link.name)
                 return
             with self._lock:
-                if self._visit != visit or self._owner is not None or link.closed.is_set():
+                if (not self._allows_clipboard(epoch) or self._visit != visit
+                        or self._owner is not None or link.closed.is_set()):
                     return
             # A retry belongs to the same copy, never a local copy made after letting go.
             if self._clipboard_stamp() != stamp:
@@ -1930,7 +1966,8 @@ class LinkResponder:
         if text is None and image is None:
             return
         with self._lock:
-            if self._visit == visit and self._owner is None and self._clipboard_stamp() == stamp:
+            if (self._allows_clipboard(epoch) and self._visit == visit and self._owner is None
+                    and self._clipboard_stamp() == stamp):
                 link.post(protocol.clipboard_msg(text, image))
 
     # Landing and the lock screen

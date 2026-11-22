@@ -103,6 +103,7 @@ class Config:
     # Keys and buttons that stay on this Mac while its input is on Windows; see ignored.py.
     ignored_inputs: list = field(default_factory=list)
     mouse_only: bool = False
+    share_clipboard: bool = True
 
 
 def _stamp(value) -> int:
@@ -224,4 +225,5 @@ def parse_config(raw: dict) -> Config:
         language=raw.get("language") if raw.get("language") in ("auto", "en", "it") else "auto",
         ignored_inputs=raw.get("ignored_inputs", []),
         mouse_only=raw.get("mouse_only", False),
+        share_clipboard=raw.get("share_clipboard", True),
     )

@@ -1556,6 +1556,7 @@ class ControlWindow(AppKit.NSObject):
         self.scroll_numeral.set(str(self.scroll_ruler.value))
         self.reverse_scroll_box.value = raw["reverse_scroll"]
         self.mouse_only_box.value = raw["mouse_only"]
+        self.clipboard_box.value = raw["share_clipboard"]
         self.appearance_select.value = raw["appearance"]
         self.language_select.value = raw["language"]
         self._apply_appearance(raw["appearance"])
@@ -3244,7 +3245,7 @@ class ControlWindow(AppKit.NSObject):
         self.mouse_only_box = widgets.Switch(tr("Mouse only"), on_change=self._changed)
         module.add(widgets.eyebrow(tr("Keyboard sharing")))
         module.add(self.mouse_only_box.view)
-        module.add(widgets.note(tr("Keep this machine's keyboard here. Pointer and clipboard sharing stay on.")).view)
+        module.add(widgets.note(tr("Keep this machine's keyboard here while sharing the pointer.")).view)
         widgets.add(body, module.view)
         widgets.add(body, self._modifier_module().view)
         widgets.add(body, self._ignored_module().view)
@@ -3346,7 +3347,21 @@ class ControlWindow(AppKit.NSObject):
             "This Mac's pointer always hides while it drives another machine. On, it also hides after another "
             "machine stops driving it, until its own mouse or trackpad moves."
         )).view)
+        self.clipboard_box = widgets.Switch(tr("Share clipboard"), on_change=self._set_share_clipboard)
+        self.clipboard_box.value = self.controller.cfg.share_clipboard
+        module.add(self.clipboard_box.view)
+        module.add(widgets.note(tr("Sync text and images with this machine in both directions.")).view)
         return module
+
+    @objc.python_method
+    def _set_share_clipboard(self, on):
+        try:
+            cfg = self.settings_store.save(config_to_raw(replace(self.controller.cfg, share_clipboard=bool(on))))
+        except SettingsError as exc:
+            self.clipboard_box.value = self.controller.cfg.share_clipboard
+            self._say(str(exc), "fault")
+            return
+        self.controller.apply_settings(cfg)
 
     @objc.python_method
     def _set_hide_idle_pointer(self, on):

@@ -392,6 +392,19 @@ class CrossingPageTest(unittest.TestCase):
         self.assertFalse(self.page.mouse_only_switch.isChecked())
         self.assertFalse(self.page.sender._ignore_gate.mouse_only)
 
+    def test_clipboard_switch_saves_and_applies_in_both_directions(self):
+        self.page.sender.update_config(self.page._config)
+        self.assertTrue(self.page.clipboard_switch.isChecked())
+        self.assertFalse(self.page.clipboard_switch.isHidden())
+        self.page.clipboard_switch.click()
+        self.assertFalse(app_config.load_config(self.path).share_clipboard)
+        self.assertFalse(self.page.sender._owner.allows_clipboard())
+        self.assertFalse(self.page.server._share_clipboard)
+        self.assertFalse(self.page._config.mouse_only)
+        self.page.clipboard_switch.click()
+        self.assertTrue(self.page.sender._owner.allows_clipboard())
+        self.assertTrue(self.page.server._share_clipboard)
+
     def test_fixture_releases_window_before_the_next_case(self):
         from shiboken6 import isValid
 

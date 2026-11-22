@@ -149,19 +149,13 @@ class _GrantBook(receiver.PeerBook):
         return False
 
 
-class _NoClipboard:
-    @staticmethod
-    def change_stamp():
-        return None
-
-
 class _SecureReceiver(receiver.LinkResponder):
     def __init__(self, policy, *, injector, desktop, available, status_callback):
         self._policy = policy
         self._desktop_available = available
         super().__init__(
             _GrantBook(policy), policy.identity, status_callback=status_callback,
-            injector=injector, desktop=desktop, clipboard=_NoClipboard(),
+            injector=injector, desktop=desktop, share_clipboard=False,
             available=self._ready, max_frame_bytes=MAX_FRAME_BYTES,
         )
 
@@ -240,9 +234,6 @@ class _SecureReceiver(receiver.LinkResponder):
         with self._lock:
             if self._arriving_visit == visit:
                 self._arriving_visit = None
-
-    def _clipboard_back(self, link, mark_or_visit, visit=None):
-        return None
 
 
 def create_receiver(policy, *, injector, desktop, available, status_callback):

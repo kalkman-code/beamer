@@ -867,6 +867,17 @@ class OutboundLink:
             self._cond.notify()
             return True
 
+    def discard_clipboard(self):
+        """Drop clipboard frames that the writer has yet to take from the queue."""
+        with self._cond:
+            kept = collections.deque(message for message in self._outbox
+                                     if message.get("type") != protocol.MSG_CLIPBOARD)
+            if len(kept) != len(self._outbox):
+                self._queued_bytes -= sum(_weight(message) for message in self._outbox
+                                          if message.get("type") == protocol.MSG_CLIPBOARD)
+                self._outbox = kept
+                self._cond.notify_all()
+
     def _write(self, sock, session):
         try:
             while True:

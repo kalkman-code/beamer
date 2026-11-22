@@ -1710,6 +1710,10 @@ msgid "Hide the pointer on the machine not in use"
 msgstr ""
 
 #: mac_app/kvm_bridge_app.py win_app/kvm_bridge_win.py
+msgid "Share clipboard"
+msgstr ""
+
+#: mac_app/kvm_bridge_app.py win_app/kvm_bridge_win.py
 msgid "Same ways on every machine"
 msgstr ""
 
@@ -2273,7 +2277,7 @@ msgid "System follows your Mac's light or dark setting."
 msgstr ""
 
 #: mac_app/kvm_bridge_app.py win_app/kvm_bridge_win.py
-msgid "Keep this machine's keyboard here. Pointer and clipboard sharing stay on."
+msgid "Keep this machine's keyboard here while sharing the pointer."
 msgstr ""
 
 #: mac_app/kvm_bridge_app.py
@@ -2286,6 +2290,10 @@ msgstr ""
 
 #: mac_app/kvm_bridge_app.py
 msgid "This Mac's pointer always hides while it drives another machine. On, it also hides after another machine stops driving it, until its own mouse or trackpad moves."
+msgstr ""
+
+#: mac_app/kvm_bridge_app.py win_app/kvm_bridge_win.py
+msgid "Sync text and images with this machine in both directions."
 msgstr ""
 
 #: mac_app/kvm_bridge_app.py

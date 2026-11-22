@@ -431,13 +431,20 @@ class LinkSender:
         self._ignore_gate.configure(getattr(config, "ignored_inputs", None) or (),
                                     mouse_only=self._mouse_only_supported and getattr(config, "mouse_only", False))
         own = protocol.read_id(getattr(config, "machine_id", "")) if config is not None else None
+        share_clipboard = getattr(config, "share_clipboard", True)
         with self._lock:
             if own is not None and own != self._own_id:
                 self._own_id = own
                 self._owner = owner_module.Owner(own, self._clock, self._resistance())
             elif self._owner is not None:
                 self._owner.resistance_px = self._resistance()
+            self.set_clipboard_sharing(share_clipboard)
         self.refresh()
+
+    def set_clipboard_sharing(self, enabled: bool) -> None:
+        with self._lock:
+            if self._owner is not None and self._owner.set_clipboard_sharing(enabled) and not enabled:
+                self.links.discard_clipboard()
 
     def refresh(self) -> None:
         """Reads the peers and zones as the app holds them now, brings the links in step and
@@ -1052,6 +1059,8 @@ class LinkSender:
                     self._queue(actions)
                 self._report(actions)
         elif kind == protocol.MSG_CLIPBOARD:
+            if not self._owner.allows_clipboard():
+                return
             read = protocol.read_clipboard(message)
             if read is not None:
                 # Rebuilt from what was read: the owner sends it on to the machine input is on.
@@ -1216,7 +1225,7 @@ class LinkSender:
         time, in the order decided, on a thread of their own, so a read never overtakes a write
         decided before it."""
         if isinstance(action, owner_module.SetClipboard):
-            self._on_clipboard(lambda message=action.message: self._set_clipboard(message))
+            self._on_clipboard(lambda: self._set_clipboard(action.message, action.clipboard_epoch))
             return
         peer = action.peer
         if isinstance(action, owner_module.Drop):
@@ -1228,6 +1237,8 @@ class LinkSender:
         generation = stamp = None
         if isinstance(action, owner_module.SendClipboard):
             with self._lock:
+                if not self._owner.allows_clipboard(action.clipboard_epoch):
+                    return
                 stamp = self._clipboard_stamp
                 generation = self._owner._visit_route
         with self._clip_lock:
@@ -1247,26 +1258,29 @@ class LinkSender:
             if isinstance(action, owner_module.SendClipboard):
                 waiting = self._clip_wait[peer] = collections.deque()
                 try:
-                    self._on_clipboard_locked(lambda peer=peer: self._clipboard_then_rest(peer, waiting, generation, stamp))
+                    self._on_clipboard_locked(lambda: self._clipboard_then_rest(
+                        peer, waiting, generation, stamp, action.clipboard_epoch))
                 except RuntimeError:
                     # No thread at shutdown: nothing must wait behind a read that never starts.
                     del self._clip_wait[peer]
                     raise
                 return
-        self._send(peer, action.message)
+        self._send(peer, action.message, action.clipboard_epoch)
 
-    def _clipboard_then_rest(self, peer: bytes, waiting, generation=None, stamp=None) -> None:
+    def _clipboard_then_rest(self, peer: bytes, waiting, generation, stamp, epoch) -> None:
         """The clipboard for `peer`, then what `waiting` held behind it, in order. `waiting` belongs to
         the link it was made on: once that link is lost (`_forget_held`) none of it is sent, as the
         machine that reconnects will be taken afresh. A clipboard asked for again takes its turn
         among the clipboard's other work, behind any write decided before it."""
         sent = False
-        current_stamp = self._clipboard_stamp_now()
+        current_stamp = self._clipboard_stamp_now() if self._owner.allows_clipboard(epoch) else None
         if current_stamp is not None and current_stamp == self._clipboard_written_stamp:
             # A known peer write queued before this read may replace its original source stamp.
             stamp = current_stamp
         try:
             for attempt in range(3):
+                if not self._owner.allows_clipboard(epoch):
+                    break
                 if generation is not None and (self._owner.on != peer or self._owner._visit_route != generation):
                     break
                 if attempt:
@@ -1274,7 +1288,7 @@ class LinkSender:
                     if stamp is None or self._clipboard_stamp_now() != stamp:
                         break
                 try:
-                    sent = self._send_clipboard(peer, waiting, generation, stamp)
+                    sent = self._send_clipboard(peer, waiting, generation, stamp, epoch)
                 except Exception:
                     if attempt == 2:
                         LOGGER.exception("The clipboard could not be sent")
@@ -1283,7 +1297,8 @@ class LinkSender:
         finally:
             if sent is False:
                 with self._lock:
-                    self._owner.clipboard_failed(peer)
+                    if self._owner.allows_clipboard(epoch):
+                        self._owner.clipboard_failed(peer)
         while True:
             with self._clip_lock:
                 if self._clip_wait.get(peer) is not waiting:
@@ -1294,10 +1309,11 @@ class LinkSender:
                 action = waiting.popleft()
                 if isinstance(action, tuple):
                     action, generation, stamp = action
-                    self._on_clipboard_locked(lambda peer=peer: self._clipboard_then_rest(peer, waiting, generation, stamp))
+                    self._on_clipboard_locked(lambda: self._clipboard_then_rest(
+                        peer, waiting, generation, stamp, action.clipboard_epoch))
                     return
             try:
-                self._send(peer, action.message)
+                self._send(peer, action.message, action.clipboard_epoch)
             except Exception:
                 LOGGER.exception("A message held behind the clipboard could not be sent")
 
@@ -1338,7 +1354,7 @@ class LinkSender:
             if held[0] == peer:
                 self._sent_names.pop(held, None)
 
-    def _send(self, peer: bytes, message: dict) -> None:
+    def _send(self, peer: bytes, message: dict, clipboard_epoch=None) -> None:
         kind = message["type"]
         if kind == protocol.MSG_KEYDOWN and message.get("data", {}).get("key") == "tab":
             for transition in self._switcher_transition(peer):
@@ -1361,6 +1377,10 @@ class LinkSender:
             if not self.links.send_input(peer, message):
                 LOGGER.warning("input could not be sent to %s", self._name(peer))
                 self._send_failed(peer)
+        elif kind == protocol.MSG_CLIPBOARD:
+            with self._lock:
+                if self._owner.allows_clipboard(clipboard_epoch):
+                    self.links.post(peer, message)
         else:
             self.links.post(peer, message)
 
@@ -1429,6 +1449,8 @@ class LinkSender:
     def _note_clipboard(self) -> bool:
         """Under the lock, before anything that may send the clipboard: whether it changed by this
         PC's own hand since this PC last sent or set it, which the owner needs to know (section 5)."""
+        if not self._owner.allows_clipboard():
+            return False
         stamp = self._clipboard_stamp_now()
         if stamp is not None and stamp != self._clipboard_stamp:
             self._clipboard_stamp = stamp
@@ -1436,10 +1458,12 @@ class LinkSender:
             return True
         return False
 
-    def _send_clipboard(self, peer: bytes, waiting, generation=None, stamp=None) -> Optional[bool]:
+    def _send_clipboard(self, peer: bytes, waiting, generation, stamp, epoch) -> Optional[bool]:
         """True means posted, None means no supported content, False means failed or cancelled."""
         if generation is not None and (self._owner.on != peer or self._owner._visit_route != generation or
                                        (stamp is not None and self._clipboard_stamp_now() != stamp)):
+            return False
+        if not self._owner.allows_clipboard(epoch):
             return False
         try:
             clipboard = self._clipboard_module()
@@ -1466,9 +1490,13 @@ class LinkSender:
             image = None
         if not text and image is None:
             return None
-        return self.links.post(peer, protocol.clipboard_msg(text or None, image))
+        message = protocol.clipboard_msg(text or None, image)
+        with self._lock:
+            return self._owner.allows_clipboard(epoch) and self.links.post(peer, message)
 
-    def _set_clipboard(self, message: dict) -> None:
+    def _set_clipboard(self, message: dict, epoch=None) -> None:
+        if not self._owner.allows_clipboard(epoch):
+            return
         read = protocol.read_clipboard(message)
         if read is None or (read["text"] is None and read["image"] is None):
             return
@@ -1479,6 +1507,8 @@ class LinkSender:
                 time.sleep(0.05)
                 if started_stamp is None or self._clipboard_stamp_now() != started_stamp:
                     break
+            if not self._owner.allows_clipboard(epoch):
+                return
             try:
                 written = clipboard.set_contents(read["text"], read["image"])
             except Exception:
@@ -1884,6 +1914,12 @@ class LinkSet:
     def post(self, peer, message) -> bool:
         link = self._link(peer)
         return link is not None and link.post(message)
+
+    def discard_clipboard(self) -> None:
+        with self._lock:
+            links = list(self._links.values())
+        for link in links:
+            link.discard_clipboard()
 
     def send_input(self, peer, message) -> bool:
         link = self._link(peer)
