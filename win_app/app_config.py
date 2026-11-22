@@ -190,6 +190,7 @@ class Config:
     # Keys and buttons that stay on this PC while its input is on the Mac; see ignored.py.
     ignored_inputs: list = field(default_factory=list)
     mouse_only: bool = False
+    share_clipboard: bool = True
     # The window's own palette: follow Windows, or keep one. tokens.APPEARANCES is the home of
     # these three values.
     appearance: str = "system"
@@ -320,6 +321,8 @@ def validate_config(config: Config) -> None:
         raise ConfigError("reverse_scroll must be true or false")
     if not isinstance(config.mouse_only, bool):
         raise ConfigError("mouse_only must be true or false")
+    if not isinstance(config.share_clipboard, bool):
+        raise ConfigError("share_clipboard must be true or false")
     try:
         reconnect_interval_s = float(config.reconnect_interval_s)
     except (TypeError, ValueError) as exc:
@@ -438,6 +441,7 @@ def config_from_dict(raw: dict) -> Config:
             mac_resistance_px=int(raw.get("mac_resistance_px", 120)),
             ignored_inputs=raw.get("ignored_inputs", []),
             mouse_only=raw.get("mouse_only", False),
+            share_clipboard=raw.get("share_clipboard", True),
             appearance=raw.get("appearance") if raw.get("appearance") in tokens.APPEARANCES else "system",
             machine_id=raw.get("machine_id", "") or "",
             name=raw.get("name", "") or "",
@@ -524,6 +528,7 @@ def config_to_dict(config: Config) -> dict:
         "mac_resistance_px": int(config.mac_resistance_px),
         "ignored_inputs": list(config.ignored_inputs),
         "mouse_only": config.mouse_only,
+        "share_clipboard": config.share_clipboard,
         "appearance": config.appearance,
         "machine_id": config.machine_id,
         "name": config.name,

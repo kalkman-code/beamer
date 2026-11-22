@@ -1353,6 +1353,13 @@ class WindowsApplication(QWidget):
                "Beamer cannot hide the pointer after another machine stops driving this PC."), "note", wrap=True)
         wayland_pointer_note.setVisible(platform_parts.WAYLAND)
         module.body.addWidget(wayland_pointer_note)
+        self.clipboard_switch = widgets.Switch(tr("Share clipboard"))
+        self.clipboard_switch.setFont(theme.font(theme.TYPE["body"]))
+        self.clipboard_switch.setChecked(self._config.share_clipboard if self._config else True)
+        self.clipboard_switch.toggled.connect(self._set_share_clipboard)
+        module.body.addWidget(self.clipboard_switch)
+        module.body.addWidget(widgets.label(tr("Sync text and images with this machine in both directions."),
+                                            "note", wrap=True))
         self.wayland_crossing_note = widgets.label(
             tr("On Wayland Beamer cannot see a full-screen app, or a mouse button held before the pointer reaches an "
             "edge, so the edges are never held for one and a drag can cross."), "note", wrap=True)
@@ -1366,6 +1373,20 @@ class WindowsApplication(QWidget):
             widget.setVisible(self._idle_pointer is not None)
         self.wayland_crossing_note.setVisible(platform_parts.WAYLAND)
         return module
+
+    def _set_share_clipboard(self, enabled: bool) -> None:
+        if self._config is None:
+            return
+        previous = self._config.share_clipboard
+        self._config.share_clipboard = enabled
+        if not self._persist():
+            self._config.share_clipboard = previous
+            self.clipboard_switch.blockSignals(True)
+            self.clipboard_switch.setChecked(previous)
+            self.clipboard_switch.blockSignals(False)
+            return
+        self.server.set_clipboard_sharing(enabled)
+        self.sender.set_clipboard_sharing(enabled)
 
     def _admin_control(self, module) -> None:
         self.admin_switch = widgets.Switch(tr("Control administrator windows"))
@@ -3417,7 +3438,7 @@ class WindowsApplication(QWidget):
         self.mouse_only_switch.toggled.connect(self._mouse_only_changed)
         module.body.addWidget(self.mouse_only_switch)
         module.body.addWidget(widgets.label(
-            tr("Keep this machine's keyboard here. Pointer and clipboard sharing stay on."), "note", wrap=True
+            tr("Keep this machine's keyboard here while sharing the pointer."), "note", wrap=True
         ))
         # InputCapture owns the keyboard too, so retained keys cannot reach local Wayland apps.
         module.setVisible(not platform_parts.WAYLAND)
@@ -5181,6 +5202,7 @@ class WindowsApplication(QWidget):
             self.speed_readouts[key].setText(f"{slider.value()}%")
         for switch, value in ((self.reverse_scroll_switch, config.reverse_scroll),
                               (self.mouse_only_switch, config.mouse_only),
+                              (self.clipboard_switch, config.share_clipboard),
                               (self.updates_switch, config.check_updates),
                               (self.hide_switch, config.hide_addresses)):
             switch.blockSignals(True)
@@ -5245,6 +5267,7 @@ class WindowsApplication(QWidget):
         if self.server.listening and self._receiver_port != config.port:
             self.server.stop()
         self._receiver_port = config.port
+        self.server.set_clipboard_sharing(config.share_clipboard)
         self.server.start(config.port)
 
     def _start_sending(self, config: Config) -> None:

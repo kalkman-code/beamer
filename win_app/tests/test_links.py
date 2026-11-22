@@ -951,6 +951,45 @@ class MouseTests(unittest.TestCase):
 
 
 class ClipboardReliabilityTests(unittest.TestCase):
+    def test_clipboard_can_be_disabled_live_without_interrupting_keyboard_or_mouse(self):
+        rig = Rig(share_clipboard=False)
+        rig.sender.set_redirecting(True)
+        rig.accept_take()
+        rig.sender.on_key("a", True, 0x41, "a")
+        rig.sender.on_button("left", True)
+        self.assertTrue(rig.sent(B, protocol.MSG_KEYDOWN))
+        self.assertTrue(rig.sent(B, protocol.MSG_MOUSEDOWN))
+        self.assertEqual(rig.sent(B, protocol.MSG_CLIPBOARD), [])
+        self.assertFalse(rig.clipboard.get_started.is_set())
+
+        rig.sender.set_redirecting(False)
+        rig.inbound(B, protocol.clipboard_msg("remote copy", pngs.png()))
+        self.assertEqual(rig.clipboard.set_calls, [])
+
+        rig.sender.update_config(make_config(share_clipboard=True))
+        rig.sender.set_redirecting(True)
+        rig.accept_take()
+        self.assertEqual(rig.sent(B, protocol.MSG_CLIPBOARD), [protocol.clipboard_msg("here")])
+        rig.sender.set_redirecting(False)
+        rig.inbound(B, protocol.clipboard_msg("remote copy"))
+        self.assertEqual(rig.clipboard.set_calls, [("remote copy", None)])
+
+    def test_turning_off_during_a_clipboard_read_drops_its_result_and_keeps_input(self):
+        rig = Rig()
+        rig.clipboard.block_get = True
+        rig.sender.set_redirecting(True)
+        while not rig.sender._outbound.empty():
+            rig.sender._deliver(rig.sender._outbound.get_nowait())
+        try:
+            self.assertTrue(rig.clipboard.get_started.wait(1))
+            rig.sender.on_button("left", True)
+            rig.sender.set_clipboard_sharing(False)
+            rig.sender.set_clipboard_sharing(True)
+        finally:
+            rig.clipboard.release_get.set()
+        self.assertEqual(rig.sent(B, protocol.MSG_CLIPBOARD), [])
+        self.assertTrue(rig.sent(B, protocol.MSG_MOUSEDOWN))
+
     def test_unsendable_clipboards_are_read_once_until_the_next_local_copy(self):
         for text, image, caps in ((None, None, CAPS), ("", None, CAPS),
                                   ("x" * (protocol.CLIPBOARD_MAX_BYTES + 1), None, CAPS),

@@ -324,6 +324,10 @@ horizontal sign has flipped between releases.
 <details>
 <summary><strong>Clipboard</strong></summary>
 
+On Windows and Linux, turn off **Share clipboard** on the Overview page to stop text and images syncing to and from
+this machine while continuing to share its keyboard and mouse. The setting applies immediately
+and is saved on this machine. Clipboard sharing is on by default.
+
 The clipboard moves at the moment of a switch, ahead of the switch itself: switching to another
 machine carries the current machine's clipboard, and switching back carries the other machine's. Where it
 holds both an image and text, both cross and the pasting app picks. The caps keep the switch

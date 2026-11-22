@@ -6,6 +6,7 @@ from types import SimpleNamespace
 from unittest import mock
 
 from core import protocol, receiver
+from core.tests import pngs
 from core.tests.responder_harness import FakeClipboard, FakeInjector
 
 
@@ -35,6 +36,70 @@ class ClipboardReliability(unittest.TestCase):
         with self.responder._lock:
             after = self.responder._end_locked(self.link, let_go=True)
         self.responder._run(after)
+
+    def test_sharing_off_ignores_incoming_clipboard_and_does_not_return_local_copies(self):
+        self.responder.set_clipboard_sharing(False)
+        self.link.own_caps.add("clipboard_image")
+        with mock.patch.object(self.clipboard, "change_stamp", wraps=self.clipboard.change_stamp) as stamp:
+            self.responder._on_clipboard(self.link, protocol.clipboard_msg("incoming", pngs.png()))
+            self.return_clipboard()
+        stamp.assert_not_called()
+        self.assertEqual(self.clipboard.set_calls, [])
+        self.assertEqual(self.sent, [])
+        self.assertIsNone(self.responder._owner)
+
+    def test_reenabling_sharing_does_not_revive_an_inbound_write_queued_before_disabling(self):
+        self.responder._clipboard_running = True
+        self.responder._on_clipboard(self.link, protocol.clipboard_msg("stale incoming"))
+        self.responder.set_clipboard_sharing(False)
+        self.responder.set_clipboard_sharing(True)
+        self.responder._clipboard_worker()
+        self.assertEqual(self.clipboard.set_calls, [])
+
+        self.responder._clipboard_running = True
+        self.responder._on_clipboard(self.link, protocol.clipboard_msg("fresh incoming"))
+        self.responder._clipboard_worker()
+        self.assertEqual(self.clipboard.set_calls, [("fresh incoming", None)])
+        self.return_clipboard()
+        self.assertEqual(self.sent, [protocol.clipboard_msg("copied remotely")])
+
+    def test_reenabling_sharing_does_not_apply_clipboard_received_while_off(self):
+        self.responder.set_clipboard_sharing(False)
+        queued = self.read_ahead("clipboard while off")
+        self.responder.set_clipboard_sharing(True)
+
+        self.responder._clipboard_running = True
+        for message in queued:
+            self.responder._dispatch(self.link, message)
+        self.responder._clipboard_worker()
+
+        self.assertEqual(self.clipboard.set_calls, [])
+
+    def test_reenabling_sharing_does_not_revive_a_clipboard_waiting_for_dispatch(self):
+        queued = self.read_ahead("clipboard before toggle")
+        self.assertEqual(len(queued), 1)
+        self.responder.set_clipboard_sharing(False)
+        self.responder.set_clipboard_sharing(True)
+        queued += self.read_ahead("clipboard after toggle")
+
+        for message in queued:
+            self.responder._clipboard_running = True
+            self.responder._dispatch(self.link, message)
+            self.responder._clipboard_worker()
+
+        self.assertEqual(self.clipboard.set_calls, [("clipboard after toggle", None)])
+
+    def read_ahead(self, text):
+        queued = []
+        self.link.cond = threading.Condition()
+        self.link.sock = None
+        self.link.session = SimpleNamespace(open_raw=lambda frame: frame)
+        self.link.timing = SimpleNamespace(add=lambda *_: None)
+        self.link.receive = lambda message, _: queued.append(message) or True
+        frame = protocol.dumps_message(protocol.clipboard_msg(text))
+        with mock.patch.object(protocol, "recv_frame", side_effect=[frame, protocol.ConnectionClosed()]):
+            self.responder._read_ahead(self.link)
+        return queued
 
     def test_a_home_copy_before_the_queued_return_runs_is_not_sent(self):
         self.clipboard.copy("copied remotely")
