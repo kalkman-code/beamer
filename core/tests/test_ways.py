@@ -1599,3 +1599,35 @@ class PartOfTheEdgeIsOneChoiceWithTheEdge(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class SmallerDisplayContacts(unittest.TestCase):
+    """A smaller second screen scaled into its tile still meets the machine beside it."""
+
+    def compiled(self, own, other):
+        result = ways.compile_layout(settings(peer(A, "Ay")), {HERE: own, A: other})
+        self.assertTrue(result["accepted"])
+        return [(zone["kind"], zone.get("display"), zone.get("side")) for zone in result["settings"]["zones"]]
+
+    def test_a_rounding_error_on_a_smaller_screens_outer_edge_still_touches(self):
+        # 1920 + 1366 scaled into 255 units puts the small screen's right edge at 254.99999999999997.
+        own = {"x": 0, "y": 0, "w": 255, "h": 84, "displays": {
+            "main": {"x": 0, "y": 0, "w": 1920, "h": 1080}, "small": {"x": 1920, "y": 0, "w": 1366, "h": 768}}}
+        self.assertEqual(self.compiled(own, {"x": 255, "y": 0, "w": 100, "h": 50}), [("edge", "small", "right")])
+
+    def test_a_smaller_screen_on_the_peer_side_is_reached(self):
+        other = {"x": -255, "y": 0, "w": 255, "h": 84, "displays": {
+            "main": {"x": 0, "y": 0, "w": 1920, "h": 1080}, "small": {"x": 1920, "y": 0, "w": 1366, "h": 768}}}
+        contacts = ways.display_contacts({"x": 0, "y": 0, "w": 160, "h": 90}, other)
+        self.assertEqual([(target["display"], contact[0]) for _screen, contact, target in contacts], [("small", "left")])
+
+    def test_a_peer_snaps_flush_under_a_shorter_screen_and_crosses(self):
+        own = {"x": 0, "y": 0, "w": 240, "h": 77, "displays": {
+            "main": {"x": 0, "y": 0, "w": 2560, "h": 1440}, "small": {"x": 2560, "y": 0, "w": 1920, "h": 1080}}}
+        snapped = ways.snap_position({"x": 150, "y": 60, "w": 80, "h": 50}, HERE, {HERE: own})
+        self.assertEqual(snapped["y"], 58)  # the small screen's bottom is at 57.75
+        self.assertEqual(self.compiled(own, snapped), [("edge", "small", "bottom")])
+
+    def test_integer_tiles_a_unit_apart_still_do_not_touch(self):
+        self.assertIsNone(ways._rect_contact({"x": 0, "y": 0, "w": 10, "h": 10}, {"x": 11, "y": 0, "w": 10, "h": 10}))
+        self.assertTrue(ways._overlaps({"x": 0, "y": 0, "w": 10, "h": 10}, {"x": 9, "y": 0, "w": 10, "h": 10}))

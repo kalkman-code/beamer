@@ -259,18 +259,30 @@ def crossing_stretches(contact, own, thirds):
     return stretches
 
 
+# Display frames are scaled into their tile, so their edges are floats: a smaller screen's edge can
+# land a rounding error off its neighbour's integer edge (254.99999999999997 against 255), or between
+# two map units where no integer tile can sit flush (a shorter screen's bottom at 57.75). Edges this
+# close count as touching; anything that sinks in by more than CONTACT_EPS still overlaps.
+CONTACT_EPS = 1e-6
+CONTACT_SLACK = 1.0
+
+
+def _touching(gap):
+    return -CONTACT_EPS <= gap < CONTACT_SLACK
+
+
 def _rect_contact(a, b):
     ax, ay, aw, ah = (a[k] for k in ("x", "y", "w", "h")); bx, by, bw, bh = (b[k] for k in ("x", "y", "w", "h"))
     ar, ab, br, bb = ax+aw, ay+ah, bx+bw, by+bh
     along_y, along_x = min(ab, bb)-max(ay, by), min(ar, br)-max(ax, bx)
-    if br == ax and along_y > 0: return "left", max(ay, by), min(ab, bb)
-    if bx == ar and along_y > 0: return "right", max(ay, by), min(ab, bb)
-    if bb == ay and along_x > 0: return "top", max(ax, bx), min(ar, br)
-    if by == ab and along_x > 0: return "bottom", max(ax, bx), min(ar, br)
-    corners = {(ax, ay): "top_left", (ar, ay): "top_right", (ax, ab): "bottom_left", (ar, ab): "bottom_right"}
-    for point, corner in corners.items():
-        if point in ((bx, by), (bx+bw, by), (bx, by+bh), (bx+bw, by+bh)):
-            return "corner", corner, ""
+    if _touching(ax - br) and along_y > CONTACT_EPS: return "left", max(ay, by), min(ab, bb)
+    if _touching(bx - ar) and along_y > CONTACT_EPS: return "right", max(ay, by), min(ab, bb)
+    if _touching(ay - bb) and along_x > CONTACT_EPS: return "top", max(ax, bx), min(ar, br)
+    if _touching(by - ab) and along_x > CONTACT_EPS: return "bottom", max(ax, bx), min(ar, br)
+    horizontal = "left" if _touching(ax - br) else "right" if _touching(bx - ar) else None
+    vertical = "top" if _touching(ay - bb) else "bottom" if _touching(by - ab) else None
+    if horizontal and vertical:
+        return "corner", f"{vertical}_{horizontal}", ""
     return None
 
 
@@ -302,7 +314,9 @@ def side_contacts(own, peer):
 
 
 def _overlaps(a, b):
-    return a["x"] < b["x"]+b["w"] and b["x"] < a["x"]+a["w"] and a["y"] < b["y"]+b["h"] and b["y"] < a["y"]+a["h"]
+    eps = CONTACT_EPS
+    return (a["x"] < b["x"]+b["w"]-eps and b["x"] < a["x"]+a["w"]-eps
+            and a["y"] < b["y"]+b["h"]-eps and b["y"] < a["y"]+a["h"]-eps)
 
 
 def _display_frames(tile):
@@ -390,6 +404,25 @@ def snap_position(tile, own_id, layout, radius=12):
                        ({"x": round(ox+ow), "y": round(oy-h), "w": w, "h": h}, False),
                        ({"x": round(ox-w), "y": round(oy+oh), "w": w, "h": h}, False),
                        ({"x": round(ox+ow), "y": round(oy+oh), "w": w, "h": h}, False)))
+    # With screens of different sizes, a smaller screen's own edges sit inside the tile's box (the
+    # bottom of a shorter screen beside a taller one): snap to each screen's sides as well, flush
+    # outside it, where no other of this machine's screens is.
+    frames = _display_frames(own) if isinstance(own.get("displays"), dict) and len(own["displays"]) > 1 else []
+    inner = []
+    for frame in frames:
+        fx, fy, fw, fh = (frame[k] for k in ("x", "y", "w", "h"))
+        for side in EDGES:
+            if side in ("left", "right"):
+                cx = math.floor(fx - w + CONTACT_EPS) if side == "left" else math.ceil(fx + fw - CONTACT_EPS)
+                for cy, centred in ((fy+(fh-h)/2, False), (fy, False), (fy+fh-h, False)):
+                    inner.append(({"x": cx, "y": round(cy), "w": w, "h": h}, centred))
+            else:
+                cy = math.floor(fy - h + CONTACT_EPS) if side == "top" else math.ceil(fy + fh - CONTACT_EPS)
+                for cx, centred in ((fx+(fw-w)/2, False), (fx, False), (fx+fw-w, False)):
+                    inner.append(({"x": round(cx), "y": cy, "w": w, "h": h}, centred))
+    candidates.extend((candidate, centred) for candidate, centred in inner
+                      if not any(_overlaps(candidate, frame) for frame in frames)
+                      and (candidate, centred) not in candidates)
     free = [(candidate, centred) for candidate, centred in candidates
             if not any(k != own_id and _overlaps(candidate, other) for k, other in layout.items())]
     near = [(candidate, centred) for candidate, centred in free
