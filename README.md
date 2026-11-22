@@ -324,7 +324,7 @@ horizontal sign has flipped between releases.
 <details>
 <summary><strong>Clipboard</strong></summary>
 
-On Windows and Linux, turn off **Share clipboard** on the Overview page to stop text and images syncing to and from
+Turn off **Share clipboard** on the Overview page to stop text and images syncing to and from
 this machine while continuing to share its keyboard and mouse. The setting applies immediately
 and is saved on this machine. Clipboard sharing is on by default.
 

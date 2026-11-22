@@ -57,6 +57,7 @@ class WindowsInput:
             injector=input_injector_mac,
             desktop=desktop_mac,
             clipboard=clipboard_mac,
+            share_clipboard=controller.cfg.share_clipboard,
             unlock=no_unlock,
             hardware=hardware_mac.hardware_address_towards,
             # The machine this Mac's input is on, as bytes, so a `busy` refusal can name it.

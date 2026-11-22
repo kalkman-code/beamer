@@ -98,6 +98,9 @@ class FakeLink:
         self._posted.append(message)
         return True
 
+    def discard_clipboard(self):
+        pass
+
     def send_input(self, message):
         if not self._live or self.full:
             return False

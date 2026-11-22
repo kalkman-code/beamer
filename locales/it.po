@@ -1718,7 +1718,7 @@ msgstr "L'impostazione di questo schermo vale per ogni puntatore che vi si trova
 msgid "Hide the pointer on the machine not in use"
 msgstr "Nascondi il puntatore sul computer non in uso"
 
-#: win_app/kvm_bridge_win.py
+#: mac_app/kvm_bridge_app.py win_app/kvm_bridge_win.py
 msgid "Share clipboard"
 msgstr "Condividi gli appunti"
 
@@ -2319,11 +2319,7 @@ msgstr "Questa finestra"
 msgid "System follows your Mac's light or dark setting."
 msgstr "Sistema segue l'impostazione chiara o scura del Mac."
 
-#: mac_app/kvm_bridge_app.py
-msgid "Keep this machine's keyboard here. Pointer and clipboard sharing stay on."
-msgstr "Mantieni la tastiera su questo computer. Il puntatore e gli appunti restano condivisi."
-
-#: win_app/kvm_bridge_win.py
+#: mac_app/kvm_bridge_app.py win_app/kvm_bridge_win.py
 msgid "Keep this machine's keyboard here while sharing the pointer."
 msgstr "Mantieni la tastiera su questo computer mentre condividi il puntatore."
 
@@ -2339,7 +2335,7 @@ msgstr "Collegamento"
 msgid "This Mac's pointer always hides while it drives another machine. On, it also hides after another machine stops driving it, until its own mouse or trackpad moves."
 msgstr "Il puntatore di questo Mac si nasconde sempre mentre controlla un altro computer. Se attivo, si nasconde anche dopo che un altro computer smette di controllarlo, finché il suo mouse o trackpad non si muove."
 
-#: win_app/kvm_bridge_win.py
+#: mac_app/kvm_bridge_app.py win_app/kvm_bridge_win.py
 msgid "Sync text and images with this machine in both directions."
 msgstr "Sincronizza testo e immagini con questo computer in entrambe le direzioni."
 
