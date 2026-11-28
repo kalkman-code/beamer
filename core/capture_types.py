@@ -14,7 +14,22 @@ class TextInput:
         self.text = text
 
 
+# US International on Windows reports its acute and diaeresis dead keys as the plain apostrophe
+# and quotation mark, which have no combining form. Like Windows, they accent only the vowels and
+# y, ' then c is the cedilla, and anything else stays two characters.
+_PLAIN_DEAD_KEYS = {"'": "\u00b4", '"': "\u00a8"}
+_PLAIN_DEAD_KEY_SPECIALS = {("'", "c"): "\u00e7", ("'", "C"): "\u00c7"}
+_PLAIN_DEAD_KEY_TARGETS = "aeiouyAEIOUY"
+
+
 def compose_dead_key(dead_key, character):
+    special = _PLAIN_DEAD_KEY_SPECIALS.get((dead_key, character))
+    if special is not None:
+        return special
+    if dead_key in _PLAIN_DEAD_KEYS:
+        if character not in _PLAIN_DEAD_KEY_TARGETS:
+            return TextInput(dead_key + character)
+        dead_key = _PLAIN_DEAD_KEYS[dead_key]
     name = unicodedata.name(dead_key, "")
     if name.startswith("MODIFIER LETTER "):
         name = name[len("MODIFIER LETTER "):]
